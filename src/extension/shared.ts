@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 
 export interface Settings {
   enabled: boolean;
-  autoUpdate: boolean; checkForUpdates: boolean; updateManifestUrl: string;
+  autoUpdate: boolean; checkForUpdates: boolean;
 }
 
 export function readSettings(): Settings {
@@ -11,7 +11,6 @@ export function readSettings(): Settings {
     enabled: c.get<boolean>('enabled', false),
     autoUpdate: c.get<boolean>('autoUpdate', true),
     checkForUpdates: c.get<boolean>('checkForUpdates', true),
-    updateManifestUrl: c.get<string>('updateManifestUrl', ''),
   };
 }
 

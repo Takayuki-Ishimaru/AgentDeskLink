@@ -2,44 +2,43 @@
 
 **日本語** | [English](UPDATES_en.md)
 
-対象バージョン: `0.1.1`
+対象バージョン: `0.1.2`
 
-## 更新先の設定
+## 0.1.1 以前からの更新
 
-ユーザー設定の `agentdesklink.updateManifestUrl` に、自分の OS・CPU に対応する更新マニフェストの HTTPS URL を指定します。既定は空で、空のあいだは更新の通信を行いません。
+0.1.1 以前の版を利用している場合は、公式リリースページから自分の OS・CPU に合った `0.1.2` の VSIX と `SHA256SUMS` を取得し、ハッシュを確認して手動でインストールしてください。インストール後は VS Code のウィンドウを再読み込みします。0.1.2 以降では更新先 URL の設定は不要です。以前の `agentdesklink.updateManifestUrl` 設定は使用しません。
 
-| OS・CPU | マニフェスト名の例 |
+## 更新元（設定は不要）
+
+更新元は GitHub の公式リポジトリ [Takayuki-Ishimaru/AgentDeskLink](https://github.com/Takayuki-Ishimaru/AgentDeskLink/releases) に固定されています。URL を設定する必要はありません。拡張機能は GitHub の Releases API（`https://api.github.com/repos/Takayuki-Ishimaru/AgentDeskLink/releases?per_page=100`）を読み、直近 100 件のリリースから更新を探します。
+
+- 現在の版より新しい SemVer タグを持つ、公開済みのリリースが対象です。GitHub のプレリリース（ベータ版）も含まれます。ドラフトや版番号として解釈できないタグは使いません。
+- 自分の OS・CPU に対応する `agentdesklink-<OS>-<CPU>-<版>.vsix` を自動的に選びます。対応する配布ファイルがないリリースは無視し、他の OS・CPU 向けのパッケージをインストールすることはありません。
+- ダウンロードした VSIX の SHA-256 を、GitHub が配布ファイルに付けたダイジェストと必ず照合します。一致しない場合はインストールしません。
+
+| OS・CPU | 選択される配布ファイル名の例 |
 | --- | --- |
-| macOS / Apple silicon | `update-darwin-arm64.json` |
-| Windows x64 | `update-win32-x64.json` |
-
-異なる OS・CPU 用の更新先は使用しないでください。配布元から案内された URL を使います。
+| macOS / Apple silicon | `agentdesklink-darwin-arm64-0.1.2.vsix` |
+| Windows x64 | `agentdesklink-win32-x64-0.1.2.vsix` |
 
 ## 更新確認と停止
 
-- `agentdesklink.checkForUpdates`: オンの場合、起動後と定期的に更新を確認します。オフにすると自動・手動の確認を停止します。
+- `agentdesklink.checkForUpdates`: オンの場合、起動 5 秒後と 6 時間ごとに確認します。オフにすると自動・手動の確認を停止します。
 - `agentdesklink.autoUpdate`: オフの場合、新しい版の通知だけを行い、インストールしません。
 - 自動更新では、ダウンロードした VSIX の SHA-256 を確認してからインストールします。
 - 反映にはウィンドウの再読み込みが必要です。作業中のウィンドウを自動で再読み込みすることはありません。
-- 現在と同じ版や古い版には自動更新しません。
+- 現在と同じ版や古い版には自動更新しません。利用する OS・CPU に対応する版がまだ公開されていない場合は、その旨を表示し、ダウンロードもインストールも行いません。
 
 認証が必要な配布先からの自動取得には対応していません。自動更新が利用できない場合は、リリースページから対応する VSIX を取得して手動インストールしてください。
 
-## マニフェストの形式
+## リリースの形式
 
-更新情報は次の形式の JSON です。URL は例です。実際に案内された HTTPS の配布先に置き換えます。例の SHA-256 は書式を示すダミー値で、利用時は対応する VSIX の実際のハッシュが必要です。
+各リリースには、対象ごとに次の名前の VSIX を添付します。拡張機能はこの名前と GitHub が返す `sha256:` ダイジェスト、`https://github.com/Takayuki-Ishimaru/AgentDeskLink/releases/download/<タグ>/<配布ファイル名>` の正規 URL を使って配布ファイルを特定します。独自の更新情報ファイル（`update.json` など）は読みません。
 
-```json
-{
-  "version": "0.1.1",
-  "url": "https://downloads.example.com/AgentDeskLink/v0.1.1/agentdesklink-darwin-arm64-0.1.1.vsix",
-  "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
-}
+```text
+agentdesklink-darwin-arm64-0.1.2.vsix
+agentdesklink-win32-x64-0.1.2.vsix
 ```
-
-`version` は SemVer、`url` は認証情報・フラグメントを含まない HTTPS URL、`sha256` は16進64文字です。自分の環境に対応した VSIX を指定してください。
-
-ベータ用には配布元が案内する更新マニフェスト URL を使います。版番号を含む URL は自動的に次の版へ切り替わりません。
 
 ## ダウンロードした VSIX の確認
 
@@ -48,13 +47,13 @@
 macOS:
 
 ```sh
-shasum -a 256 agentdesklink-darwin-arm64-0.1.1.vsix
+shasum -a 256 agentdesklink-darwin-arm64-0.1.2.vsix
 ```
 
 Windows PowerShell:
 
 ```powershell
-Get-FileHash -Algorithm SHA256 .\agentdesklink-win32-x64-0.1.1.vsix | Format-List Hash
+Get-FileHash -Algorithm SHA256 .\agentdesklink-win32-x64-0.1.2.vsix | Format-List Hash
 ```
 
-一覧と一致しない場合は、そのファイルをインストールせず、配布元から取得し直してください。
+一覧と一致しない場合は、そのファイルをインストールせず、公式リポジトリのリリースページから取得し直してください。

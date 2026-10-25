@@ -2,6 +2,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 mkdir -p build/ADLFixture.app/Contents/MacOS
+swiftc -swift-version 5 -target arm64-apple-macos14.0 -typecheck -strict-concurrency=complete -warnings-as-errors src/Contract.swift src/Capture.swift src/Interactive.swift src/Lifecycle.swift src/main.swift
 swiftc -swift-version 5 -target arm64-apple-macos14.0 -O src/Contract.swift src/Capture.swift src/Interactive.swift src/Lifecycle.swift src/main.swift -o build/adl-macos-ax-helper
 swiftc -swift-version 5 -target arm64-apple-macos14.0 -O fixture/main.swift -o build/ADLFixture.app/Contents/MacOS/ADLFixture
 cat > build/ADLFixture.app/Contents/Info.plist <<'PLIST'

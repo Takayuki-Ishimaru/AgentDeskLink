@@ -21,6 +21,38 @@ test("launch cannot adopt a pre-existing or older process"){
     try require(!owner.created(after:100.3,excluding:[]))
     try require(!ManagedApplicationIdentity(pid:123,started:"bad").created(after:0,excluding:[]))
 }
+test("launch completion publishes success only after cross-thread ownership is available"){
+    let ownership=ManagedApplicationOwnership(),completion=ApplicationLaunchCompletion()
+    try require(completion.result()==nil && ownership.identity==nil)
+    let app=NSRunningApplication.current
+    DispatchQueue.global().async {
+        ownership.identity=ManagedApplicationIdentity(pid:app.processIdentifier,started:"100:250000")
+        completion.finish(app,nil)
+    }
+    let deadline=ProcessInfo.processInfo.systemUptime+2
+    while completion.result()==nil && ProcessInfo.processInfo.systemUptime<deadline {Thread.sleep(forTimeInterval:0.001)}
+    guard case .success(let launched)?=completion.result() else{throw fail("MISSING_COMPLETION")}
+    try require(ownership.identity?.matches(launched.processIdentifier,"100:250000")==true)
+    completion.finish(nil,fail("LATE_ERROR"))
+    guard case .success?=completion.result() else{throw fail("COMPLETION_CHANGED")}
+}
+test("launch errors and missing applications complete without a partial success"){
+    for error in [nil,fail("LAUNCH_FAILED")] as [Failure?] {
+        let completion=ApplicationLaunchCompletion()
+        DispatchQueue.concurrentPerform(iterations:100) {_ in completion.finish(nil,error)}
+        guard case .failure(let failure)?=completion.result() else{throw fail("EXPECTED_FAILURE")}
+        try require((failure as? Failure)?.code == (error?.code ?? "E_BACKEND_UNAVAILABLE"))
+    }
+}
+test("concurrent ownership updates never expose a torn process identity"){
+    let ownership=ManagedApplicationOwnership()
+    DispatchQueue.concurrentPerform(iterations:1000) {index in
+        ownership.identity=ManagedApplicationIdentity(pid:pid_t(index),started:String(index))
+        if let identity=ownership.identity,identity.started != String(identity.pid) {fatalError("Torn ownership")}
+    }
+    try require(ownership.identity != nil)
+    ownership.identity=nil;try require(ownership.identity==nil)
+}
 test("lifecycle absent opt-in denies every operation"){
     let app=NativeApplicationLifecycle("local.adl.never","/bin/sh",false)
     for action in ["status","launch","quit"]{try denied("E_POLICY_DENIED"){_ = try app.request(action)}}

@@ -89,7 +89,10 @@ export async function fetchBounded(url, { fetchImpl, signal, timeoutMs = 120_000
   try {
     const work = async () => {
       response = await (fetchImpl ?? fetch)(url, { signal: controller.signal, redirect: 'follow' });
-      controller.signal.throwIfAborted();
+      if (controller.signal.aborted) {
+        void response.body?.cancel().catch(() => {});
+        controller.signal.throwIfAborted();
+      }
       if (!response.ok) throw new Error(`download failed HTTP ${response.status}: ${url}`);
       return consume(response);
     };
@@ -97,6 +100,8 @@ export async function fetchBounded(url, { fetchImpl, signal, timeoutMs = 120_000
   } finally {
     clearTimeout(timer);
     signal?.removeEventListener('abort', onAbort);
+    controller.abort();
+    void response?.body?.cancel().catch(() => {});
   }
 }
 

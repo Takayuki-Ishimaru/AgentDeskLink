@@ -105,7 +105,7 @@ async function harness(platform:'darwin'|'win32',scenario='ok',visual:DesktopVis
 }
 const isSafe=(code:string)=>(error:unknown)=>error instanceof AdlError&&error.code===code;
 const physicalFailure=(error:unknown)=>error instanceof AdlError&&error.code==='E_BACKEND_UNAVAILABLE'&&error.mayHaveExecuted;
-async function interactiveSession(h:Harness,platform:'darwin'|'win32',id='t_phys'):Promise<{session:AdapterSession;targets:Target[]}>{
+async function interactiveSession(h:Harness,_platform:'darwin'|'win32',id='t_phys'):Promise<{session:AdapterSession;targets:Target[]}>{
   const targets=await h.adapter.discover(sig());
   const target=targets.find(t=>t.target_id===id)!;
   return {session:await h.adapter.open(target,'interactive_desktop',sig()),targets};

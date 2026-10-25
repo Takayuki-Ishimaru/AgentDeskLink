@@ -13,12 +13,38 @@ struct ManagedApplicationIdentity {
     }
 }
 
+// NSWorkspace invokes launch completions on a concurrent queue. Both ownership
+// and each launch result must be published under a lock before the waiter reads them.
+final class ManagedApplicationOwnership: @unchecked Sendable {
+    private let lock=NSLock()
+    private var stored:ManagedApplicationIdentity?
+    var identity:ManagedApplicationIdentity? {
+        get {lock.lock();defer{lock.unlock()};return stored}
+        set {lock.lock();defer{lock.unlock()};stored=newValue}
+    }
+}
+final class ApplicationLaunchCompletion: @unchecked Sendable {
+    private let lock=NSLock()
+    private var stored:Result<NSRunningApplication,Error>?
+    func finish(_ app:NSRunningApplication?,_ error:Error?) {
+        lock.lock();defer{lock.unlock()}
+        guard stored==nil else{return}
+        if let app,error==nil {stored = .success(app)}
+        else {stored = .failure(error ?? fail("E_BACKEND_UNAVAILABLE"))}
+    }
+    func result()->Result<NSRunningApplication,Error>? {lock.lock();defer{lock.unlock()};return stored}
+}
+
 // Fixed launch policy. No caller-supplied commands, arguments, documents or URLs.
 final class NativeApplicationLifecycle {
     let appID:String
     let appPath:String
     let enabled:Bool
-    private var managed:ManagedApplicationIdentity?
+    private let ownership=ManagedApplicationOwnership()
+    private var managed:ManagedApplicationIdentity? {
+        get {ownership.identity}
+        set {ownership.identity=newValue}
+    }
     init(_ appID:String,_ appPath:String,_ enabled:Bool){self.appID=appID;self.appPath=appPath;self.enabled=enabled}
     private func approved(_ app:NSRunningApplication)->Bool {
         !app.isTerminated && app.bundleIdentifier==appID && app.executableURL?.resolvingSymlinksInPath().path==appPath && processStart(app.processIdentifier) != nil
@@ -77,14 +103,14 @@ final class NativeApplicationLifecycle {
             let url=try bundleURL(),config=Self.backgroundConfiguration()
             let prior=Set(NSWorkspace.shared.runningApplications.map{$0.processIdentifier})
             let earliest=Date().timeIntervalSince1970
-            var done=false,launched:NSRunningApplication?,launchError:Error?
+            let completion=ApplicationLaunchCompletion(),ownership=self.ownership
             try InputCancellation.shared.check();try check()
             NSWorkspace.shared.openApplication(at:url,configuration:config){app,error in
-                launched=app;launchError=error;done=true
                 if let app,let started=processStart(app.processIdentifier) {
                     let identity=ManagedApplicationIdentity(pid:app.processIdentifier,started:started)
-                    if identity.created(after:earliest,excluding:prior){self.managed=identity}
+                    if identity.created(after:earliest,excluding:prior){ownership.identity=identity}
                 }
+                completion.finish(app,error)
             }
             let deadline=ProcessInfo.processInfo.systemUptime+3.5
             do {
@@ -92,12 +118,12 @@ final class NativeApplicationLifecycle {
                 // initial isFinishedLaunching=false (seen with Calculator).
                 // Completion plus exact live process identity proves launch;
                 // window discovery is a separate operation and may be empty.
-                while !done {
+                while completion.result()==nil {
                     try InputCancellation.shared.check()
                     guard ProcessInfo.processInfo.systemUptime<deadline else{throw fail("E_TIMEOUT",true)}
                     RunLoop.current.run(until:Date().addingTimeInterval(0.01))
                 }
-                guard launchError==nil,let app=launched else {throw fail("E_BACKEND_UNAVAILABLE",true)}
+                guard case .success(let app)?=completion.result() else {throw fail("E_BACKEND_UNAVAILABLE",true)}
                 while owned()==nil {
                     try InputCancellation.shared.check()
                     guard !app.isTerminated,ProcessInfo.processInfo.systemUptime<deadline else{throw fail("E_TIMEOUT",true)}

@@ -49,7 +49,7 @@ export class Engine {
   capabilities() {
     const probe=(this.adapters.desktop as {desktopCapabilities?:()=>{available:boolean;mutations:boolean;focus_control?:string;interactive_input?:boolean;gesture_backends?:string[];lifecycle?:boolean}}|undefined)?.desktopCapabilities?.();
     const interactive=this.desktopConfig()?.interactive?.enabled===true;
-    return {ok:true,permissions:{all_operations:this.policy.allowAllOperations===true},version:'0.1.1',transport:'stdio',modes:['strict_isolated',...(this.adapters.desktop?['background_semantic',...(interactive?['interactive_desktop']:[])]:[])],
+    return {ok:true,permissions:{all_operations:this.policy.allowAllOperations===true},version:'0.1.2',transport:'stdio',modes:['strict_isolated',...(this.adapters.desktop?['background_semantic',...(interactive?['interactive_desktop']:[])]:[])],
       adapters:{browser:'chromium_headless',desktop:this.adapters.desktop?(probe?.focus_control==='probe_guarded_semantic'?'macos_ax_probe_required':'windows_uia_probe_required'):'unavailable',...(probe?{desktop_mutations:probe.mutations}:{})},
       lifecycle:{configured:this.policy.macos?.lifecycle?.enabled===true||this.policy.windows?.lifecycle?.enabled===true,available:probe?.lifecycle===true&&this.lifecyclePlatformSupported(),platform_supported:this.lifecyclePlatformSupported(),mode:'background_semantic'},
       limits:{max_sessions:this.policy.maxSessions,max_batch_steps:this.policy.maxBatchSteps,max_elements:this.policy.maxElements},

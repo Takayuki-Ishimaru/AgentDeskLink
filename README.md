@@ -12,7 +12,7 @@ AgentDeskLink は、AI エージェントとローカルのブラウザ・デス
 
 [はじめる](release-docs/INSTALL.md) · [できること](#できること) · [対応環境](#対応環境) · [リリースガイド](release-docs/README.md) · [MIT License](LICENSE)
 
-> **0.1.1 / ベータ版**  
+> **0.1.2 / ベータ版**  
 > 利用範囲を限定して提供しています。導入前に[対応環境と既知の制限](release-docs/KNOWN_ISSUES.md)を確認してください。
 
 ## できること

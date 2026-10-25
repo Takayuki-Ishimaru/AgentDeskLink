@@ -2,7 +2,7 @@
   "name": "agentdesklink",
   "displayName": "AgentDeskLink",
   "description": "Local-first semantic browser and desktop control over MCP, with a per-workspace AgentDeskLink sidebar for VS Code.",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "publisher": "agentdesklink",
   "license": "MIT",
   "private": true,
@@ -97,19 +97,13 @@
           "type": "boolean",
           "default": true,
           "scope": "application",
-          "description": "新しいバージョンを自動的にダウンロードしてインストールする / Automatically download and install new versions (requires an update manifest URL)."
+          "description": "新しいバージョンを自動的にダウンロードしてインストールする（更新元は GitHub の公式リリースに固定）/ Automatically download and install new versions from the fixed GitHub release source."
         },
         "agentdesklink.checkForUpdates": {
           "type": "boolean",
           "default": true,
           "scope": "application",
           "description": "バックグラウンドで更新を確認する（起動 5 秒後と 6 時間ごと）/ Allow background update checks (5s after start, then every 6 hours). Manual checks are also blocked when off."
-        },
-        "agentdesklink.updateManifestUrl": {
-          "type": "string",
-          "default": "",
-          "scope": "application",
-          "description": "更新マニフェスト JSON の HTTPS URL（空 = 更新先未設定・ネットワーク不使用）/ HTTPS URL of the update manifest JSON (empty = no source configured, no network use)."
         }
       }
     },

@@ -39,7 +39,6 @@ jobs:
       - run: npm run test:extension
       - run: npm run test:package
       # Chromium requires a runner that supports its OS sandbox.
-      # The shared Ubuntu worker used for initial QA could not launch it.
       - run: npm run package:vsix
   vsix-distribution:
     strategy:

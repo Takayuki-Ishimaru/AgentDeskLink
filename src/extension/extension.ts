@@ -129,7 +129,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
   context.subscriptions.push(vscode.workspace.onDidChangeConfiguration((e) => {
     if (!e.affectsConfiguration('agentdesklink')) return;
-    if (['autoUpdate', 'checkForUpdates', 'updateManifestUrl'].some(k => e.affectsConfiguration(`agentdesklink.${k}`))) updater.cancel();
+    if (['autoUpdate', 'checkForUpdates'].some(k => e.affectsConfiguration(`agentdesklink.${k}`))) updater.cancel();
     if (['enabled'].some(k => e.affectsConfiguration(`agentdesklink.${k}`))) {
       provider.refresh();
     }

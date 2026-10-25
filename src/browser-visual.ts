@@ -29,7 +29,7 @@ function assertActive(signal: AbortSignal): void {
 }
 
 /** Races an untrusted page call so an abort never yields a result, and never lets a page error escape. */
-async function guarded<T>(page: Page, work: () => Promise<T>, signal: AbortSignal): Promise<T> {
+async function guarded<T>(work: () => Promise<T>, signal: AbortSignal): Promise<T> {
   assertActive(signal);
   let onAbort!: () => void;
   const aborted = new Promise<never>((_, reject) => {
@@ -100,7 +100,7 @@ export async function captureBrowserImage(
   const selectors = maskSelectors(visual);
   assertOrigin(page, origin);
 
-  const before = validateGeometry(await guarded(page, () => page.evaluate(GEOMETRY_EXPRESSION), signal));
+  const before = validateGeometry(await guarded(() => page.evaluate(GEOMETRY_EXPRESSION), signal));
   assertOrigin(page, origin);
   assertActive(signal);
 
@@ -111,7 +111,7 @@ export async function captureBrowserImage(
     throw new AdlError('E_PRIVACY_BLOCKED');
   }
 
-  const png = await guarded(page, () => page.screenshot({
+  const png = await guarded(() => page.screenshot({
     type: 'png',
     scale: 'css',
     fullPage: false,
@@ -124,7 +124,7 @@ export async function captureBrowserImage(
   assertActive(signal);
 
   assertOrigin(page, origin);
-  const after = validateGeometry(await guarded(page, () => page.evaluate(GEOMETRY_EXPRESSION), signal));
+  const after = validateGeometry(await guarded(() => page.evaluate(GEOMETRY_EXPRESSION), signal));
   // Final page read is done: the last origin check must follow it, with no page call in between.
   assertOrigin(page, origin);
   if (!sameGeometry(before, after)) throw new AdlError('E_STALE_STATE');

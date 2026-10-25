@@ -90,7 +90,7 @@ function fakeDesktop(appId:string){
   const adapter={discover:async()=>alive?targets.map(t=>({...t})):[],
     open:async()=>{opened++;return {snapshot:async()=>({fingerprint:'d'+opened,elements:[{id:'e1',role:'button',name:'Desktop window',enabled:true}],truncated:false}),act:async()=>{},close:async()=>{closed++;}};},
     close:async()=>{},
-    application:async(id:string,action:'status'|'launch'|'quit')=>{lifecycle.push(action);if(action==='quit'){alive=false;return {running:false,managed:false,changed:true};}const was=alive;alive=true;return {running:true,managed:true,changed:!was};},
+    application:async(_id:string,action:'status'|'launch'|'quit')=>{lifecycle.push(action);if(action==='quit'){alive=false;return {running:false,managed:false,changed:true};}const was=alive;alive=true;return {running:true,managed:true,changed:!was};},
     desktopCapabilities:()=>({available:true,mutations:true,lifecycle:true})} as unknown as Adapter;
   return {adapter,openedCount:()=>opened,closedCount:()=>closed,lifecycle};
 }

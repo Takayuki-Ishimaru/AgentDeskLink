@@ -1,7 +1,6 @@
 import * as vscode from 'vscode';
 import * as crypto from 'node:crypto';
 import { readSettings, log } from './shared.js';
-import { isHttpsUrl } from './update-download.js';
 
 export interface PanelHooks {
   checkForUpdates(): Promise<void>;
@@ -17,7 +16,7 @@ export interface PanelHooks {
   refreshMcp(): Promise<void>;
 }
 
-const KEYS = ['enabled', 'autoUpdate', 'checkForUpdates', 'updateManifestUrl'] as const;
+const KEYS = ['enabled', 'autoUpdate', 'checkForUpdates'] as const;
 
 export class SettingsPanelProvider implements vscode.WebviewViewProvider {
   private view?: vscode.WebviewView;
@@ -74,12 +73,7 @@ export class SettingsPanelProvider implements vscode.WebviewViewProvider {
   <p class="status" id="update-status" role="status"></p>
   <div class="actions"><button id="check-now" class="secondary">今すぐ確認</button></div>
 </section>
-<details class="section options-section"><summary>更新先</summary>
-  <label class="field-label" for="manifest-url">更新先 URL</label>
-  <input type="text" id="manifest-url" spellcheck="false" placeholder="https://…/update.json">
-  <p class="hint">公開後に更新情報の HTTPS URL を指定します。未設定の間は通信しません。</p>
-  <div class="actions"><button id="manifest-save">保存</button></div>
-</details>
+<p class="hint">更新元は GitHub の公式リポジトリ（<span id="update-source">Takayuki-Ishimaru/AgentDeskLink</span>）に固定されています。設定は不要です。</p>
 <section class="section support">
   <div class="actions"><button id="open-logs" class="secondary">ログを開く</button><button id="open-settings" class="secondary">VS Code 設定</button></div>
   <p class="error" id="global-error" role="alert"></p>
@@ -106,9 +100,6 @@ export class SettingsPanelProvider implements vscode.WebviewViewProvider {
         if (typeof m.enabled === 'boolean') return this.save(key, m.enabled, vscode.ConfigurationTarget.Global, 'globalError');
         return Promise.resolve();
       }
-      case 'setUpdateManifestUrl':
-        if (typeof m.value === 'string') return this.save('updateManifestUrl', m.value, vscode.ConfigurationTarget.Global, 'globalError');
-        return Promise.resolve();
       case 'emergencyStop': return this.runGuarded('stop', () => this.hooks.emergencyStop());
       case 'resumeOperations': return this.runGuarded('resume', () => this.hooks.resumeOperations());
       case 'checkForUpdates': return this.checkForUpdates();
@@ -119,13 +110,13 @@ export class SettingsPanelProvider implements vscode.WebviewViewProvider {
     }
   }
 
-  private save(key: typeof KEYS[number], value: boolean | string, target: vscode.ConfigurationTarget, errorKey: 'enabledError' | 'globalError'): Promise<void> {
+  private save(key: typeof KEYS[number], value: boolean, target: vscode.ConfigurationTarget, errorKey: 'enabledError' | 'globalError'): Promise<void> {
     const saved = this.saves.then(() => this.performSave(key, value, target, errorKey));
     this.saves = saved.catch(() => {});
     return saved;
   }
 
-  private async performSave(key: typeof KEYS[number], value: boolean | string, target: vscode.ConfigurationTarget, errorKey: 'enabledError' | 'globalError'): Promise<void> {
+  private async performSave(key: typeof KEYS[number], value: boolean, target: vscode.ConfigurationTarget, errorKey: 'enabledError' | 'globalError'): Promise<void> {
     this.errors[errorKey] = undefined;
     const workspaceScoped = target === vscode.ConfigurationTarget.Workspace;
     if (workspaceScoped && (!vscode.workspace.isTrusted || !vscode.workspace.workspaceFolders || vscode.workspace.workspaceFolders.length === 0)) {
@@ -134,11 +125,6 @@ export class SettingsPanelProvider implements vscode.WebviewViewProvider {
       return;
     }
     try {
-      if (typeof value === 'string') {
-        value = value.trim();
-        if (value.length > 4096 || /[\0\r\n]/.test(value)) throw new Error('入力内容を確認してください。');
-        if (key === 'updateManifestUrl' && value && !isHttpsUrl(value)) throw new Error('更新先は認証情報を含まない HTTPS URL を指定してください。');
-      }
       const busyKey = this.busyKey(key);
       this.busy.add(busyKey);
       await this.postState();
@@ -155,7 +141,7 @@ export class SettingsPanelProvider implements vscode.WebviewViewProvider {
   }
 
   private busyKey(key: typeof KEYS[number]): string {
-    return ({ enabled: 'enabled', autoUpdate: 'auto', checkForUpdates: 'check', updateManifestUrl: 'manifest' })[key];
+    return ({ enabled: 'enabled', autoUpdate: 'auto', checkForUpdates: 'check' })[key];
   }
 
   // Stop/resume bypass the saves queue and workspace-trust checks; the thunk
@@ -204,12 +190,11 @@ export class SettingsPanelProvider implements vscode.WebviewViewProvider {
         enabled: settings.enabled,
         autoUpdate: settings.autoUpdate,
         checkForUpdates: settings.checkForUpdates,
-        updateManifestUrl: settings.updateManifestUrl,
       },
       stopped: this.hooks.operationsStopped(),
       trusted: vscode.workspace.isTrusted,
       hasFolder,
-      busy: Object.fromEntries(['enabled', 'auto', 'check', 'manifest', 'checkNow', 'stop', 'resume'].map(k => [k, this.busy.has(k)])),
+      busy: Object.fromEntries(['enabled', 'auto', 'check', 'checkNow', 'stop', 'resume'].map(k => [k, this.busy.has(k)])),
       status: {
         version: this.hooks.version(),
         mcp: this.hooks.mcpStatus(),

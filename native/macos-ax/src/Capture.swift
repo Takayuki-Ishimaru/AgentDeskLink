@@ -34,7 +34,7 @@ func captureDimensions(_ frame: CGRect, _ scale: CGFloat) throws -> (width: Int,
 }
 
 // A timeout cannot publish a late completion. No nested request is dispatched while the reader waits.
-private final class CaptureCompletion<T> {
+private final class CaptureCompletion<T>: @unchecked Sendable {
     private let lock = NSLock()
     private var result: Result<T, Error>?
     private var expired = false
@@ -42,7 +42,7 @@ private final class CaptureCompletion<T> {
     func take() -> Result<T, Error>? { lock.lock(); defer { lock.unlock() }; return result }
     func expire() { lock.lock(); expired = true; result = nil; lock.unlock() }
 }
-func waitForCapture<T>(_ timeout: TimeInterval = 1.5, _ start: (@escaping (Result<T, Error>) -> Void) -> Void) throws -> T {
+func waitForCapture<T>(_ timeout: TimeInterval = 1.5, _ start: (@escaping @Sendable (Result<T, Error>) -> Void) -> Void) throws -> T {
     let completion = CaptureCompletion<T>()
     start { completion.finish($0) }
     let deadline = Date().addingTimeInterval(timeout)

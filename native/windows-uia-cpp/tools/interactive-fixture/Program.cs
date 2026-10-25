@@ -4,7 +4,7 @@ using System.Windows.Forms;
 namespace AgentDeskLink.InteractiveFixture;
 sealed class FixtureTextBox : TextBox {public bool SuppressSelect;protected override bool ProcessCmdKey(ref Message message,Keys keys){if(SuppressSelect&&keys==(Keys.Control|Keys.A))return true;return base.ProcessCmdKey(ref message,keys);}}
 sealed class GestureCanvas : Control {
- public int Drags,Wheel;public bool Down;public Point Box=new(30,40);Point previous;
+ public int Drags,Wheel;public bool Down;public Point Box{get;private set;}=new(30,40);Point previous;
  public GestureCanvas(){Name="FixtureCanvas";AccessibleName="Gesture canvas";AccessibleRole=AccessibleRole.Pane;SetStyle(ControlStyles.Selectable|ControlStyles.UserPaint|ControlStyles.AllPaintingInWmPaint|ControlStyles.OptimizedDoubleBuffer,true);TabStop=true;BackColor=Color.White;}
  protected override void OnPaint(PaintEventArgs e){e.Graphics.Clear(Color.White);using var brush=new SolidBrush(Color.RoyalBlue);e.Graphics.FillRectangle(brush,Box.X,Box.Y,80,60);e.Graphics.DrawString($"Drags {Drags}; Wheel {Wheel}",Font,Brushes.Black,8,8);}
  protected override void OnMouseDown(MouseEventArgs e){if(e.Button==MouseButtons.Left){Focus();Down=true;Capture=true;previous=e.Location;}base.OnMouseDown(e);}

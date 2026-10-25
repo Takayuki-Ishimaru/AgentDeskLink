@@ -8,7 +8,7 @@ import {setTimeout as delay} from 'node:timers/promises';
 import {NativeDesktopAdapter} from '../src/desktop.js';
 import {Engine} from '../src/core.js';
 import {parsePolicy} from '../src/policy.js';
-import {safeError,AdlError,type Adapter,type AdapterSession,type Action,type DesktopConfig,type RawSnapshot,type Target} from '../src/types.js';
+import {safeError,AdlError,type Adapter,type DesktopConfig,type Target} from '../src/types.js';
 
 const HELPER=`#!/usr/bin/env node
 import{createInterface}from'node:readline';
