@@ -138,9 +138,12 @@ test('npm pack payload keeps runtime/dist/docs/config/media and excludes interna
     assert.ok(paths.has(included), `expected ${included} in payload`);
   }
 
-  // Executable/runtime metadata must survive packing with exec bits intact.
-  for (const exec of ['runtime/node', 'runtime/helper/adl-windows-uia-helper.exe']) {
-    assert.ok(modeOf[exec] & 0o111, `expected executable mode for ${exec}, got ${modeOf[exec]?.toString(8)}`);
+  // Windows does not use POSIX executable bits; its packaged files are checked above.
+  // Unix bundles must retain their executable permissions.
+  if (process.platform !== 'win32') {
+    for (const exec of ['runtime/node', 'runtime/helper/adl-windows-uia-helper.exe']) {
+      assert.ok(modeOf[exec] & 0o111, `expected executable mode for ${exec}, got ${modeOf[exec]?.toString(8)}`);
+    }
   }
 
   for (const excluded of [
