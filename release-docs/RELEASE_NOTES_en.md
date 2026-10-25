@@ -1,15 +1,16 @@
-# AgentDeskLink 0.1.1 (beta)
+# AgentDeskLink 0.1.2 (beta)
 
 [日本語](RELEASE_NOTES_ja.md) | **English**
 
 This beta lets AI agents operate the local browser and desktop over MCP. Read the [supported environments and known limitations](KNOWN_ISSUES_en.md) before use.
 
-## Main changes
+## Changes since 0.1.1
 
-- In VS Code, trust the workspace and enable MCP to start. No policy JSON or Node.js path is required.
-- The settings panel and Command Palette provide emergency stop and resume. The stop state is shared across extension-managed workspaces and persists after restart.
-- Each VSIX bundles the matching Node.js and, on macOS and Windows, a desktop helper. Chrome uses a dedicated profile; if unavailable, a dedicated Chromium is downloaded automatically.
-- Updated the Japanese and English guides for setup, operation scope, stopping and updates.
+- Updates now use the official GitHub repository. No update URL is required, and the URL field has been removed from the settings panel.
+- Updates select the VSIX for your operating system and CPU, then verify it against the SHA-256 digest attached to the GitHub asset before installation. Versions without a matching asset are skipped.
+- Browser preparation can be retried on the next launch immediately after a previous attempt was cancelled.
+- Improved shared state handling during concurrent macOS application launch and request processing.
+- Updated the Japanese and English installation and update guides to match the current settings.
 
 ## Features
 
@@ -21,7 +22,9 @@ This beta lets AI agents operate the local browser and desktop over MCP. Read th
 
 ## Installation and updates
 
-Use VS Code 1.101 or newer and select “Extensions: Install from VSIX...” to install the package for your operating system and CPU. No separate Node.js installation or build is needed. To replace an earlier beta, install the matching `0.1.1` VSIX and reload the window.
+Use VS Code 1.101 or newer and select “Extensions: Install from VSIX...” to install the package for your operating system and CPU. No separate Node.js installation or build is needed. To replace an earlier beta, install the matching `0.1.2` VSIX and reload the window.
+
+To upgrade from 0.1.1 or earlier, download the matching VSIX from the release page and install it manually. Version 0.1.2 checks the official GitHub releases for subsequent updates.
 
 See the [installation guide](INSTALL_en.md) and [update guide](UPDATES_en.md).
 

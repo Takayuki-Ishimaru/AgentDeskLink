@@ -42,7 +42,7 @@ Backend MakeBackend(Fake& f) {
  return b;
 }
 // Opt-in lifecycle callback: only present when the launch flag enabled it.
-void EnableLifecycle(Fake& f, Backend& b) {
+void EnableLifecycle(Fake&, Backend& b) {
   b.application = [](void* ctx, const std::string& action, ApplicationResult& out) -> Status {
     Fake& f = *static_cast<Fake*>(ctx);
     ++f.n_application;
@@ -496,7 +496,7 @@ std::vector<std::string> Ids(const std::string& resp) {
   if (j.value("ok", false)) for (const json& t : j.at("result").at("targets")) ids.push_back(t.at("target_id").get<std::string>());
   return ids;
 }
-std::string OpenOn(Broker& br, Fake& f, const Backend& b, const ControlsTable& c,
+std::string OpenOn(Broker& br, Fake&, const Backend& b, const ControlsTable& c,
                    const std::string& tid, bool& sd) {
   return Sid(HandleRequest(json{{"op", "open"}, {"request_id", "ro"}, {"mode", "background_semantic"},
                                 {"target_id", tid}}.dump(), br, b, c, sd));

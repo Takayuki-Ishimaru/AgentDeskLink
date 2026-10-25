@@ -76,6 +76,7 @@ async function cached(cache:string,version:string,target:string,storage:string):
     const actual=await executable(file,true);
     if(actual)return {executablePath:actual,browsersPath:cache,source:'chromium'};
   }catch{ /* An incomplete cache is repaired under the install lock. */ }
+  return undefined;
 }
 async function exists(file:string):Promise<boolean>{try{await fs.lstat(file);return true;}catch(error){if((error as NodeJS.ErrnoException).code==='ENOENT')return false;throw error;}}
 async function lock(file:string,signal:AbortSignal,timeoutMs:number):Promise<()=>Promise<void>>{
@@ -146,7 +147,10 @@ export function prepareBrowser(options:BrowserOptions):Promise<BrowserRuntime>{
   if(options.signal?.aborted)return Promise.reject(options.signal.reason??new Error('Browser setup cancelled'));
   const key=JSON.stringify([options.extensionRoot,options.nodePath,options.storageDir,options.playwrightVersion,options.platform??process.platform,options.arch??process.arch,options.probePaths??null,options.env??null]);
   let entry=flights.get(key);
-  if(!entry){
+  // A flight whose controller was aborted by its last leaving subscriber is dead: never hand it
+  // to a fresh caller, which would inherit a cancellation it never asked for. The outgoing
+  // flight still owns the install lock until it settles, so the replacement serializes behind it.
+  if(!entry||entry.controller.signal.aborted){
     const controller=new AbortController();
     entry={controller,users:0,promise:undefined!};
     const owned=entry;

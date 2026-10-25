@@ -50,10 +50,6 @@ function deny(code: 'E_INVALID_ARGUMENT' | 'E_STALE_STATE' | 'E_TARGET_NOT_FOUND
   throw new AdlError(code);
 }
 
-function estimateTokens(value: unknown): number {
-  return Math.ceil(Buffer.byteLength(JSON.stringify(value) ?? '', 'utf8') / 4);
-}
-
 function normalizeInclude(include?: string[]): Field[] | null {
   if (include === undefined) return null;
   if (!Array.isArray(include)) deny('E_INVALID_ARGUMENT');

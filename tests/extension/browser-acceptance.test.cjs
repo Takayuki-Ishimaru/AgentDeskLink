@@ -94,3 +94,31 @@ test('lock contention is bounded and real installer subprocess timeout releases 
   assert.equal(await fs.readFile(lock,'utf8'),'another owner');assert.equal(f.calls.length,0);
   await assert.rejects(runBrowserCommand([process.execPath,'-e','setInterval(()=>{},1000)'],{cwd:f.root,env:process.env,timeoutMs:40}),/timed out/);
 });
+test('a retry started while the last cancelling user is still settling gets a fresh installer',async t=>{
+  const {prepareBrowser}=await load();const f=await fixture(t),controller=new AbortController();
+  let entered,started=new Promise(yes=>entered=yes),release,aborted=new Promise(yes=>release=yes),installs=0;
+  const runCommand=async(args,opts)=>{
+    if(args.includes('install')){
+      installs++;
+      if(installs===1){
+        entered();
+        await new Promise(yes=>opts.signal.addEventListener('abort',yes,{once:true}));
+        release();
+        throw new Error('cancelled');
+      }
+    }
+    return f.options.runCommand(args,opts);
+  };
+  const first=prepareBrowser({...f.options,signal:controller.signal,runCommand});
+  await started;
+  controller.abort();
+  await aborted;
+  const retry=prepareBrowser({...f.options,runCommand});
+  await assert.rejects(first);
+  const result=await retry;
+  assert.equal(result.source,'chromium');
+  assert.equal(installs,2,'the dead flight is replaced by a real install');
+  const names=await fs.readdir(path.join(f.options.storageDir,'browsers'));
+  assert.ok(!names.some(name=>name.includes('staging')),'no staging left behind');
+  assert.ok(!names.some(name=>name.endsWith('.lock')),'the install lock is released');
+});

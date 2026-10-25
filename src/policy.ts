@@ -2,7 +2,7 @@ import { lookup } from 'node:dns/promises';
 import ipaddr from 'ipaddr.js';
 import {isIP} from 'node:net';
 import { z } from 'zod';
-import { AdlError, type Action, type ActionName, type Classification, type Element, type PolicyConfig } from './types.js';
+import { AdlError, type Action, type ActionName, type Element, type PolicyConfig } from './types.js';
 
 const MAX_BATCH_STEPS = 20;
 const MAX_TEXT = 512;
@@ -179,10 +179,6 @@ export async function assertUrlAllowed(url: string, policy: PolicyConfig, resolv
 const SECRET_LABEL = /(?:password|passwd|pwd|passcode|secret|token|api[_ -]?key|access[_ -]?key|private[_ -]?key|key|credential|authorization|auth|bearer|otp|cvv|session|cookie|pin)/i;
 const NAME_IS_SECRET = /^(?:password|passwd|pwd|passcode|secret|token|apikey|api_key|access_token|refresh_token|authorization|auth|bearer|otp|cvv|session|sessionid|session_id|cookie|pin)$/i;
 const SAFE_ROLES=new Set(['alert','button','checkbox','combobox','dialog','generic','heading','img','link','list','listbox','listitem','menu','menuitem','option','progressbar','radio','region','searchbox','slider','spinbutton','status','switch','tab','table','tabpanel','text','textbox','toolbar','tree','treeitem','window']);
-
-function mask(value: string): string {
-  return value.length <= 2 ? REDACTED : `${value.slice(0, 2)}${REDACTED}`;
-}
 
 export function redactString(text: string): string {
   let out = typeof text === 'string' ? text.slice(0, MAX_TEXT) : '';

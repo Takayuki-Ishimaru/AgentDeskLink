@@ -41,7 +41,8 @@ func nativeGesturePoints(_ rows:Any?,_ width:Int,_ height:Int,_ region:CGRect) t
     guard result.dropFirst().contains(where:{$0.x != result[0].x || $0.y != result[0].y}) else{throw fail("E_INVALID_ARGUMENT")}
     return result
 }
-final class InputCancellation {
+// All mutable state is protected by lock, including reads from the stdin queue.
+final class InputCancellation: @unchecked Sendable {
     static let shared=InputCancellation()
     private let lock=NSLock();private var active:String?;private var cancelled=Set<String>();private var eof=false;private var deadline:TimeInterval=0
     func begin(_ id:String) throws {lock.lock();defer{lock.unlock()};guard !eof,!cancelled.contains(id) else{throw fail("E_CANCELLED")};active=id;deadline=ProcessInfo.processInfo.systemUptime+6}
@@ -87,7 +88,8 @@ func armNativeInput(_ lease:NativeInputLease,_ bit:UInt32,_ verify:()throws->Voi
     try lease.mark(bit)
     do{try verify()}catch{try lease.clear(bit);throw error}
 }
-final class HumanInputMonitor {
+// Event-tap and request threads share only state protected by lock; tag is immutable.
+final class HumanInputMonitor: @unchecked Sendable {
     let tag:Int64
     private let lock=NSLock();private var changed=false;private var valid=false;private var armed=false;private var stopped=false;private var receipts:[UInt64:UInt64]=[:]
     private var port:CFMachPort?;private var loop:CFRunLoop?

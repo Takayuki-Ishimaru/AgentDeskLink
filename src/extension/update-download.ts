@@ -8,6 +8,7 @@ export function isHttpsUrl(raw: string): boolean {
 
 export async function fetchUpdateBytes(url: string, options: {
   maxBytes: number; timeoutMs: number; signal: AbortSignal; fetch?: typeof fetch;
+  isAllowedUrl?: (url: string) => boolean;
 }): Promise<Buffer> {
   const controller = new AbortController();
   let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
@@ -25,7 +26,7 @@ export async function fetchUpdateBytes(url: string, options: {
     let current = url;
     for (let redirects = 0; redirects <= 5; redirects++) {
       check();
-      if (!isHttpsUrl(current)) throw new Error('更新先は認証情報を含まない HTTPS URL を指定してください。');
+      if (!isHttpsUrl(current) || (options.isAllowedUrl && !options.isAllowedUrl(current))) throw new Error('更新先として許可されていない URL です。');
       const response = await (options.fetch ?? fetch)(current, {
         redirect: 'manual', signal: controller.signal, credentials: 'omit'
       });

@@ -364,18 +364,15 @@ let broker:Broker
 do {broker=try Broker(appID,appPath,opts["--controls-file"],visualFlags==1,opts["--interactive-config"],lifecycleFlags==1,allowAllFlags==1)} catch {FileHandle.standardError.write(Data("AgentDeskLink: native setup unavailable.\n".utf8));exit(2)}
 var running=true
 let reader=DispatchQueue(label:"adl.stdin")
-let pendingLock=NSLock()
-var pendingRequests:[(Data,Bool)]=[]
-var pendingCount=0,draining=false,readerClosed=false
-func drainRequests(){
+let pending=NativeRequestQueue()
+@MainActor final class NativeRequestDrainer {
+static func drain(){
     // One scheduled operation at a time: later broker requests cannot reenter
     // capture's nested run-loop wait. Yield between operations for system work.
-    pendingLock.lock()
-    guard !pendingRequests.isEmpty else{
-        draining=false;let closed=readerClosed;pendingLock.unlock()
-        if closed{running=false};return
+    let next=pending.take()
+    guard let (data,tooLong)=next.request else{
+        if next.closed{running=false};return
     }
-    let (data,tooLong)=pendingRequests.removeFirst();pendingLock.unlock()
     var rid="";var captureResponse=false;var response:[String:Any]
     do {
         guard !tooLong,let request=try JSONSerialization.jsonObject(with:data) as? [String:Any],let id=request["request_id"] as? String,!id.isEmpty,id.utf8.count<=128 else {throw fail("E_INVALID_ARGUMENT")}
@@ -384,9 +381,9 @@ func drainRequests(){
     var encoded=(try? JSONSerialization.data(withJSONObject:response,options:.sortedKeys)) ?? Data()
     if encoded.count>(captureResponse ? nativeCaptureMaxResponseBytes : 65536) {response=["ok":false,"request_id":rid,"error":["code":"E_RESOURCE_LIMIT"]];encoded=try! JSONSerialization.data(withJSONObject:response)}
     FileHandle.standardOutput.write(encoded+Data([10]))
-    pendingLock.lock();pendingCount-=1;let more = !pendingRequests.isEmpty,closed=readerClosed
-    if !more{draining=false};pendingLock.unlock()
-    if more{DispatchQueue.main.async {drainRequests()}}else if closed{running=false}
+    let state=pending.finish()
+    if state.more{DispatchQueue.main.async {NativeRequestDrainer.drain()}}else if state.closed{running=false}
+}
 }
 reader.async {
     var buffer=[UInt8]();var oversize=false;var byte:UInt8=0
@@ -397,18 +394,11 @@ reader.async {
             if Set(cancel.keys)==["op","request_id"],let id=cancel["request_id"] as? String,!id.isEmpty,id.utf8.count<=128{InputCancellation.shared.cancel(id)}
             continue
         }
-        pendingLock.lock()
-        let full=pendingCount>=64
-        if !full{pendingRequests.append((data,tooLong));pendingCount+=1}
-        let schedule = !full && !draining
-        if schedule{draining=true}
-        pendingLock.unlock()
-        if full{break}
-        if schedule{DispatchQueue.main.async {drainRequests()}}
+        let state=pending.enqueue(data,tooLong)
+        if !state.accepted{break}
+        if state.schedule{DispatchQueue.main.async {NativeRequestDrainer.drain()}}
     }
     InputCancellation.shared.close()
-    pendingLock.lock();readerClosed=true;let schedule = !draining
-    if schedule{draining=true};pendingLock.unlock()
-    if schedule{DispatchQueue.main.async {drainRequests()}}
+    if pending.close(){DispatchQueue.main.async {NativeRequestDrainer.drain()}}
 }
 while running {RunLoop.current.run(until:Date().addingTimeInterval(0.05))}

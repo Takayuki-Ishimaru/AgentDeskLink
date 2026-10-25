@@ -2,7 +2,7 @@
 
 [日本語](INSTALL.md) | **English**
 
-Target version: `0.1.1` (beta)
+Target version: `0.1.2` (beta)
 
 ## Requirements
 
@@ -44,7 +44,7 @@ Virtual workspaces are not supported. MCP cannot be enabled in an untrusted work
 - If the server does not start, check workspace trust, MCP enablement and the emergency-stop state.
 - If the bundled runtime or helper is missing, reinstall the VSIX for your operating system and CPU.
 - For `E_BACKEND_UNAVAILABLE`, check operating system permissions and browser requirements.
-- “No update source configured” is the initial state. See the [update guide](UPDATES_en.md).
+- A failed update check usually means a temporary network or GitHub problem. See the [update guide](UPDATES_en.md).
 
 ## Emergency stop and resume
 

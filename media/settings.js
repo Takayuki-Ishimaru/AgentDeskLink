@@ -8,7 +8,6 @@
     enabled: $('enabled'),
     autoUpdate: $('auto-update'),
     checkUpdates: $('check-updates'),
-    manifestUrl: $('manifest-url'), manifestSave: $('manifest-save'),
     checkNow: $('check-now'), openLogs: $('open-logs'), openSettings: $('open-settings'),
     emergencyStop: $('emergency-stop'), resumeOperations: $('resume-operations'), stoppedStatus: $('stopped-status'),
     version: $('version'), mcpStatus: $('mcp-status'), updateStatus: $('update-status'),
@@ -22,7 +21,7 @@
   let busy = {};
   function markBusy(key, on) {
     busy[key] = on;
-    const map = { enabled: ['enabled'], auto: ['autoUpdate'], check: ['checkUpdates'], manifest: ['manifestUrl', 'manifestSave'], checkNow: ['checkNow'], resume: ['resumeOperations'] };
+    const map = { enabled: ['enabled'], auto: ['autoUpdate'], check: ['checkUpdates'], checkNow: ['checkNow'], resume: ['resumeOperations'] };
     (map[key] || []).forEach((name) => setBusy(els[name], on));
     // Emergency stop must stay clickable even while the stop itself runs.
     if (key === 'stop' && els.emergencyStop) els.emergencyStop.setAttribute('aria-busy', on ? 'true' : 'false');
@@ -34,8 +33,6 @@
   if (els.enabled) els.enabled.addEventListener('change', () => send({ type: 'setEnabled', enabled: els.enabled.checked }, 'enabled'));
   if (els.autoUpdate) els.autoUpdate.addEventListener('change', () => send({ type: 'setAutoUpdate', enabled: els.autoUpdate.checked }, 'auto'));
   if (els.checkUpdates) els.checkUpdates.addEventListener('change', () => send({ type: 'setCheckForUpdates', enabled: els.checkUpdates.checked }, 'check'));
-  const saveText = (el, type) => () => send({ type, value: el.value }, 'manifest');
-  if (els.manifestUrl) els.manifestSave.addEventListener('click', saveText(els.manifestUrl, 'setUpdateManifestUrl'));
   if (els.emergencyStop) els.emergencyStop.addEventListener('click', () => post({ type: 'emergencyStop' }));
   if (els.resumeOperations) els.resumeOperations.addEventListener('click', () => { setBusy(els.resumeOperations, true); post({ type: 'resumeOperations' }); });
   if (els.checkNow) els.checkNow.addEventListener('click', () => { setBusy(els.checkNow, true); post({ type: 'checkForUpdates' }); });
@@ -60,7 +57,6 @@
       if (els.enabled && typeof s.settings.enabled === 'boolean') els.enabled.checked = s.settings.enabled;
       if (els.autoUpdate && typeof s.settings.autoUpdate === 'boolean') els.autoUpdate.checked = s.settings.autoUpdate;
       if (els.checkUpdates && typeof s.settings.checkForUpdates === 'boolean') els.checkUpdates.checked = s.settings.checkForUpdates;
-      if (els.manifestUrl && typeof s.settings.updateManifestUrl === 'string' && document.activeElement !== els.manifestUrl) els.manifestUrl.value = s.settings.updateManifestUrl;
     }
     if (s.status) {
       set(els.version, s.status.version || '');

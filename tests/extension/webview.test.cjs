@@ -41,16 +41,20 @@ test('manual update button becomes usable again after the host finishes a check'
   await p.get('check-now').trigger('click');
   assert.equal(p.get('check-now').disabled, true);
   assert.ok(p.messages.some(x => x.type === 'checkForUpdates'));
-  p.state({ busy: { checkNow: false }, status: { update: '更新先未設定' } });
+  p.state({ busy: { checkNow: false }, status: { update: '最新のバージョンです。' } });
   assert.equal(p.get('check-now').disabled, false);
 });
 
-test('refresh keeps focused text drafts and displays error messages as text', () => {
+test('removed update source controls post nothing and errors are displayed as text', async () => {
   const p = panel();
-  p.document.activeElement = p.get('manifest-url');
-  p.get('manifest-url').value = 'https://draft.example/update.json';
+  for (const id of ['manifest-url', 'manifest-save']) {
+    assert.equal(p.get(id).listeners.size, 0, `${id} has no listeners`);
+    await p.get(id).trigger('click');
+    await p.get(id).trigger('change');
+  }
   p.state({ settings: { updateManifestUrl: 'https://saved.example/update.json' }, status: { mcpError: '<img src=x onerror=alert(1)>' } });
-  assert.equal(p.get('manifest-url').value, 'https://draft.example/update.json');
+  assert.equal(p.get('manifest-url').value, '', 'legacy source state is ignored');
+  assert.deepEqual(p.messages.map(x => x.type), ['ready']);
   assert.equal(p.get('mcp-error').textContent, '<img src=x onerror=alert(1)>');
   assert.equal(p.get('mcp-error').innerHTML, undefined);
 });

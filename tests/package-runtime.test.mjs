@@ -84,6 +84,27 @@ test('fetchBounded aborts a slow body read and honors a pre-aborted signal', asy
   assert.equal(called, 0, 'pre-aborted signal must not start downloads');
 });
 
+test('fetchBounded releases unread bodies after HTTP and consumer failures', async () => {
+  for (const status of [500, 200]) {
+    let cancelled=false, signal;
+    const body=new ReadableStream({cancel(){cancelled=true;}});
+    const fetchImpl=async(_url,options)=>{signal=options.signal;return new Response(body,{status});};
+    await assert.rejects(fetchBounded('https://x/y',{fetchImpl},()=>{throw new Error('consumer failed');}),status===500 ? /HTTP 500/ : /consumer failed/);
+    assert.equal(cancelled,true);
+    assert.equal(signal.aborted,true);
+  }
+});
+
+test('fetchBounded cancels a response that arrives after the deadline', async () => {
+  let respond,cancelled=false;
+  const response=new Response(new ReadableStream({cancel(){cancelled=true;}}));
+  const fetchImpl=()=>new Promise(resolve=>respond=resolve);
+  await assert.rejects(fetchBounded('https://x/y',{fetchImpl,timeoutMs:20}),/timed out/);
+  respond(response);
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(cancelled,true);
+});
+
 test('runCommand fails on spawn error, non-zero exit, timeout and abort', async () => {
   await assert.rejects(runCommand(['definitely-not-a-real-binary-xyz']), /spawn failed/);
   await assert.rejects(runCommand([process.execPath, '-e', 'process.exit(3)']), /command failed/);

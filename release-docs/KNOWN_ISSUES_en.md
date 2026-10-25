@@ -2,7 +2,7 @@
 
 [日本語](KNOWN_ISSUES.md) | **English**
 
-Target version: `0.1.1`
+Target version: `0.1.2`
 
 This beta is provided for a limited range of use. It is not guaranteed to work with every application or operating system configuration.
 
@@ -36,8 +36,8 @@ Frame sequences can be captured, but audio, encoded video and automatic periodic
 ## Distribution and updates
 
 - The Windows helper is unsigned and the macOS helper is ad-hoc signed. macOS notarization is not supported.
-- When no update source is configured, no update traffic takes place.
-- Choose the update source that matches your operating system and CPU.
+- The update source is fixed to the official GitHub repository and needs no configuration.
+- When no release matches your operating system and CPU, only a check takes place and nothing is installed.
 - Automatic updates from a distribution point that requires authentication are not supported; install the VSIX manually in that case.
 - After an update, the window must be reloaded. A window in use is never reloaded automatically.
 
