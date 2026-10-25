@@ -1,0 +1,5 @@
+{
+  "FixtureText":{"role":"AXTextField","allowed":["fill"]},
+  "FixtureButton":{"role":"AXButton","allowed":["click"]},
+  "FixtureCheck":{"role":"AXCheckBox","allowed":["check"]}
+}

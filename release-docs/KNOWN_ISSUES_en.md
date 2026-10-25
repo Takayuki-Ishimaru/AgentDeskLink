@@ -1,0 +1,53 @@
+# Supported Environments and Known Limitations
+
+[日本語](KNOWN_ISSUES.md) | **English**
+
+Target version: `0.1.1`
+
+This beta is provided for a limited range of use. It is not guaranteed to work with every application or operating system configuration.
+
+## Supported environments
+
+| Environment | Scope and conditions |
+| --- | --- |
+| macOS 14 or newer, Apple silicon | Browser and desktop. The Accessibility permission is required, and image capture also requires Screen Recording |
+| Windows 11 x64 | Browser and desktop. Runs in the same interactive session as the target application |
+| Linux x64 | Browser only. The environment must support the Chromium operating system sandbox |
+| macOS x64, Windows arm64, Linux arm64 | Not verified |
+
+Even on the same operating system, the available operations can differ by application, display scaling and monitor configuration. Choose the distribution file that matches your operating system and CPU.
+
+## Applications and input
+
+- Application status, launch and normal quit are available on macOS and Windows with explicit permission in a CLI policy. The default VS Code extension profile does not enable this launch/quit feature. On Windows, applications launch on a dedicated Win32 desktop; existing human-started applications are not moved to that desktop.
+- Only permitted instances started by this server can be quit. Applications started by a person, frontmost applications, and applications with documents being edited are never quit or force quit.
+- Background semantic operation does not guarantee complete non-interference, including delayed actions by the application itself.
+- Select `interactive_desktop` mode to use physical input. It uses the same mouse and keyboard as the person, so do not use it while someone is working on the desktop.
+- Desktop swipes are implemented as scrolling; they do not provide real operating system touch points.
+- Enabling MCP in the VS Code extension broadly permits the supported operations. There is no dedicated approval UI for consequential actions. Review the scope you give the AI for actions such as submission or purchases. CLI restrictions follow the supplied policy.
+- If helper communication is cancelled or interrupted by a timeout, the session may become invalid. Restart the MCP server explicitly and start again from obtaining the target.
+
+## Images and privacy
+
+Image capture for supported targets is enabled in the VS Code extension. For the CLI, allow capture in the policy. Unknown secrets in images or text cannot be detected completely. Information returned over MCP is passed to the AI host, so check which targets you allow to be captured.
+
+Frame sequences can be captured, but audio, encoded video and automatic periodic capture are not supported.
+
+## Distribution and updates
+
+- The Windows helper is unsigned and the macOS helper is ad-hoc signed. macOS notarization is not supported.
+- When no update source is configured, no update traffic takes place.
+- Choose the update source that matches your operating system and CPU.
+- Automatic updates from a distribution point that requires authentication are not supported; install the VSIX manually in that case.
+- After an update, the window must be reloaded. A window in use is never reloaded automatically.
+
+See the [installation guide](INSTALL_en.md) and the [update guide](UPDATES_en.md) for details. AgentDeskLink is provided under the [MIT License](../LICENSE). Bundled third-party software remains subject to its respective licenses.
+
+
+Emergency stop applies to extension-managed servers and cannot undo processing already dispatched to an application. Stop manually launched servers through their MCP host.
+
+## Reporting problems
+
+When reporting a problem to the channel published by the distributor, include your operating system and CPU, the AgentDeskLink and VS Code versions, the reproduction steps and the error code. Related errors can be checked with “AgentDeskLink: Open Logs” in the settings panel. Do not send logs or images that contain personal information, credentials, screen contents or entered values.
+
+To stop operations, first stop the server in the VS Code MCP management view and then turn off MCP for the workspace.

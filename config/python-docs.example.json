@@ -1,0 +1,19 @@
+{
+  "allowedOrigins": ["https://docs.python.org"],
+  "allowLoopback": false,
+  "actionTimeoutMs": 15000,
+  "browserTargets": [
+    {
+      "id": "python-docs",
+      "label": "Official Python 3 documentation",
+      "url": "https://docs.python.org/3/",
+      "classification": "PUBLIC",
+      "controls": [
+        {"selector": "body > .related:has(~ .document) form.inline-search input[type=\"search\"][name=\"q\"]", "actions": ["fill"]},
+        {"selector": "a.biglink[href=\"tutorial/index.html\"]", "actions": ["click"]},
+        {"selector": "a[href=\"datastructures.html\"]", "actions": ["click"]}
+      ]
+    }
+  ],
+  "auditPath": "artifacts/python-docs-audit.jsonl"
+}

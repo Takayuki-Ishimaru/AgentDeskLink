@@ -1,0 +1,93 @@
+name: Beta validation
+on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  browser:
+    strategy:
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install chromium
+      - run: npm run check
+      - run: npm test
+      - run: npm run test:extension
+      - run: npm run test:package
+      - run: npm audit --audit-level=low
+      - run: npm run benchmark
+  linux-core:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      - run: npm run check
+      - run: npm run test:unit
+      - run: npm run test:extension
+      - run: npm run test:package
+      # Chromium requires a runner that supports its OS sandbox.
+      # The shared Ubuntu worker used for initial QA could not launch it.
+      - run: npm run package:vsix
+  vsix-distribution:
+    strategy:
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      - run: npm run package:vsix
+      # Extract the actual VSIX, clear PATH and browser caches, then exercise MCP.
+      - run: npm run verify:vsix
+      - run: npm run verify:vsix -- --download-browser
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agentdesklink-${{ runner.os }}-${{ runner.arch }}
+          path: artifacts/*.vsix
+  windows-native-build:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - run: cmake -S native/windows-uia-cpp -B native/windows-uia-cpp/build -G "Visual Studio 17 2022" -A x64
+      - run: cmake --build native/windows-uia-cpp/build --config Release
+      - run: dotnet build native/windows-uia-cpp/tools/fixture/FixtureApp.csproj -c Release
+      # Runtime UIA acceptance runs in an interactive Windows desktop, not Session 0.
+  native-protocol:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - run: cmake -S native/windows-uia-cpp -B native/windows-uia-cpp/build -DADL_PROTOCOL_TESTS_ONLY=ON
+      - run: cmake --build native/windows-uia-cpp/build --config Release
+      - run: ctest --test-dir native/windows-uia-cpp/build -C Release --output-on-failure --timeout 30 --no-tests=error
+  macos-native-build:
+    runs-on: macos-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - run: native/macos-ax/build.sh
+      # Real GUI AX acceptance needs an explicitly permitted interactive Mac.

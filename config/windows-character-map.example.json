@@ -1,0 +1,10 @@
+{
+  "windows": {
+    "helperPath": "C:/AgentDeskLink/native-build/Release/adl-windows-uia-helper.exe",
+    "appId": "windows-character-map",
+    "appPath": "C:/Windows/System32/charmap.exe",
+    "controlsPath": "C:/AgentDeskLink/config/windows-character-map.controls.json",
+    "classification": "PUBLIC",
+    "lifecycle": {"enabled": true}
+  }
+}

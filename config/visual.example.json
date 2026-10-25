@@ -1,0 +1,47 @@
+{
+  "allowedOrigins": [
+    "http://127.0.0.1:4173"
+  ],
+  "allowLoopback": true,
+  "browserTargets": [
+    {
+      "id": "local-demo",
+      "label": "Approved visual fixture",
+      "url": "http://127.0.0.1:4173",
+      "classification": "PUBLIC",
+      "visual": {
+        "enabled": true,
+        "maskSelectors": [
+          "[data-private]"
+        ]
+      },
+      "controls": [
+        {
+          "selector": "#query",
+          "actions": [
+            "fill"
+          ]
+        },
+        {
+          "selector": "#find",
+          "actions": [
+            "click"
+          ]
+        }
+      ],
+      "gestures": {
+        "enabled": true,
+        "surfaces": [
+          {
+            "id": "board",
+            "selector": "#board",
+            "kinds": [
+              "drag",
+              "swipe"
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}
