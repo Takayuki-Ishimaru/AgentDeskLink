@@ -1,0 +1,17 @@
+{
+  "allowedOrigins": ["http://127.0.0.1:4173"],
+  "allowLoopback": true,
+  "browserTargets": [{
+    "id": "local-demo",
+    "label": "AgentDeskLink test application",
+    "url": "http://127.0.0.1:4173",
+    "classification": "PUBLIC",
+    "controls": [
+      {"selector": "#query", "actions": ["fill"]},
+      {"selector": "#find", "actions": ["click"]},
+      {"selector": "#option", "actions": ["check"]},
+      {"selector": "#color", "actions": ["select"]}
+    ]
+  }],
+  "auditPath": "artifacts/demo-audit.jsonl"
+}

@@ -1,0 +1,4 @@
+{
+  "104": {"role": "edit", "allowed": ["fill"]},
+  "119": {"role": "checkbox", "allowed": ["check"]}
+}

@@ -1,0 +1,10 @@
+{
+  "macos": {
+    "helperPath": "/absolute/path/AgentDeskLink/native/macos-ax/build/adl-macos-ax-helper",
+    "appId": "com.apple.calculator",
+    "appPath": "/System/Applications/Calculator.app/Contents/MacOS/Calculator",
+    "controlsPath": "/absolute/path/AgentDeskLink/config/macos-calculator.controls.json",
+    "classification": "PUBLIC",
+    "lifecycle": {"enabled": true}
+  }
+}

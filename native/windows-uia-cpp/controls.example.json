@@ -1,0 +1,56 @@
+{
+  "FixtureText": {
+    "role": "edit",
+    "allowed": [
+      "fill"
+    ]
+  },
+  "FixtureButton": {
+    "role": "button",
+    "allowed": [
+      "click"
+    ]
+  },
+  "FixtureCheck": {
+    "role": "checkbox",
+    "allowed": [
+      "check"
+    ]
+  },
+  "FixtureSelectBeta": {
+    "role": "listitem",
+    "allowed": [
+      "select"
+    ]
+  },
+  "FixtureScroll": {
+    "role": "pane",
+    "allowed": [
+      "scroll"
+    ]
+  },
+  "FixtureReadOnly": {
+    "role": "edit",
+    "allowed": [
+      "fill"
+    ]
+  },
+  "FixturePassword": {
+    "role": "edit",
+    "allowed": [
+      "fill"
+    ]
+  },
+  "FixtureDelete": {
+    "role": "button",
+    "allowed": [
+      "click"
+    ]
+  },
+  "FixtureSelectAlpha": {
+    "role": "listitem",
+    "allowed": [
+      "select"
+    ]
+  }
+}

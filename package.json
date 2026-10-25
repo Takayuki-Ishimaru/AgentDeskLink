@@ -1,0 +1,181 @@
+{
+  "name": "agentdesklink",
+  "displayName": "AgentDeskLink",
+  "description": "Local-first semantic browser and desktop control over MCP, with a per-workspace AgentDeskLink sidebar for VS Code.",
+  "version": "0.1.1",
+  "publisher": "agentdesklink",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24",
+    "vscode": "^1.101.0"
+  },
+  "main": "./dist/extension/extension.cjs",
+  "icon": "media/extension-icon.png",
+  "bin": {
+    "agentdesklink": "dist/src/server.js"
+  },
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "capabilities": {
+    "virtualWorkspaces": {
+      "supported": false
+    },
+    "untrustedWorkspaces": {
+      "supported": "limited",
+      "description": "AgentDeskLink MCP stays disabled until the workspace is trusted; global update settings remain available."
+    }
+  },
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "agentdesklink",
+          "title": "AgentDeskLink",
+          "icon": "media/activitybar.svg"
+        }
+      ]
+    },
+    "views": {
+      "agentdesklink": [
+        {
+          "type": "webview",
+          "id": "agentdesklink.settings",
+          "name": "設定 / Settings"
+        }
+      ]
+    },
+    "mcpServerDefinitionProviders": [
+      {
+        "id": "agentdesklink.mcp",
+        "label": "AgentDeskLink"
+      }
+    ],
+    "commands": [
+      {
+        "command": "agentdesklink.openSettings",
+        "title": "AgentDeskLink: 設定パネルを開く / Open Settings Panel",
+        "icon": {
+          "light": "media/toolbar-light-16.svg",
+          "dark": "media/toolbar-dark-16.svg"
+        }
+      },
+      {
+        "command": "agentdesklink.openLogs",
+        "title": "AgentDeskLink: ログを開く / Open Logs"
+      },
+      {
+        "command": "agentdesklink.checkForUpdates",
+        "title": "AgentDeskLink: 更新を確認 / Check for Updates"
+      },
+      {
+        "command": "agentdesklink.openWorkspaceSettings",
+        "title": "AgentDeskLink: ワークスペース設定を開く / Open Workspace Settings"
+      },
+      {
+        "command": "agentdesklink.emergencyStop",
+        "title": "AgentDeskLink: 緊急停止 / Emergency Stop",
+        "icon": "$(debug-stop)"
+      },
+      {
+        "command": "agentdesklink.resumeOperations",
+        "title": "AgentDeskLink: 操作を再開 / Resume Operations"
+      }
+    ],
+    "configuration": {
+      "title": "AgentDeskLink",
+      "properties": {
+        "agentdesklink.enabled": {
+          "type": "boolean",
+          "default": false,
+          "scope": "window",
+          "description": "このワークスペースで AgentDeskLink MCP サーバーを有効にする / Enable the AgentDeskLink MCP server for this workspace (per-workspace opt-in)."
+        },
+        "agentdesklink.autoUpdate": {
+          "type": "boolean",
+          "default": true,
+          "scope": "application",
+          "description": "新しいバージョンを自動的にダウンロードしてインストールする / Automatically download and install new versions (requires an update manifest URL)."
+        },
+        "agentdesklink.checkForUpdates": {
+          "type": "boolean",
+          "default": true,
+          "scope": "application",
+          "description": "バックグラウンドで更新を確認する（起動 5 秒後と 6 時間ごと）/ Allow background update checks (5s after start, then every 6 hours). Manual checks are also blocked when off."
+        },
+        "agentdesklink.updateManifestUrl": {
+          "type": "string",
+          "default": "",
+          "scope": "application",
+          "description": "更新マニフェスト JSON の HTTPS URL（空 = 更新先未設定・ネットワーク不使用）/ HTTPS URL of the update manifest JSON (empty = no source configured, no network use)."
+        }
+      }
+    },
+    "menus": {
+      "view/title": [
+        {
+          "command": "agentdesklink.emergencyStop",
+          "when": "view == agentdesklink.settings",
+          "group": "navigation@0"
+        }
+      ]
+    }
+  },
+  "files": [
+    "runtime/**",
+    "dist/src",
+    "dist/extension/*.cjs",
+    "config",
+    "README.md",
+    "README_en.md",
+    "LICENSE",
+    "release-docs/**/*.md",
+    "media",
+    "node_modules/**"
+  ],
+  "scripts": {
+    "build": "npm run build:tsc && npm run build:extension",
+    "build:tsc": "tsc",
+    "build:extension": "node esbuild.extension.mjs",
+    "check": "tsc --noEmit",
+    "test": "npm run build && node scripts/run-tests.mjs",
+    "test:unit": "npm run build:tsc && node --test --test-timeout=10000 dist/tests/policy.test.js dist/tests/snapshot.test.js dist/tests/core.test.js",
+    "test:extension": "npm run build && node --test --test-timeout=10000 --test-force-exit tests/extension/*.test.cjs",
+    "prepare:runtime": "node scripts/prepare-runtime.mjs",
+    "test:package": "node --test --test-timeout=10000 --test-force-exit tests/package-runtime.test.mjs tests/release-package.test.mjs",
+    "verify:vsix": "node scripts/verify-vsix.mjs",
+    "package:vsix": "npm run build && node scripts/package-vsix.mjs",
+    "start": "node dist/src/server.js",
+    "dev": "npm run build && node dist/src/server.js",
+    "benchmark": "npm run build:tsc && node dist/benchmarks/browser.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/server": "2.3.1",
+    "ipaddr.js": "2.3.0",
+    "playwright": "1.64.1",
+    "semver": "7.6.3",
+    "sharp": "0.35.5",
+    "zod": "4.6.7"
+  },
+  "overrides": {
+    "@azure/identity": "4.13.0",
+    "@azure/msal-node": {
+      "uuid": "11.1.1"
+    }
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/client": "2.3.1",
+    "@types/node": "24.10.1",
+    "@types/semver": "7.5.8",
+    "@types/vscode": "1.101.0",
+    "@vscode/vsce": "3.6.1",
+    "esbuild": "0.25.10",
+    "typescript": "7.0.2"
+  },
+  "galleryBanner": {
+    "color": "#191827",
+    "theme": "dark"
+  }
+}

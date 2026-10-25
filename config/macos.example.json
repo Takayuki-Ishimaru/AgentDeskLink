@@ -1,0 +1,9 @@
+{
+  "macos": {
+    "helperPath": "/absolute/path/adl-macos-ax-helper",
+    "appId": "local.agentdesklink.fixture",
+    "appPath": "/absolute/path/ADLFixture.app/Contents/MacOS/ADLFixture",
+    "controlsPath": "/absolute/path/controls.example.json",
+    "classification": "PUBLIC"
+  }
+}

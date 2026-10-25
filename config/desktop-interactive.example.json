@@ -1,0 +1,14 @@
+{
+  "macos": {
+    "helperPath": "/absolute/path/adl-macos-ax-helper",
+    "appId": "local.agentdesklink.fixture",
+    "appPath": "/absolute/path/ADLFixture.app/Contents/MacOS/ADLFixture",
+    "controlsPath": "/absolute/path/controls.example.json",
+    "classification": "PUBLIC",
+    "visual": {"enabled": true, "allowUnredacted": true, "maskRegions": []},
+    "interactive": {
+      "enabled": true,
+      "surfaces": [{"id": "board", "region": {"x": 380, "y": 40, "width": 240, "height": 180}, "kinds": ["drag", "swipe"], "swipe_backend": "scroll"}]
+    }
+  }
+}

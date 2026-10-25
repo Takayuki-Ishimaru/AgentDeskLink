@@ -1,0 +1,19 @@
+{
+  "AllClear": {"role": "AXButton", "allowed": ["click"]},
+  "Zero": {"role": "AXButton", "allowed": ["click"]},
+  "One": {"role": "AXButton", "allowed": ["click"]},
+  "Two": {"role": "AXButton", "allowed": ["click"]},
+  "Three": {"role": "AXButton", "allowed": ["click"]},
+  "Four": {"role": "AXButton", "allowed": ["click"]},
+  "Five": {"role": "AXButton", "allowed": ["click"]},
+  "Six": {"role": "AXButton", "allowed": ["click"]},
+  "Seven": {"role": "AXButton", "allowed": ["click"]},
+  "Eight": {"role": "AXButton", "allowed": ["click"]},
+  "Nine": {"role": "AXButton", "allowed": ["click"]},
+  "Add": {"role": "AXButton", "allowed": ["click"]},
+  "Subtract": {"role": "AXButton", "allowed": ["click"]},
+  "Multiply": {"role": "AXButton", "allowed": ["click"]},
+  "Divide": {"role": "AXButton", "allowed": ["click"]},
+  "Equals": {"role": "AXButton", "allowed": ["click"]},
+  "Decimal": {"role": "AXButton", "allowed": ["click"]}
+}
