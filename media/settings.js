@@ -12,7 +12,8 @@
     emergencyStop: $('emergency-stop'), resumeOperations: $('resume-operations'), stoppedStatus: $('stopped-status'),
     version: $('version'), mcpStatus: $('mcp-status'), updateStatus: $('update-status'),
     enabledError: $('enabled-error'), globalError: $('global-error'), mcpError: $('mcp-error'),
-    enabledHint: $('enabled-hint')
+    enabledHint: $('enabled-hint'),
+    permissions: $('permissions'), permissionsHint: $('permissions-hint')
   };
 
   const set = (el, text) => { if (el && el.textContent !== text) el.textContent = text; };
@@ -27,6 +28,23 @@
     if (key === 'stop' && els.emergencyStop) els.emergencyStop.setAttribute('aria-busy', on ? 'true' : 'false');
   }
 
+  const PERMS = [['origins', 'ブラウザの許可元 / Browser origins'], ['app', 'ネイティブアプリ / Native app'], ['operations', '全操作 / All operations'], ['physical', '物理入力 / Physical input'], ['images', '無加工ネイティブ画像 / Unredacted native images'], ['loopback', 'ループバック / Loopback'], ['private', 'プライベート網 / Private network']];
+  const OFF = {origins: 'なし / none', app: 'なし / none', operations: '許可リストのみ / allowlists only', physical: 'オフ / off', images: '無効 / disabled', loopback: 'オフ / off', private: 'オフ / off'};
+  // Concise bilingual summary; all text lands through textContent.
+  function renderPermissions(p) {
+    if (!els.permissions || !p || typeof p !== 'object' || typeof document.createElement !== 'function') return;
+    const value = (key) => key === 'origins' ? (Array.isArray(p.browserOrigins) && p.browserOrigins.length ? p.browserOrigins.join(', ') : OFF.origins)
+      : key === 'app' ? (p.desktopAppId || OFF.app)
+      : p[{'operations':'allowAllOperations','physical':'allowPhysicalInput','images':'allowUnredactedImages','loopback':'allowLoopback','private':'allowPrivateNetwork'}[key]] ? 'on' : OFF[key];
+    els.permissions.textContent = '';
+    for (const [key, label] of PERMS) {
+      const li = document.createElement('li');
+      const a = document.createElement('span'); a.className = 'perm-label'; a.textContent = label;
+      const b = document.createElement('span'); b.className = 'perm-value'; b.textContent = String(value(key));
+      li.appendChild(a); li.appendChild(b); els.permissions.appendChild(li);
+    }
+    if (els.permissionsHint) set(els.permissionsHint, (Array.isArray(p.browserOrigins) && p.browserOrigins.length) || p.desktopAppId ? '許可された範囲のみ利用できます。/ Only granted scopes are usable.' : 'MCP 有効だけでも権限は付きません。/ Enabling MCP alone grants nothing.');
+  }
   function send(msg, busyKey) { if (busyKey) markBusy(busyKey, true); post(msg); }
 
   // Checkboxes save immediately; text inputs use an explicit Save button.
@@ -58,6 +76,7 @@
       if (els.autoUpdate && typeof s.settings.autoUpdate === 'boolean') els.autoUpdate.checked = s.settings.autoUpdate;
       if (els.checkUpdates && typeof s.settings.checkForUpdates === 'boolean') els.checkUpdates.checked = s.settings.checkForUpdates;
     }
+    if (s.permissions) renderPermissions(s.permissions);
     if (s.status) {
       set(els.version, s.status.version || '');
       set(els.mcpStatus, s.status.mcp || '');

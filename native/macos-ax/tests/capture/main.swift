@@ -182,5 +182,10 @@ test("trusted broad capture permits multiple apps and still rejects non-window l
     let targets=try broad.discover();try require(targets.count==2)
     try require(Set(targets.map{$0["target_id"] as! String}).count==2)
 }
+test("broad operations can retain the configured capture app boundary") {
+    let source=FakeSource();source.items=[window(11,bundleID:"one.app"),window(12,bundleID:"two.app")]
+    let capture=WindowCaptureBroker("one.app","/fixture",true,allowAll:true,restrictTargets:true,source:source,permission:{true},approve:{_ in true})
+    try require(try capture.discover().count==1)
+}
 print("\(count - failures)/\(count) capture tests passed")
 exit(failures == 0 ? 0 : 1)

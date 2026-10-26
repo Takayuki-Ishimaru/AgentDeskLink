@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import * as crypto from 'node:crypto';
-import { readSettings, log } from './shared.js';
+import { readSettings, log, type ExtensionPermissions } from './shared.js';
 
 export interface PanelHooks {
   checkForUpdates(): Promise<void>;
@@ -11,6 +11,7 @@ export interface PanelHooks {
   operationsStopped(): boolean;
   mcpStatus(): string;
   mcpError(): string | null;
+  permissions(): ExtensionPermissions;
   updateStatus(): string;
   version(): string;
   refreshMcp(): Promise<void>;
@@ -59,7 +60,9 @@ export class SettingsPanelProvider implements vscode.WebviewViewProvider {
   <p class="status" id="stopped-status" role="status" hidden>操作を緊急停止中です。再開するには「操作を再開」を押してください。</p>
   <div class="row"><label class="check"><input type="checkbox" id="enabled"><span>このワークスペースで MCP を有効にする</span></label></div>
   <p class="hint" id="enabled-hint">変更はこのワークスペースに保存されます。</p>
-  <p class="hint">対応操作は既定で許可されます。</p>
+  <h4 class="perm-title">現在の権限 / Current permissions</h4>
+  <ul class="permissions" id="permissions"></ul>
+  <p class="hint" id="permissions-hint"></p>
   <p class="error" id="enabled-error" role="alert"></p>
   <p class="status" id="mcp-status" role="status"></p>
   <p class="error" id="mcp-error" role="alert"></p>
@@ -75,7 +78,7 @@ export class SettingsPanelProvider implements vscode.WebviewViewProvider {
 </section>
 <p class="hint">更新元は GitHub の公式リポジトリ（<span id="update-source">Takayuki-Ishimaru/AgentDeskLink</span>）に固定されています。設定は不要です。</p>
 <section class="section support">
-  <div class="actions"><button id="open-logs" class="secondary">ログを開く</button><button id="open-settings" class="secondary">VS Code 設定</button></div>
+  <div class="actions"><button id="open-logs" class="secondary">ログを開く</button><button id="open-settings" class="secondary">設定を開く / Open Settings</button></div>
   <p class="error" id="global-error" role="alert"></p>
 </section>
 <script nonce="${nonce}" src="${js}"></script>
@@ -194,6 +197,7 @@ export class SettingsPanelProvider implements vscode.WebviewViewProvider {
       stopped: this.hooks.operationsStopped(),
       trusted: vscode.workspace.isTrusted,
       hasFolder,
+      permissions: this.hooks.permissions(),
       busy: Object.fromEntries(['enabled', 'auto', 'check', 'checkNow', 'stop', 'resume'].map(k => [k, this.busy.has(k)])),
       status: {
         version: this.hooks.version(),

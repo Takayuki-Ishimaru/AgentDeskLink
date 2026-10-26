@@ -1,5 +1,6 @@
 import type {ElementHandle, Page} from 'playwright';
 import {AdlError, type Action, type ErrorCode} from './types.js';
+import {SECRET_LABEL_PATTERN} from './privacy.js';
 
 export interface PreflightResult {
   target: {role: string; name: string; enabled: boolean};
@@ -14,6 +15,7 @@ interface Probe {
 }
 
 interface ProbeArgs {
+  secretLabelPattern:string;
   allowAllOperations?:boolean;selector: string; action: 'click' | 'fill';
   expectRole?: string; expectName?: string; requireHit: boolean;
 }
@@ -28,7 +30,7 @@ function probe(el: Element, a: ProbeArgs): Probe {
   const deny = (code: ErrorCode): Probe => ({ok: false, code});
   try {
     const CONSEQUENTIAL = /(delete|remove|upload|send|submit|purchase|checkout|pay|payment|login|log in|sign in|sign up|register|withdraw|transfer)/i;
-    const SENSITIVE = ['password', 'passwd', 'pwd', 'otp', 'one-time', 'pin', 'cvv', 'cvc', 'credit card', 'card number', 'ssn', 'social security'];
+    const sensitiveLabel=(text:string)=>new RegExp(a.secretLabelPattern,'iu').test(text.normalize('NFKC').replace(/([A-Z])([A-Z][a-z])/g,'$1 $2').replace(/([a-z0-9])([A-Z])/g,'$1 $2').replace(/([A-Za-z])([0-9])/g,'$1 $2').replace(/([0-9])([A-Za-z])/g,'$1 $2'));
     if (!el || typeof el !== 'object' || el.isConnected !== true) return deny('E_STALE_STATE');
     const doc = el.ownerDocument ?? document;
     let list: NodeListOf<Element>;
@@ -38,7 +40,7 @@ function probe(el: Element, a: ProbeArgs): Probe {
     const named = e as unknown as {type?: unknown; readOnly?: unknown; disabled?: unknown; labels?: ArrayLike<Element>; placeholder?: unknown; isContentEditable?: unknown};
     const tag = String(e.tagName).toUpperCase();
     const type = typeof named.type === 'string' ? named.type.toLowerCase() : '';
-    // Match snapshotPageFn exactly, with bounded direct text and no subtree textContent.
+    // Match snapshotPageFn with bounded text-node traversal, never subtree textContent.
     const directText = (node: Element): string => {
       let text = '', visits = 0;
       for (let child = node.firstChild; child && text.length < 512 && visits++ < 64; child = child.nextSibling) {
@@ -59,8 +61,22 @@ function probe(el: Element, a: ProbeArgs): Probe {
       else role = /^H[1-6]$/.test(tag) ? 'heading' : isText ? 'text' : 'generic';
     }
     const label = (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') ? named.labels?.[0] : undefined;
-    const rawName = e.getAttribute('aria-label') || (label ? directText(label) : '')
-      || (role === 'button' || role === 'link' || role === 'status' || role === 'alert' || isText ? directText(e) : '')
+    const descendantText=(el:Element,includeHidden=false):string=>{
+      const walker=doc.createTreeWalker(el,NodeFilter.SHOW_ELEMENT|NodeFilter.SHOW_TEXT);
+      let node:Node|null=walker.nextNode(),text='',visits=0;
+      while(node&&visits++<128&&text.length<512){
+        if(node.nodeType===3&&!node.parentElement?.closest('script,style')&&(includeHidden||!node.parentElement?.closest('[hidden],[aria-hidden="true"]')))text+=node.textContent?.slice(0,512-text.length)??'';
+        node=walker.nextNode();
+      }
+      return node?'x'.repeat(512):text.trim();
+    };
+    const refs=e.getAttribute('aria-labelledby')||'';
+    if(refs.length>4096)return deny('E_RESOURCE_LIMIT');
+    const ids=refs.trim()?refs.trim().split(/\s+/):[];
+    const referenceText=ids.length>16?'x'.repeat(512):ids.map(id=>{const item=doc.getElementById(id);return item?descendantText(item,true):'';}).join(' ').slice(0,512).trim();
+    const labelText=label?descendantText(label):'';
+    const rawName = referenceText || e.getAttribute('aria-label') || labelText
+      || (role === 'button' || role === 'link' || role === 'status' || role === 'alert' || isText ? descendantText(e) : '')
       || e.getAttribute('placeholder') || e.getAttribute('title') || e.id || '';
     const nameAttr = e.getAttribute('name') || '';
     if (rawName.length > 4096 || nameAttr.length > 512) return deny('E_RESOURCE_LIMIT');
@@ -94,8 +110,10 @@ function probe(el: Element, a: ProbeArgs): Probe {
     }
     const autocomplete = e.getAttribute('autocomplete') || '';
     if (autocomplete.length > 512) return deny('E_RESOURCE_LIMIT');
-    const haystack = (name + ' ' + role + ' ' + type + ' ' + autocomplete + ' ' + nameAttr).toLowerCase();
-    const sensitive = type === 'password' || type === 'file' || /(pass|token|key|credential|secret|otp)/i.test(name + ' ' + e.id + ' ' + nameAttr) || SENSITIVE.some(k => haystack.includes(k));
+    const haystack = (name + ' ' + type + ' ' + autocomplete + ' ' + nameAttr).toLowerCase();
+    const hints=[rawName,labelText,...(label?[descendantText(label,true)]:[]),referenceText,e.getAttribute('aria-label')||'',e.getAttribute('placeholder')||'',e.getAttribute('title')||'',autocomplete,e.id,nameAttr];
+    if(hints.some(hint=>hint.length>4096))return deny('E_RESOURCE_LIMIT');
+    const sensitive = type === 'password' || type === 'file' || e.hasAttribute('data-adl-sensitive') || /^(secret|unknown)$/i.test(e.getAttribute('data-adl-classification')||'') || hints.some(hint=>hint.length>=512||sensitiveLabel(hint));
     const editable = tag === 'INPUT' || tag === 'TEXTAREA' || named.isContentEditable === true;
     const readonly = named.readOnly === true || e.hasAttribute('readonly') || e.getAttribute('aria-readonly') === 'true';
     let form: Element | null = null;
@@ -129,7 +147,7 @@ export async function preflightBrowserInput(
   const explicit = {...action.expected_target};
   if(allowAllOperations&&explicit.name?.includes('[redacted]'))delete explicit.name;
   if (page.isClosed()) throw new AdlError('E_STALE_STATE');
-  const args = (expectRole?: string, expectName?: string, requireHit = true): ProbeArgs => ({allowAllOperations,selector, action: action.action as 'click' | 'fill', expectRole, expectName, requireHit});
+  const args = (expectRole?: string, expectName?: string, requireHit = true): ProbeArgs => ({secretLabelPattern:SECRET_LABEL_PATTERN,allowAllOperations,selector, action: action.action as 'click' | 'fill', expectRole, expectName, requireHit});
   const runProbe = async (expectRole?: string, expectName?: string, requireHit = true): Promise<Probe> => {
     guard(signal, assertCurrent);
     const p = await el.evaluate(probe as never, args(expectRole, expectName, requireHit)) as unknown as Probe;

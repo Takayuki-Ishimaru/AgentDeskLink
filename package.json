@@ -2,7 +2,7 @@
   "name": "agentdesklink",
   "displayName": "AgentDeskLink",
   "description": "Local-first semantic browser and desktop control over MCP, with a per-workspace AgentDeskLink sidebar for VS Code.",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "publisher": "agentdesklink",
   "license": "MIT",
   "private": true,
@@ -104,6 +104,57 @@
           "default": true,
           "scope": "application",
           "description": "バックグラウンドで更新を確認する（起動 5 秒後と 6 時間ごと）/ Allow background update checks (5s after start, then every 6 hours). Manual checks are also blocked when off."
+        },
+        "agentdesklink.browserOrigins": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "scope": "window",
+          "description": "信頼できるワークスペース設定: 明示的に許可する完全な http(s) オリジン（空 = 許可なし）/ Trusted per-workspace setting: exact http(s) origins explicitly granted; empty grants nothing."
+        },
+        "agentdesklink.desktopAppId": {
+          "type": "string",
+          "default": "",
+          "scope": "window",
+          "description": "信頼できるワークスペース設定: 許可するネイティブアプリ 1 件（ワイルドカード不可）/ Trusted per-workspace setting: the single granted native application id; wildcards grant nothing."
+        },
+        "agentdesklink.desktopAppPath": {
+          "type": "string",
+          "default": "",
+          "scope": "window",
+          "description": "信頼できるワークスペース設定: 許可するネイティブアプリの絶対パス / Trusted per-workspace setting: absolute path of the granted native application."
+        },
+        "agentdesklink.allowAllOperations": {
+          "type": "boolean",
+          "default": false,
+          "scope": "window",
+          "description": "すべての対応操作を明示的に許可（既定は拒否、許可元/アプリの許可は別途必要）/ Explicitly permit all supported operations (default deny; origin and app grants stay separate)."
+        },
+        "agentdesklink.allowPhysicalInput": {
+          "type": "boolean",
+          "default": false,
+          "scope": "window",
+          "description": "物理入力を明示的に許可（有効なアプリとデスクトップ可視オプトインが必要）/ Explicitly allow physical input (needs a valid app and the desktop visual opt-in)."
+        },
+        "agentdesklink.allowUnredactedImages": {
+          "type": "boolean",
+          "default": false,
+          "scope": "window",
+          "description": "非マスキングのネイティブ画像を明示的に許可 / Explicitly allow unredacted native images."
+        },
+        "agentdesklink.allowLoopback": {
+          "type": "boolean",
+          "default": false,
+          "scope": "window",
+          "description": "ループバックへのアクセスを許可 / Allow loopback access."
+        },
+        "agentdesklink.allowPrivateNetwork": {
+          "type": "boolean",
+          "default": false,
+          "scope": "window",
+          "description": "プライベートネットワークへのアクセスを許可 / Allow private network access."
         }
       }
     },

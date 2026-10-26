@@ -147,9 +147,9 @@ try {
   assert.ok(extensionManifest.contributes.commands.some(command=>command.command==='agentdesklink.emergencyStop'));
   const {initializeOperationState,readOperationState,writeOperationState}=await import(pathToFileURL(join(extension,'dist/src/operation-control.js')).href);
   const controlPath=join(temp,'operations.json');initializeOperationState(controlPath);
-  client=new Client({name:'vsix-default-permissions',version:'1'},{versionNegotiation:{mode:'legacy'}});
+  client=new Client({name:'vsix-explicit-permissions',version:'1'},{versionNegotiation:{mode:'legacy'}});
   await client.connect(new StdioClientTransport({command:node,args:[join(extension,'dist/src/server.js')],cwd:home,stderr:'pipe',
-    env:{...env,ADL_ALLOW_ALL_OPERATIONS:'1',ADL_OPERATION_CONTROL:controlPath,ADL_OPERATION_EPOCH:readOperationState(controlPath).epoch}}));
+    env:{...env,ADL_ALLOW_ALL_OPERATIONS:'',ADL_MCP_PERMISSIONS:JSON.stringify({browserOrigins:[origin],allowLoopback:true,allowAllOperations:true}),ADL_OPERATION_CONTROL:controlPath,ADL_OPERATION_EPOCH:readOperationState(controlPath).epoch}}));
   assert.equal((await call('adl_capabilities')).result.permissions.all_operations,true);
   const defaultSession=(await call('adl_open',{url:origin})).result;
   const defaultObserved=(await call('adl_observe',{session_id:defaultSession.session_id})).result;
@@ -161,7 +161,7 @@ try {
   assert.equal(stopped.error.code,'E_CANCELLED');
   const blocked=JSON.parse((await client.callTool({name:'adl_open',arguments:{url:origin}})).content.find(item=>item.type==='text').text);
   assert.equal(blocked.error.code,'E_CANCELLED');
-  console.log(JSON.stringify({ok:true,vsix,target:manifest.target,node:version,systemPath:'empty',browser:browser.source,browserBundled:false,cacheReuse:browser.source==='chromium',nativeHelper:manifest.helper ? 'loader and policy default verified; OS permissions require interactive acceptance' : null,mcpTools:16,browserFill:true,browserCapture:true,defaultPermissions:true,emergencyStop:true}));
+  console.log(JSON.stringify({ok:true,vsix,target:manifest.target,node:version,systemPath:'empty',browser:browser.source,browserBundled:false,cacheReuse:browser.source==='chromium',nativeHelper:manifest.helper ? 'loader and policy default verified; OS permissions require interactive acceptance' : null,mcpTools:16,browserFill:true,browserCapture:true,explicitPermissions:true,emergencyStop:true}));
 } finally {
   await client?.close();
   if (http) await new Promise(accept => http.close(accept));

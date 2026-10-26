@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';import {spawn} from 'node:child_process';import {createInterface} from 'node:readline';import {writeFile,mkdir} from 'node:fs/promises';import {resolve,join} from 'node:path';import {setTimeout as delay} from 'node:timers/promises';import {Client} from '@modelcontextprotocol/client';import {StdioClientTransport} from '@modelcontextprotocol/client/stdio';
-const build=resolve('native/macos-ax/build'),out=resolve('artifacts');await mkdir(out,{recursive:true});
+const outAt=process.argv.indexOf('--out');const build=resolve('native/macos-ax/build'),out=resolve(outAt<0?'artifacts':process.argv[outAt+1]);await mkdir(out,{recursive:true});
 function channel(exe,args=[]){const p=spawn(exe,args,{stdio:['pipe','pipe','pipe']});p.stderr.resume();const values=[],pending=[];createInterface({input:p.stdout}).on('line',l=>{const v=JSON.parse(l);pending.length?pending.shift()(v):values.push(v)});return {p,next:()=>values.length?Promise.resolve(values.shift()):Promise.race([new Promise(r=>pending.push(r)),new Promise((_,j)=>setTimeout(()=>j(new Error('fixture timeout')),10000).unref())]),call:async function(v){p.stdin.write(JSON.stringify(v)+'\n');return this.next()}}}
 const checks=[];let f,h,client;const record=name=>{checks.push({name,ok:true});console.log(name)};
 try{

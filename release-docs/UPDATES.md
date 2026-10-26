@@ -2,11 +2,17 @@
 
 **日本語** | [English](UPDATES_en.md)
 
-対象バージョン: `0.1.2`
+対象バージョン: `0.1.3`
 
 ## 0.1.1 以前からの更新
 
-0.1.1 以前の版を利用している場合は、公式リリースページから自分の OS・CPU に合った `0.1.2` の VSIX と `SHA256SUMS` を取得し、ハッシュを確認して手動でインストールしてください。インストール後は VS Code のウィンドウを再読み込みします。0.1.2 以降では更新先 URL の設定は不要です。以前の `agentdesklink.updateManifestUrl` 設定は使用しません。
+0.1.1 以前の版を利用している場合は、公式リリースページから自分の OS・CPU に合った `0.1.3` の VSIX と `SHA256SUMS` を取得し、ハッシュを確認して手動でインストールしてください。インストール後は VS Code のウィンドウを再読み込みします。0.1.2 以降では更新先 URL の設定は不要です。以前の `agentdesklink.updateManifestUrl` 設定は使用しません。
+
+## 0.1.2 からの更新
+
+更新確認と自動更新を有効にしている場合は、対応する新しい VSIX を公式 GitHub リリースから取得します。通知のみを利用している場合や更新確認を停止している場合は、リリースページから手動で取得してください。
+
+0.1.3 では MCP の有効化と操作権限を分けています。更新後は[インストールガイド](INSTALL.md)に従い、許可する origin／アプリと操作権限を設定してください。
 
 ## 更新元（設定は不要）
 
@@ -18,8 +24,8 @@
 
 | OS・CPU | 選択される配布ファイル名の例 |
 | --- | --- |
-| macOS / Apple silicon | `agentdesklink-darwin-arm64-0.1.2.vsix` |
-| Windows x64 | `agentdesklink-win32-x64-0.1.2.vsix` |
+| macOS / Apple silicon | `agentdesklink-darwin-arm64-0.1.3.vsix` |
+| Windows x64 | `agentdesklink-win32-x64-0.1.3.vsix` |
 
 ## 更新確認と停止
 
@@ -36,8 +42,8 @@
 各リリースには、対象ごとに次の名前の VSIX を添付します。拡張機能はこの名前と GitHub が返す `sha256:` ダイジェスト、`https://github.com/Takayuki-Ishimaru/AgentDeskLink/releases/download/<タグ>/<配布ファイル名>` の正規 URL を使って配布ファイルを特定します。独自の更新情報ファイル（`update.json` など）は読みません。
 
 ```text
-agentdesklink-darwin-arm64-0.1.2.vsix
-agentdesklink-win32-x64-0.1.2.vsix
+agentdesklink-darwin-arm64-0.1.3.vsix
+agentdesklink-win32-x64-0.1.3.vsix
 ```
 
 ## ダウンロードした VSIX の確認
@@ -47,13 +53,13 @@ agentdesklink-win32-x64-0.1.2.vsix
 macOS:
 
 ```sh
-shasum -a 256 agentdesklink-darwin-arm64-0.1.2.vsix
+shasum -a 256 agentdesklink-darwin-arm64-0.1.3.vsix
 ```
 
 Windows PowerShell:
 
 ```powershell
-Get-FileHash -Algorithm SHA256 .\agentdesklink-win32-x64-0.1.2.vsix | Format-List Hash
+Get-FileHash -Algorithm SHA256 .\agentdesklink-win32-x64-0.1.3.vsix | Format-List Hash
 ```
 
 一覧と一致しない場合は、そのファイルをインストールせず、公式リポジトリのリリースページから取得し直してください。

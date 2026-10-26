@@ -6,7 +6,7 @@
   <img src="../media/readme-hero-v2.png" alt="AgentDeskLink — Browser + Desktop, over MCP" width="1200">
 </p>
 
-対象バージョン: `0.1.2`
+対象バージョン: `0.1.3`
 
 **ブラウザも、デスクトップも。使い慣れた AI エージェントから。**
 

@@ -2,7 +2,7 @@
 
 [日本語](KNOWN_ISSUES.md) | **English**
 
-Target version: `0.1.2`
+Target version: `0.1.3`
 
 This beta is provided for a limited range of use. It is not guaranteed to work with every application or operating system configuration.
 
@@ -12,10 +12,12 @@ This beta is provided for a limited range of use. It is not guaranteed to work w
 | --- | --- |
 | macOS 14 or newer, Apple silicon | Browser and desktop. The Accessibility permission is required, and image capture also requires Screen Recording |
 | Windows 11 x64 | Browser and desktop. Runs in the same interactive session as the target application |
-| Linux x64 | Browser only. The environment must support the Chromium operating system sandbox |
+| Linux x64 | Browser only through the CLI built from source. The environment must support the Chromium operating system sandbox |
 | macOS x64, Windows arm64, Linux arm64 | Not verified |
 
 Even on the same operating system, the available operations can differ by application, display scaling and monitor configuration. Choose the distribution file that matches your operating system and CPU.
+
+This release attaches VSIX packages for macOS / Apple silicon and Windows x64. A Linux VSIX is not included.
 
 ## Applications and input
 
@@ -24,12 +26,14 @@ Even on the same operating system, the available operations can differ by applic
 - Background semantic operation does not guarantee complete non-interference, including delayed actions by the application itself.
 - Select `interactive_desktop` mode to use physical input. It uses the same mouse and keyboard as the person, so do not use it while someone is working on the desktop.
 - Desktop swipes are implemented as scrolling; they do not provide real operating system touch points.
-- Enabling MCP in the VS Code extension broadly permits the supported operations. There is no dedicated approval UI for consequential actions. Review the scope you give the AI for actions such as submission or purchases. CLI restrictions follow the supplied policy.
+- MCP enablement, permitted origins/apps, broad operations, physical input and unredacted images are separate workspace settings. Enabling MCP alone grants no targets or additional privileges. There is no dedicated approval UI for consequential actions. Review the scope you give the AI for actions such as submission or purchases. CLI restrictions follow the supplied policy.
 - If helper communication is cancelled or interrupted by a timeout, the session may become invalid. Restart the MCP server explicitly and start again from obtaining the target.
+
+- Emergency stop applies to extension-managed servers and cannot undo processing already dispatched to an application. Stop manually launched servers through their MCP host.
 
 ## Images and privacy
 
-Image capture for supported targets is enabled in the VS Code extension. For the CLI, allow capture in the policy. Unknown secrets in images or text cannot be detected completely. Information returned over MCP is passed to the AI host, so check which targets you allow to be captured.
+Extension browser capture is limited to permitted origins; native capture requires separate permission. For the CLI, allow capture in the policy. Browser masks cover controls, frames, detected sensitive labels and text patterns. `redacted: true` records masking, not complete secret detection; inspect `redaction.scope` and `redaction.methods` for its scope. Unknown secrets in images or text cannot be detected completely. Information returned over MCP is passed to the AI host, so check which targets you allow to be captured.
 
 Frame sequences can be captured, but audio, encoded video and automatic periodic capture are not supported.
 
@@ -44,10 +48,8 @@ Frame sequences can be captured, but audio, encoded video and automatic periodic
 See the [installation guide](INSTALL_en.md) and the [update guide](UPDATES_en.md) for details. AgentDeskLink is provided under the [MIT License](../LICENSE). Bundled third-party software remains subject to its respective licenses.
 
 
-Emergency stop applies to extension-managed servers and cannot undo processing already dispatched to an application. Stop manually launched servers through their MCP host.
-
 ## Reporting problems
 
-When reporting a problem to the channel published by the distributor, include your operating system and CPU, the AgentDeskLink and VS Code versions, the reproduction steps and the error code. Related errors can be checked with “AgentDeskLink: Open Logs” in the settings panel. Do not send logs or images that contain personal information, credentials, screen contents or entered values.
+When reporting a problem to the channel published by the distributor, include your operating system and CPU, the AgentDeskLink and VS Code versions, the reproduction steps and the error code. Open the logs from the settings panel or run “AgentDeskLink: ログを開く / Open Logs” in the Command Palette to check related errors. Do not send logs or images that contain personal information, credentials, screen contents or entered values.
 
 To stop operations, first stop the server in the VS Code MCP management view and then turn off MCP for the workspace.

@@ -14,16 +14,19 @@ async function fixture(t:{after:(fn:()=>Promise<unknown>)=>void}){
   const dir=await mkdtemp(join(tmpdir(),'adl-stop-'));t.after(()=>rm(dir,{recursive:true,force:true}));
   const file=join(dir,'operations.json');initializeOperationState(file);return file;
 }
-test('extension profile permits browser and native operations without a policy or controls file',async()=>{
+test('extension profile grants nothing without explicit opt-in and honours explicit grants',async()=>{
   for(const platform of ['darwin','win32','linux']){
-    const policy=extensionPolicy('/installed/helper',platform);
+    const denied=extensionPolicy('/installed/helper',platform);
+    assert.equal(denied.allowAllOperations,false);assert.deepEqual(denied.browserTargets,[]);assert.equal(denied.macos,undefined);assert.equal(denied.windows,undefined);
+    const key=platform==='darwin'?'macos':platform==='win32'?'windows':undefined;
+    const policy=extensionPolicy('/installed/helper',platform,{browserOrigins:['http://127.0.0.1:3000','http://internal.example'],allowLoopback:true,allowPrivateNetwork:true,allowAllOperations:true,desktopAppId:'test.app',desktopAppPath:'/Applications/Test.app/Contents/MacOS/Test'});
     assert.equal(policy.allowAllOperations,true);assert.ok(policy.browserTargets.length);
     await assertUrlAllowed('http://127.0.0.1:3000',policy);
     await assertUrlAllowed('http://internal.example',policy,async()=>['192.168.1.1']);
-    const desktop=platform==='darwin'?policy.macos:policy.windows;
+    const desktop=key?policy[key]:undefined;
     if(platform!=='linux'){
-      assert.equal(desktop?.appId,'*');assert.equal(desktop?.allowAllOperations,true);assert.equal(desktop?.controlsPath,undefined);
-      assert.equal(desktop?.visual?.enabled,true);assert.equal(desktop?.interactive?.enabled,true);
+      assert.equal(desktop?.appId,'test.app');assert.equal(desktop?.allowAllOperations,true);assert.equal(desktop?.controlsPath,undefined);
+      assert.ok(!desktop?.visual?.enabled);assert.ok(!desktop?.interactive?.enabled);
     }else assert.equal(desktop,undefined);
   }
   const action:Action={action:'fill',value:'user@example.com'},control={id:'password',role:'textbox',name:'Password',enabled:true,sensitive:true};
@@ -50,7 +53,7 @@ test('stop cancels running wait, queued mutations and batch suffix across multip
   t.after(async()=>{watches.forEach(w=>w.dispose());await Promise.all(engines.map(e=>e.shutdown()));});
   for(let i=0;i<2;i++){
     let watch:ReturnType<typeof watchOperationControl>|undefined;
-    const engine=new Engine(extensionPolicy(),{browser:adapter},'linux',()=>watch?.check()??true);
+    const engine=new Engine(extensionPolicy(undefined,'linux',{browserOrigins:['https://example.org'],allowAllOperations:true}),{browser:adapter},'linux',()=>watch?.check()??true);
     watch=watchOperationControl(file,epoch,()=>{void engine.shutdown();});engines.push(engine);watches.push(watch);
   }
   const sessions=await Promise.all(engines.map(e=>e.openUrl('https://example.org/')));
@@ -71,7 +74,7 @@ test('a revoked process cannot admit work in the interval before the poll runs',
   const file=await fixture(t),initial=readOperationState(file)!;let opens=0;
   const adapter:Adapter={open:async()=>{opens++;throw Error('should not open');},close:async()=>{}};
   let watch:ReturnType<typeof watchOperationControl>|undefined;
-  const engine=new Engine(extensionPolicy(),{browser:adapter},'linux',()=>watch?.check()??true);
+  const engine=new Engine(extensionPolicy(undefined,'linux',{browserOrigins:['https://example.org'],allowAllOperations:true}),{browser:adapter},'linux',()=>watch?.check()??true);
   watch=watchOperationControl(file,initial.epoch,()=>{void engine.shutdown();});t.after(async()=>{watch?.dispose();await engine.shutdown();});
   writeOperationState(file,true);
   await assert.rejects(engine.openUrl('https://example.org'),{code:'E_CANCELLED'});assert.equal(opens,0);

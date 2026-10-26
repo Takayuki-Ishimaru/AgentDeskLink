@@ -33,6 +33,7 @@ interface Frame {
   expires_at: string;
   viewport: CapturedImage['viewport'];
   redacted: boolean;
+  redaction?:CapturedImage['redaction'];
   coordinate_space:CapturedImage['coordinate_space'];
   source_to_desktop?:CapturedImage['source_to_desktop'];
   surface_epoch?:string;
@@ -113,6 +114,7 @@ export class VisualStore {
       expires_at: new Date(expires_ms).toISOString(),
       viewport: vp,
       redacted,
+      ...(image.redaction?{redaction:structuredClone(image.redaction)}:{}),
       coordinate_space,source_to_desktop,surface_epoch,input_token,retained_at:this.now(),
     };
     this.evict(frame.bytes);
@@ -175,6 +177,7 @@ export class VisualStore {
         source_pixels_per_output_y: source.height / out_height,
       },
       redacted: frame.redacted,
+      ...(frame.redaction?{redaction:structuredClone(frame.redaction)}:{}),
       estimated_patch_tokens: Math.ceil(out_width / 32) * Math.ceil(out_height / 32),
       token_estimate_basis: '32px_grid_not_model_billing',
     };
@@ -226,6 +229,11 @@ export class VisualStore {
     if(image.coordinate_space==='window_pixels'&&!t)fail('E_INVALID_ARGUMENT');
     if(t&&(!isNum(t.origin_x)||!isNum(t.origin_y)||!isNum(t.scale_x)||!isNum(t.scale_y)||t.scale_x<=0||t.scale_y<=0||!['desktop_points_top_left','desktop_physical_pixels'].includes(t.coordinate_space)))fail('E_INVALID_ARGUMENT');
     if (image.redacted !== true && image.redacted !== false) fail('E_INVALID_ARGUMENT');
+    const redaction=image.redaction;
+    if(redaction!==undefined){
+      const methods=new Set(['controls','frames','sensitive_labels','text_patterns','configured_selectors','native_controls','configured_regions']);
+      if(!redaction||typeof redaction!=='object'||Object.keys(redaction).some(key=>!['scope','methods','complete'].includes(key))||!['detected_regions','configured_regions','unredacted'].includes(redaction.scope)||redaction.complete!==false||!Array.isArray(redaction.methods)||redaction.methods.length>8||redaction.methods.some(method=>!methods.has(method)))fail('E_INVALID_ARGUMENT');
+    }
     if (!isStr(image.captured_at) || Number.isNaN(Date.parse(image.captured_at))) fail('E_INVALID_ARGUMENT');
     const vp = image.viewport;
     if (vp === null || typeof vp !== 'object') fail('E_INVALID_ARGUMENT');
