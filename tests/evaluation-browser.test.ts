@@ -152,3 +152,74 @@ test('broad operation permission preserves target boundaries for subresources an
     assert.equal(contacts,0);
   }finally{await f.close();spy.closeAllConnections();await new Promise<void>(r=>spy.close(()=>r()));}
 });
+
+
+test('explicit sensitive regions inherit through PUBLIC descendants across text, options, actions and images',{timeout:20000},async()=>{
+  const f=await fixture('<div data-adl-sensitive style="position:absolute;left:20px;top:60px;width:260px;height:180px;background:red"><span>784563</span><input id="inside" aria-label="Reference" data-adl-classification="PUBLIC" value="468975"><select id="pick" aria-label="Destination"><option value="PRIVATE_CHOICE">Ordinary choice</option></select></div><div data-adl-classification="sEcReT"><span>632458</span></div><div data-adl-classification="UNKNOWN"><span>913724</span></div><span id="ref" data-adl-sensitive>864297</span><input id="alias" aria-labelledby="ref" value="975318"><p>Public <span data-adl-sensitive>642319</span> text</p><input id="public" style="position:absolute;left:320px;top:360px" aria-label="Public reference" value="Visible value">',['#inside','#pick','#alias','#public']);
+  try{
+    const state=await f.engine.observe(f.id,{token_budget:8000});
+    for(const value of ['784563','468975','632458','913724','864297','975318','642319','PRIVATE_CHOICE'])assert.ok(!JSON.stringify(state).includes(value),value);
+    for(const field of state.elements!.filter(e=>e.role==='combobox'||e.role==='textbox'&&e.name==='[redacted]'))await assert.rejects(f.engine.act(f.id,{action:field.role==='combobox'?'select':'fill',element_id:field.id,value:'blocked'},state.revision),{code:'E_PRIVACY_BLOCKED'});
+    const visible=state.elements!.find(e=>e.name==='Public reference')!;
+    await f.engine.act(f.id,{action:'fill',element_id:visible.id,value:'Ordinary edit'},state.revision);
+    assert.equal((await f.engine.observe(f.id)).elements!.find(e=>e.id===visible.id)!.value,'Ordinary edit');
+    const frame=await f.engine.capture(f.id,{max_dimension:2048,max_pixels:4194304});
+    const crop=await f.engine.capture(f.id,{frame_id:frame.metadata.frame_id,region:{x:20,y:60,width:260,height:180}});
+    assert.ok((await sharp(crop.png).removeAlpha().raw().toBuffer()).every(value=>value===0));
+  }finally{await f.close();}
+});
+
+test('100 ordinary wrapped and external select options stay public, actionable and recoverable',{timeout:20000},async()=>{
+  const options=Array.from({length:100},(_,i)=>`<option value="d${String(i).padStart(3,'0')}">Destination ${String(i).padStart(3,'0')}</option>`).join('');
+  const f=await fixture(`<label>Destination<select id="wrapped" aria-label="Destination">${options}</select></label><label for="external">External destination</label><select id="external">${options}</select><label>Reference<textarea id="notes">${'ordinary note '.repeat(100)}</textarea></label>`,['#wrapped','#external','#notes']);
+  try{
+    let state=await f.engine.observe(f.id,{token_budget:8000});
+    for(const name of ['Destination','External destination']){
+      const field=state.elements!.find(e=>e.name===name)!;assert.ok(field,name);assert.equal(field.options?.length,100);assert.equal(field.value,'d000');
+      await f.engine.act(f.id,{action:'select',element_id:field.id,value:'Destination 042'},state.revision);
+      state=await f.engine.observe(f.id,{token_budget:8000});assert.equal(state.elements!.find(e=>e.id===field.id)!.value,'d042');
+      const compact=await f.engine.observe(f.id,{scope:`id:${field.id}`,token_budget:1800});
+      assert.equal(compact.elements![0]!.name,name);assert.equal(compact.elements![0]!.value,'d042');assert.equal(compact.elements![0]!.options_truncated,true);
+    }
+    const notes=state.elements!.find(e=>e.name==='Reference')!;assert.ok(notes);
+    await f.engine.act(f.id,{action:'fill',element_id:notes.id,value:'Updated note',expected_target:{role:'textbox',name:'Reference'}},state.revision);
+    assert.equal((await f.engine.observe(f.id)).elements!.find(e=>e.id===notes.id)!.value,'Updated note');
+  }finally{await f.close();}
+});
+
+test('preflight rechecks inherited sensitivity added by hover before any fill',{timeout:20000},async()=>{
+  const f=await fixture('<div><input id="field" aria-label="Reference" value="Original" onmouseenter="this.parentElement.setAttribute(\'data-adl-sensitive\',\'\')"></div>',['#field']);
+  try{
+    const state=await f.engine.observe(f.id);const field=state.elements!.find(e=>e.name==='Reference')!;
+    await assert.rejects(f.engine.act(f.id,{action:'fill',element_id:field.id,value:'Must not enter'},state.revision),{code:'E_PRIVACY_BLOCKED'});
+  }finally{await f.close();}
+});
+
+
+test('display-contents sensitive regions mask overflowing descendants and classified options',{timeout:20000},async()=>{
+  const f=await fixture('<div data-adl-sensitive style="display:contents"><p style="position:absolute;left:20px;top:280px;width:200px;height:30px;margin:0;background:red">328746</p></div><select aria-label="Destination"><option>Ordinary</option><option data-adl-classification="SECRET" value="PRIVATE_OPTION">Unlisted</option></select>');
+  try{
+    const state=await f.engine.observe(f.id,{token_budget:8000});assert.ok(!JSON.stringify(state).includes('328746'));assert.ok(!JSON.stringify(state).includes('PRIVATE_OPTION'));
+    const select=state.elements!.find(e=>e.role==='combobox')!;assert.equal(select.name,'Destination');assert.equal(select.value,'Ordinary');assert.equal(select.options![1]!.value,'[redacted]');
+    const frame=await f.engine.capture(f.id,{max_dimension:2048,max_pixels:4194304});
+    const crop=await f.engine.capture(f.id,{frame_id:frame.metadata.frame_id,region:{x:20,y:280,width:200,height:30}});
+    assert.ok((await sharp(crop.png).removeAlpha().raw().toBuffer()).every(value=>value===0));
+  }finally{await f.close();}
+});
+
+
+test('rejected control subtrees still count toward the bounded label scan',{timeout:20000},async()=>{
+  const f=await fixture(`<label>Reference${'<input type="hidden">'.repeat(140)}<input id="field" value="CANARY_SCAN_LIMIT"></label>`,['#field']);
+  try{const state=await f.engine.observe(f.id,{token_budget:8000});assert.ok(!JSON.stringify(state).includes('CANARY_SCAN_LIMIT'));const field=state.elements!.find(e=>e.role==='textbox')!;await assert.rejects(f.engine.act(f.id,{action:'fill',element_id:field.id,value:'blocked'},state.revision),{code:'E_PRIVACY_BLOCKED'});}finally{await f.close();}
+});
+
+
+test('selected classified options are protected and source candidate limits remain explicit',{timeout:20000},async()=>{
+  const choices=Array.from({length:101},(_,i)=>`<option value="d${i}">Destination ${i}</option>`).join('');
+  const f=await fixture(`<select aria-label="Destination">${choices}</select><select aria-label="Current choice"><option data-adl-sensitive selected value="PRIVATE_SELECTED_CHOICE">Unlisted</option></select>`);
+  try{
+    const state=await f.engine.observe(f.id,{token_budget:8000});assert.ok(!JSON.stringify(state).includes('PRIVATE_SELECTED_CHOICE'));
+    const field=state.elements!.find(e=>e.name==='Destination')!;assert.equal(field.options!.length,100);assert.equal(field.options_truncated,true);
+    const projected=await f.engine.observe(f.id,{token_budget:8000,scope:`id:${field.id}`,include:['id','options']});assert.equal(projected.elements![0]!.options_truncated,true);
+  }finally{await f.close();}
+});

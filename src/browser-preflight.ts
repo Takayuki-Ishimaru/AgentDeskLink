@@ -1,6 +1,6 @@
 import type {ElementHandle, Page} from 'playwright';
 import {AdlError, type Action, type ErrorCode} from './types.js';
-import {SECRET_LABEL_PATTERN} from './privacy.js';
+import {SECRET_LABEL_PATTERN, BROWSER_PRIVACY_RULES} from './privacy.js';
 
 export interface PreflightResult {
   target: {role: string; name: string; enabled: boolean};
@@ -15,7 +15,7 @@ interface Probe {
 }
 
 interface ProbeArgs {
-  secretLabelPattern:string;
+  secretLabelPattern:string; privacyRules:typeof BROWSER_PRIVACY_RULES;
   allowAllOperations?:boolean;selector: string; action: 'click' | 'fill';
   expectRole?: string; expectName?: string; requireHit: boolean;
 }
@@ -61,10 +61,17 @@ function probe(el: Element, a: ProbeArgs): Probe {
       else role = /^H[1-6]$/.test(tag) ? 'heading' : isText ? 'text' : 'generic';
     }
     const label = (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') ? named.labels?.[0] : undefined;
+    const inSensitiveRegion=(element:Element):boolean=>{
+      let node:Element|null=element,depth=0;
+      while(node&&depth++<a.privacyRules.ancestorCap){if(node.matches(a.privacyRules.regionSelector))return true;node=node.parentElement;}
+      return node!==null;
+    };
     const descendantText=(el:Element,includeHidden=false):string=>{
-      const walker=doc.createTreeWalker(el,NodeFilter.SHOW_ELEMENT|NodeFilter.SHOW_TEXT);
+      if(inSensitiveRegion(el))return "x".repeat(512);
+      let scanned=0, exhausted=false;
+      const walker=doc.createTreeWalker(el,NodeFilter.SHOW_ELEMENT|NodeFilter.SHOW_TEXT,{acceptNode:node=>{if(++scanned>128){exhausted=true;return NodeFilter.FILTER_ACCEPT;}return node.nodeType===1&&(node as Element).matches(a.privacyRules.textSkipSelector+","+a.privacyRules.regionSelector)?NodeFilter.FILTER_REJECT:NodeFilter.FILTER_ACCEPT;}});
       let node:Node|null=walker.nextNode(),text='',visits=0;
-      while(node&&visits++<128&&text.length<512){
+      while(node&&!exhausted&&visits++<128&&text.length<512){
         if(node.nodeType===3&&!node.parentElement?.closest('script,style')&&(includeHidden||!node.parentElement?.closest('[hidden],[aria-hidden="true"]')))text+=node.textContent?.slice(0,512-text.length)??'';
         node=walker.nextNode();
       }
@@ -113,7 +120,7 @@ function probe(el: Element, a: ProbeArgs): Probe {
     const haystack = (name + ' ' + type + ' ' + autocomplete + ' ' + nameAttr).toLowerCase();
     const hints=[rawName,labelText,...(label?[descendantText(label,true)]:[]),referenceText,e.getAttribute('aria-label')||'',e.getAttribute('placeholder')||'',e.getAttribute('title')||'',autocomplete,e.id,nameAttr];
     if(hints.some(hint=>hint.length>4096))return deny('E_RESOURCE_LIMIT');
-    const sensitive = type === 'password' || type === 'file' || e.hasAttribute('data-adl-sensitive') || /^(secret|unknown)$/i.test(e.getAttribute('data-adl-classification')||'') || hints.some(hint=>hint.length>=512||sensitiveLabel(hint));
+    const sensitive = type === 'password' || type === 'file' || inSensitiveRegion(e) || hints.some(hint=>hint.length>=512||sensitiveLabel(hint));
     const editable = tag === 'INPUT' || tag === 'TEXTAREA' || named.isContentEditable === true;
     const readonly = named.readOnly === true || e.hasAttribute('readonly') || e.getAttribute('aria-readonly') === 'true';
     let form: Element | null = null;
@@ -147,7 +154,7 @@ export async function preflightBrowserInput(
   const explicit = {...action.expected_target};
   if(allowAllOperations&&explicit.name?.includes('[redacted]'))delete explicit.name;
   if (page.isClosed()) throw new AdlError('E_STALE_STATE');
-  const args = (expectRole?: string, expectName?: string, requireHit = true): ProbeArgs => ({secretLabelPattern:SECRET_LABEL_PATTERN,allowAllOperations,selector, action: action.action as 'click' | 'fill', expectRole, expectName, requireHit});
+  const args = (expectRole?: string, expectName?: string, requireHit = true): ProbeArgs => ({secretLabelPattern:SECRET_LABEL_PATTERN,privacyRules:BROWSER_PRIVACY_RULES,allowAllOperations,selector, action: action.action as 'click' | 'fill', expectRole, expectName, requireHit});
   const runProbe = async (expectRole?: string, expectName?: string, requireHit = true): Promise<Probe> => {
     guard(signal, assertCurrent);
     const p = await el.evaluate(probe as never, args(expectRole, expectName, requireHit)) as unknown as Probe;

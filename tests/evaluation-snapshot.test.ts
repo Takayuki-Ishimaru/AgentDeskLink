@@ -52,3 +52,29 @@ test('legacy deltas remain compatible; auto without a baseline is full; cursors 
   assert.equal(first.representation,'full');assert.ok(first.elements);assert.ok(!first.reset);assert.ok(first.next_cursor);
   assert.throws(()=>store.observe('s',1,{token_budget:256,representation:'full',cursor:first.next_cursor!}),{code:'E_STALE_STATE'});
 });
+
+
+test('oversized select options preserve identity and state with explicit recoverable omission',()=>{
+  const store=new SnapshotStore();
+  const select:Element={id:'many',role:'combobox',name:'Destination',value:'d042',enabled:true,selected:true,
+    options:Array.from({length:100},(_,i)=>({label:`Destination ${String(i).padStart(3,'0')}`,value:`d${String(i).padStart(3,'0')}`,disabled:false,selected:i===42}))};
+  store.record('s',1,{elements:[select,...Array.from({length:60},(_,i)=>element(`e${i}`,`Status ${i}`))],fingerprint:'1',truncated:false});
+  store.record('s',2,{elements:[{...select,value:'d043'},...Array.from({length:60},(_,i)=>element(`e${i}`,`Done ${i}`))],fingerprint:'2',truncated:false});
+  for(const extra of [{},{since_revision:1},{since_revision:1,representation:'auto' as const}]){
+    let cursor:string|undefined;const found:Element[]=[];let pages=0;
+    do{
+      const page=store.observe('s',2,{token_budget:1800,...extra,...(cursor?{cursor}:{})});
+      assert.ok(Buffer.byteLength(JSON.stringify(page))<=7200);
+      found.push(...(page.elements??page.changes?.flatMap(c=>c.element?[c.element]:[])??[]));
+      cursor=page.next_cursor??undefined;assert.ok(++pages<100);
+    }while(cursor);
+    const actual=found.find(e=>e.id==='many')!;
+    assert.equal(actual.name,'Destination');assert.equal(actual.value,'d043');assert.equal(actual.selected,true);
+    assert.equal((actual as any).options_truncated,true);assert.equal(actual.options,undefined);
+    assert.equal(found.length,61);
+  }
+  const recovered=store.observe('s',2,{token_budget:8000,scope:'id:many'}).elements![0]!;
+  assert.equal(recovered.options?.length,100);assert.equal((recovered as any).options_truncated,undefined);
+  const projected=store.observe('s',2,{token_budget:1800,scope:'id:many',include:['id','name','value','selected']}).elements![0]!;
+  assert.equal(projected.name,'Destination');assert.equal(projected.value,'d043');assert.equal((projected as any).options_truncated,undefined);
+});

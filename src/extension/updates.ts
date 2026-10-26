@@ -15,6 +15,7 @@ export class UpdateChecker {
   private timer?: ReturnType<typeof setInterval>;
   private startup?: ReturnType<typeof setTimeout>;
   private disposed = false;
+  private retry?: Promise<void>;
   private lastNotified?: string;
   constructor(private readonly extVersion: string, private readonly onChanged: () => void) {}
 
@@ -41,7 +42,12 @@ export class UpdateChecker {
   }
   check(manual: boolean): Promise<void> {
     if (this.disposed) return Promise.resolve();
-    if (this.current) return this.current.promise;
+    if (this.current) {
+      // A cancelled run must not swallow a later explicit request: chain exactly one
+      // replacement behind it, so an install can never overlap another check.
+      if (manual && this.current.controller.signal.aborted) return this.queueRetry();
+      return this.current.promise;
+    }
     const controller = new AbortController();
     const promise = this.run(manual, controller.signal).finally(() => {
       if (this.current?.promise === promise) this.current = undefined;
@@ -49,6 +55,19 @@ export class UpdateChecker {
     this.current = { promise, controller };
     return promise;
   }
+  private queueRetry(): Promise<void> {
+    if (this.retry) return this.retry;
+    const previous = this.current?.promise ?? Promise.resolve();
+    const retry = previous.then(() => {
+      if (this.retry === retry) this.retry = undefined;
+      // Automatic and disabled checks never restart cancelled work.
+      if (this.disposed || this.current || !readSettings().checkForUpdates) return;
+      return this.check(true);
+    });
+    this.retry = retry;
+    return retry;
+  }
+
   private setStatus(text: string): void {
     this.statusText = text;
     log.line(text);

@@ -2,7 +2,7 @@
 
 [日本語](KNOWN_ISSUES.md) | **English**
 
-Target version: `0.1.3`
+Target version: `0.1.4`
 
 This beta is provided for a limited range of use. It is not guaranteed to work with every application or operating system configuration.
 
@@ -38,6 +38,10 @@ Ubuntu's user-namespace restrictions may require additional sandbox setup for au
 Extension browser capture is limited to permitted origins; native capture requires separate permission. For the CLI, allow capture in the policy. Browser masks cover controls, frames, detected sensitive labels and text patterns. `redacted: true` records masking, not complete secret detection; inspect `redaction.scope` and `redaction.methods` for its scope. Unknown secrets in images or text cannot be detected completely. Information returned over MCP is passed to the AI host, so check which targets you allow to be captured.
 
 Frame sequences can be captured, but audio, encoded video and automatic periodic capture are not supported.
+
+Browser regions marked `data-adl-sensitive` or `data-adl-classification="SECRET"` / `"UNKNOWN"` protect their descendants as well. A child marked `PUBLIC` cannot remove that protection. Semantic observations redact protected content; ordinary control allowlists cannot authorize actions within these regions. Browser captures and retained crops mask them. These explicit markers complement automatic detection.
+
+If a select candidate list exceeds the observation budget, the control retains its name and current state and reports `options_truncated: true`. Reobserve with `scope: "id:<element_id>"` and a larger `token_budget` to retrieve candidates, or omit `options` from `include`. At most 100 candidates are collected; reaching that source limit or clipping candidate text also sets this flag. Check it even when the last cursor page has `truncated: false`.
 
 ## Distribution and updates
 

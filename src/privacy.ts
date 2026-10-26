@@ -1,3 +1,11 @@
+// Data-only DOM rules are passed to each serialized page probe and the isolated mask engine.
+// A PUBLIC child never removes an ancestor's explicit protection.
+export const BROWSER_PRIVACY_RULES = {
+  regionSelector: '[data-adl-sensitive],[data-adl-classification="SECRET" i],[data-adl-classification="UNKNOWN" i]',
+  textSkipSelector: 'input,textarea,select,option,optgroup,button,script,style',
+  ancestorCap: 128,
+} as const;
+
 // Keep these data-only patterns usable by both Node policy and isolated page probes.
 export const SECRET_LABEL_PATTERN = '(?:^|[^a-z0-9])(?:password|passwd|pwd|passcode|secret|token|api[ _-]*key|access[ _-]*(?:key|token)|refresh[ _-]*token|private[ _-]*key|key|credentials?|authorization|auth|bearer|otp|cvv|cvc|session(?:[ _-]*id)?|cookie|pin|ssn|one[ _-]*time(?:[ _-]*(?:password|code))?|credit[ _-]*card|card[ _-]*number|cc[ _-]*(?:number|csc))(?=$|[^a-z0-9])|パスワード|暗証番号|認証(?:コード|情報|トークン|キー)|ワンタイム(?:パスワード|コード)|秘密鍵|秘密キー|シークレット|アクセストークン|APIキー';
 

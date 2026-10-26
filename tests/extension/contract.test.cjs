@@ -468,3 +468,64 @@ test('browser preparation does not block disabling MCP or overwrite newer panel 
     assert.equal(h.posts.at(-1).settings.enabled,false);
   } finally { release(); fs.promises.stat=original; }
 });
+
+
+test('saved invalid permission settings deny grants, report the key and clear after repair',async()=>{
+  for(const bad of [{desktopAppId:'test.app',desktopAppPath:''},{browserOrigins:['https://example.com/path']}]){
+    const h=harness({enabled:true,browserOrigins:['https://example.com'],...bad});await h.ready;
+    const panel=await h.panel();await panel.send({type:'ready'});
+    assert.match(h.posts.at(-1).status.mcpError,/agentdesklink\.(desktopAppId|desktopAppPath|browserOrigins)/);
+    assert.match(h.posts.at(-1).status.mcpError,/expected|形式/);
+    assert.match(h.posts.at(-1).status.mcpError,/All grants|すべての権限/);
+    const defs=await h.providers.get('agentdesklink.mcp').provideMcpServerDefinitions();
+    if(defs.length){const grants=JSON.parse(defs[0].env.ADL_MCP_PERMISSIONS);assert.deepEqual(grants.browserOrigins,[]);assert.equal(grants.allowAllOperations,false);}
+    h.config.desktopAppId='';h.config.desktopAppPath='';h.config.browserOrigins=['https://example.com'];
+    h.changes.fire({affectsConfiguration:name=>name.startsWith('agentdesklink')});
+    await panel.send({type:'ready'});await new Promise(resolve=>setTimeout(resolve,30));
+    assert.ok(!h.posts.at(-1).status.mcpError,JSON.stringify(h.posts.at(-1).status));
+  }
+});
+
+test('production panel reports requested physical input separately from effective denial',async()=>{
+  const h=harness({enabled:true,desktopAppId:'test.app',desktopAppPath:'/app',allowPhysicalInput:true,allowUnredactedImages:false});await h.ready;
+  const panel=await h.panel();await h.providers.get('agentdesklink.mcp').provideMcpServerDefinitions();await panel.send({type:'ready'});
+  const permissions=h.posts.at(-1).permissions;
+  assert.equal(permissions.requested.allowPhysicalInput,true);
+  assert.equal(permissions.effective.allowPhysicalInput,false);
+  assert.ok(permissions.effective.reasons.length>0);
+});
+
+test('manual update retry waits for a cancelled check and then uses the new settings',async()=>{
+  let requests=0;
+  const api={fetch:async(url,init)=>{
+    assert.equal(String(url),githubApi);requests++;
+    if(requests===1)return new Promise((_,reject)=>init.signal.addEventListener('abort',()=>reject(new Error('aborted')),{once:true}));
+    return new Response(JSON.stringify(githubReleases(nextVersion)),{status:200});
+  }};
+  const h=harness({autoUpdate:true},api);await h.ready;await h.panel();
+  const first=h.commands.get('agentdesklink.checkForUpdates')();
+  assert.equal(requests,1);
+  h.config.autoUpdate=false;
+  h.changes.fire({affectsConfiguration:name=>name==='agentdesklink'||name==='agentdesklink.autoUpdate'});
+  const second=h.commands.get('agentdesklink.checkForUpdates')();
+  await Promise.all([first,second]);
+  assert.equal(requests,2,'the new explicit check must not be swallowed by the cancelled promise');
+  assert.equal(installs(h),0);assert.match(updateStatus(h),/利用可能/);
+});
+
+for(const mode of ['concurrent','disabled','disposed'])test(`cancelled update retry handles ${mode} state without overlapping checks`,async()=>{
+  let requests=0;
+  const h=harness({autoUpdate:true},{fetch:async(url,init)=>{
+    assert.equal(String(url),githubApi);requests++;
+    if(requests===1)return new Promise((_,reject)=>init.signal.addEventListener('abort',()=>reject(new Error('aborted')),{once:true}));
+    return new Response(JSON.stringify(githubReleases(nextVersion)),{status:200});
+  }});
+  await h.ready;
+  const first=h.commands.get('agentdesklink.checkForUpdates')();assert.equal(requests,1);
+  h.config.autoUpdate=false;h.changes.fire({affectsConfiguration:name=>name==='agentdesklink'||name==='agentdesklink.autoUpdate'});
+  const retries=Array.from({length:3},()=>h.commands.get('agentdesklink.checkForUpdates')());
+  if(mode==='disabled'){h.config.checkForUpdates=false;h.changes.fire({affectsConfiguration:name=>name==='agentdesklink'||name==='agentdesklink.checkForUpdates'});}
+  if(mode==='disposed')await h.deactivate();
+  await Promise.all([first,...retries]);
+  assert.equal(requests,mode==='concurrent'?2:1);assert.equal(installs(h),0);
+});

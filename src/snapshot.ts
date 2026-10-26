@@ -101,6 +101,7 @@ function project(element: Element, include: Field[] | null): Element {
   }
   const out: Record<string, unknown> = {};
   for (const field of include) if (element[field] !== undefined) out[field] = element[field];
+  if (include.includes('options') && element.options_truncated) out.options_truncated = true;
   return out as unknown as Element;
 }
 
@@ -263,8 +264,11 @@ export class SnapshotStore {
     let i = Math.min(Math.max(offset, 0), items.length);
     while (i < items.length) {
       if (size([...chosen, items[i]!], redactions, null) <= limit) { chosen.push(items[i]!); i += 1; continue; }
-      const shrunk = this.shrink(items[i]!);
-      if (shrunk && size([...chosen, shrunk], redactions, null) <= limit) { chosen.push(shrunk); shortened=true; i += 1; continue; }
+      // Move an otherwise complete element to the next page before discarding fields.
+      const shrunk = size([items[i]!], redactions, 'x'.repeat(36)) > limit
+        ? [this.shrink(items[i]!, true), this.shrink(items[i]!)].find(candidate => candidate && size([...chosen, candidate], redactions, null) <= limit)
+        : null;
+      if (shrunk) { chosen.push(shrunk); shortened=true; i += 1; continue; }
       break;
     }
     const truncated = i < items.length || sourceTruncated || shortened;
@@ -275,7 +279,7 @@ export class SnapshotStore {
     cursor.offset = i;
     if (chosen.length === 0) {
       let progressed = false;
-      for (const candidate of [this.shrink(items[i]!), this.minimal(items[i]!)]) {
+      for (const candidate of [this.shrink(items[i]!, true), this.shrink(items[i]!), this.minimal(items[i]!)]) {
         if (!candidate) continue;
         cursor.offset = i + 1;
         if (size([candidate], redactions, token) <= limit) { chosen.push(candidate); shortened=true; progressed = true; break; }
@@ -286,9 +290,13 @@ export class SnapshotStore {
     return emit(chosen, redactions, true, token);
   }
 
-  private shrink(item: SnapshotChange): SnapshotChange | null {
+  private shrink(item: SnapshotChange, preserveText = false): SnapshotChange | null {
     if (!item.element) return null;
-    const capped = cap(item.element, NAME_CAP, VALUE_CAP);
+    // Candidate lists are optional detail. Keep the control's identity and live
+    // state, and make omission explicit even when later cursor pages are complete.
+    const {options, ...core} = item.element;
+    const compact = options ? {...core, options_truncated: true} : item.element;
+    const capped = preserveText ? compact : cap(compact, NAME_CAP, VALUE_CAP);
     return JSON.stringify(capped) === JSON.stringify(item.element) ? null : { ...item, element: capped };
   }
 

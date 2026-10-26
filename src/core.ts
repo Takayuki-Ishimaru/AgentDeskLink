@@ -31,7 +31,7 @@ export class Engine {
   private desktopLane:Promise<unknown>|undefined;
   private readonly expiring=new Set<string>();
   private stopped=false;
-  private shut=false;
+  private shutdownPromise:Promise<void>|undefined;
   private queued=0;
   private closures=new WeakMap<AdapterSession,Promise<void>>();
   private master=new AbortController();
@@ -59,7 +59,7 @@ export class Engine {
     const probe=(this.adapters.desktop as {desktopCapabilities?:()=>{available:boolean;mutations:boolean;focus_control?:string;interactive_input?:boolean;gesture_backends?:string[];lifecycle?:boolean}}|undefined)?.desktopCapabilities?.();
     const interactive=this.desktopConfig()?.interactive?.enabled===true;
     const p=this.policy,blanket=p.allowAllOperations===true,app=this.platform==='darwin'?p.macos:this.platform==='win32'?p.windows:undefined;
-    return {ok:true,permissions:{all_operations:blanket,restricted_targets:p.restrictTargets===true,origins:blanket&&!p.restrictTargets?'all_allowed':p.allowedOrigins.slice(),targets:blanket&&!p.restrictTargets?'all_allowed':p.browserTargets.map(t=>({application_id:t.id,origin:new URL(t.url).origin})),desktop_app:app?.appId??'',physical_input:app?.interactive?.enabled===true,unredacted_images:app?.visual?.allowUnredacted===true,loopback:p.allowLoopback,private_network:p.allowPrivateNetwork},version:'0.1.3',transport:'stdio',modes:['strict_isolated',...(this.adapters.desktop?['background_semantic',...(interactive?['interactive_desktop']:[])]:[])],
+    return {ok:true,permissions:{all_operations:blanket,restricted_targets:p.restrictTargets===true,origins:blanket&&!p.restrictTargets?'all_allowed':p.allowedOrigins.slice(),targets:blanket&&!p.restrictTargets?'all_allowed':p.browserTargets.map(t=>({application_id:t.id,origin:new URL(t.url).origin})),desktop_app:app?.appId??'',physical_input:app?.interactive?.enabled===true,unredacted_images:app?.visual?.allowUnredacted===true,loopback:p.allowLoopback,private_network:p.allowPrivateNetwork},version:'0.1.4',transport:'stdio',modes:['strict_isolated',...(this.adapters.desktop?['background_semantic',...(interactive?['interactive_desktop']:[])]:[])],
       adapters:{browser:'chromium_headless',desktop:this.adapters.desktop?(probe?.focus_control==='probe_guarded_semantic'?'macos_ax_probe_required':'windows_uia_probe_required'):'unavailable',...(probe?{desktop_mutations:probe.mutations}:{})},
       lifecycle:{configured:this.policy.macos?.lifecycle?.enabled===true||this.policy.windows?.lifecycle?.enabled===true,available:probe?.lifecycle===true&&this.lifecyclePlatformSupported(),platform_supported:this.lifecyclePlatformSupported(),mode:'background_semantic'},
       limits:{max_sessions:this.policy.maxSessions,max_batch_steps:this.policy.maxBatchSteps,max_elements:this.policy.maxElements},
@@ -145,12 +145,12 @@ export class Engine {
   }
   private boundSnapshot(raw:RawSnapshot):RawSnapshot{return {...raw,elements:raw.elements.slice(0,this.policy.maxElements),truncated:raw.truncated||raw.elements.length>this.policy.maxElements};}
   openUrl(url:string,mode:Mode='strict_isolated',cancel?:AbortSignal){
-    if(this.stopped||!this.operationAllowed())return Promise.reject(new AdlError('E_CANCELLED'));
+    if(this.stopped||!this.operationAllowed()||cancel?.aborted)return Promise.reject(new AdlError('E_CANCELLED'));
     let parsed:URL;try{parsed=new URL(url);}catch{return Promise.reject(new AdlError('E_INVALID_ARGUMENT'));}
     if(!['http:','https:'].includes(parsed.protocol)||parsed.username||parsed.password||url.length>2048)return Promise.reject(new AdlError('E_INVALID_ARGUMENT'));
     // Origin and network grants are both checked before any catalogue mutation or open; the
     // extension profile sets restrictTargets so allowAllOperations cannot bypass them.
-    return assertUrlAllowed(url,this.policy).then(()=>this.enqueue(async()=>{
+    return this.deadline(()=>assertUrlAllowed(url,this.policy),this.policy.actionTimeoutMs,cancel).then(()=>this.enqueue(async()=>{
       if(cancel?.aborted)throw new AdlError('E_CANCELLED');
       return this.openInternal(this.openGranted(parsed),mode,cancel);
     }));
@@ -379,8 +379,12 @@ export class Engine {
   execute(steps:Step[],expected_revisions:Record<string,number>) {
     if(this.stopped||!this.operationAllowed())throw new AdlError('E_CANCELLED');
     if(!steps.length||steps.length>this.policy.maxBatchSteps)throw new AdlError('E_INVALID_ARGUMENT');
+    // Validation and asynchronous execution must use the same caller-independent plan.
+    steps=steps.map(step=>({...step,...(step.expected_target?{expected_target:{...step.expected_target}}:{}),...(step.condition?{condition:{...step.condition}}:{})}));
+    expected_revisions={...expected_revisions};
     for(const step of steps){
-      this.get(step.session_id);if(!Number.isSafeInteger(expected_revisions[step.session_id]))throw new AdlError('E_INVALID_ARGUMENT');
+      this.get(step.session_id);const expected=expected_revisions[step.session_id];
+      if(!Number.isSafeInteger(expected)||(expected??0)<1||step.expected_revision!==undefined&&(!Number.isSafeInteger(step.expected_revision)||step.expected_revision<1))throw new AdlError('E_INVALID_ARGUMENT');
       this.validateAction(step,this.get(step.session_id).target.surface);
     }
     if(this.tasks.size>=128){const done=[...this.tasks.values()].find(t=>!['queued','running'].includes(t.status));if(done)this.tasks.delete(done.id);else throw new AdlError('E_RESOURCE_LIMIT');}
@@ -428,12 +432,32 @@ export class Engine {
     if(application_id!==config.appId)throw new AdlError('E_POLICY_DENIED');
     let dispatched=false;
     const state=await this.deadline(async signal=>{dispatched=true;return adapter.application!(application_id,action,signal);},this.policy.actionTimeoutMs,cancel).catch((error:unknown)=>{if(action!=='status'&&dispatched&&error instanceof AdlError&&(cancel?.aborted||this.master.signal.aborted||error.code==='E_TIMEOUT'||error.code==='E_CANCELLED'))error.mayHaveExecuted=true;throw error;});
-    await this.audit('application_lifecycle',{action});
-    if(action==='quit'&&state.changed){
-      for(const s of [...this.sessions.values()])if(s.target.surface==='desktop'&&s.target.application_id===config.appId)await this.destroy(s);
-      this.replaceDesktopTargets([]);
+    try{
+      // An acknowledged quit has already changed native state. Retire its
+      // handles even if the subsequent audit write fails.
+      if(action==='quit'&&state.changed){
+        for(const s of [...this.sessions.values()])if(s.target.surface==='desktop'&&s.target.application_id===config.appId)await this.destroy(s);
+        this.replaceDesktopTargets([]);
+      }
+      await this.audit('application_lifecycle',{action});
+      return {ok:true,application_id,...state};
+    }catch(error){
+      const safe=error instanceof AdlError?error:new AdlError('E_INTERNAL');
+      if(action!=='status'&&state.changed)safe.mayHaveExecuted=true;
+      throw safe;
     }
-    return {ok:true,application_id,...state};
   }));}
-  async shutdown(){if(this.shut)return;this.shut=true;this.stopped=true;clearInterval(this.timer);this.master.abort();this.visuals.clear();this.inputProofs.clear();for(const t of this.tasks.values())t.controller.abort();await Promise.allSettled([...this.sessions.values()].map(s=>this.destroy(s)));await Promise.allSettled([this.adapters.browser.close(),this.adapters.desktop?.close()]);this.snapshots.clear();}
+  shutdown():Promise<void>{
+    if(this.shutdownPromise)return this.shutdownPromise;
+    this.stopped=true;
+    // Publish the shared completion before abort listeners or adapter callbacks
+    // can reenter shutdown. Every caller waits for all cleanup attempts.
+    this.shutdownPromise=Promise.resolve().then(async()=>{
+      await Promise.allSettled([...this.sessions.values()].map(s=>this.destroy(s)));
+      await Promise.allSettled([this.adapters.browser,this.adapters.desktop].map(adapter=>Promise.resolve().then(()=>adapter?.close())));
+      this.snapshots.clear();
+    });
+    clearInterval(this.timer);this.master.abort();this.visuals.clear();this.inputProofs.clear();for(const t of this.tasks.values())t.controller.abort();
+    return this.shutdownPromise;
+  }
 }

@@ -10,6 +10,8 @@ export interface Element {
   /** Internal DOM depth, projected out of public responses. */
   depth?: number;
   options?: {label:string;value:string;disabled:boolean;selected:boolean}[];
+  /** Candidates were omitted by the source or response budget; reobserve this id with a larger budget. */
+  options_truncated?: boolean;
 }
 export interface RawSnapshot { elements: Element[]; fingerprint: string; truncated: boolean; }
 export interface TargetWindow {

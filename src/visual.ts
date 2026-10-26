@@ -79,6 +79,7 @@ export class VisualStore {
     const revision = owner.revision;
     const captured_at = image.captured_at;
     const redacted = image.redacted;
+    const redaction = image.redaction ? structuredClone(image.redaction) : undefined;
     const vp = {...image.viewport};
     const coordinate_space=image.coordinate_space;
     const source_to_desktop=image.source_to_desktop?{...image.source_to_desktop}:undefined;
@@ -114,7 +115,7 @@ export class VisualStore {
       expires_at: new Date(expires_ms).toISOString(),
       viewport: vp,
       redacted,
-      ...(image.redaction?{redaction:structuredClone(image.redaction)}:{}),
+      ...(redaction?{redaction}:{}),
       coordinate_space,source_to_desktop,surface_epoch,input_token,retained_at:this.now(),
     };
     this.evict(frame.bytes);

@@ -1,47 +1,39 @@
-# AgentDeskLink 0.1.3 (beta)
+# AgentDeskLink 0.1.4 (beta)
 
 [日本語](RELEASE_NOTES_ja.md) | **English**
 
 This beta lets AI agents operate the local browser and desktop over MCP. Read the [supported environments and known limitations](KNOWN_ISSUES_en.md) before use.
 
-## Changes since 0.1.2
+## Changes since 0.1.3
 
-- The same VSIX now runs on macOS / Apple silicon, Windows x64 and Linux x64. It bundles Node.js and image-processing libraries for each OS, plus the macOS/Windows helpers, and selects the matching runtime at startup.
-- Separated MCP enablement from permissions. Configure browser origins, the desktop app, operations, physical input and unredacted native images separately. Enabling MCP alone grants no target access.
-- Improved scoped screen diffs, element names, select choices and Japanese labels. Browser observations also support depth filtering.
-- Improved browser screenshot masking for labels and text patterns that indicate sensitive information.
-- Added optional `representation: "auto"` to `adl_observe`. It chooses full or delta output by response size and returns `reset: true` when switching to a full response.
-- Other browser sessions can now continue while one session is waiting for a response.
-- Improved screen-element reading and state checks during background operations on macOS and Windows.
-- Updated the Japanese and English installation and update guides to match the current settings.
-
-## Features
-
-- Reads UI elements and changes, then clicks, fills, selects and scrolls. Multiple windows of the same application are handled individually.
-- Captures browser or target-window images with `adl_capture` and inspects crops from retained images.
-- Supports browser drags and touch swipes through `adl_gesture`, and timestamped frame sequences through `adl_record`.
-- `interactive_desktop` uses the real mouse and keyboard. Inspect the target with `adl_prepare_input` before `adl_commit_input`. Preparation also moves the pointer, so do not use it while someone is interacting with the desktop.
-- For macOS and Windows applications explicitly allowed in a CLI policy, `adl_applications` and `adl_app` provide status, launch and normal quit.
+- Added **bulk AI-client connection**. The settings panel detects standard configurations for Claude Code, Claude Desktop, Codex, Cursor, Windsurf, Devin, Gemini CLI, Cline and Roo Code, and registers or removes MCP entries. VS Code MCP is switched at the same time.
+- External clients use the permissions of the workspace where bulk enable was last selected. Other servers and manual entries with the same name are preserved. The panel displays registration status, conflicts and errors. Disabling, changing permissions or using emergency stop revokes previous managed connections.
+- The panel now shows **effective permissions** and explains unmet requirements. Invalid permission settings identify the setting and expected format; grants are denied until corrected.
+- Improved protection for sensitive browser regions. `data-adl-sensitive` and `data-adl-classification="SECRET"` / `"UNKNOWN"` also protect descendants, and a child marked `PUBLIC` cannot remove that protection. Protection covers observations, captures and retained crops, and ordinary actions inside protected regions are denied.
+- When select choices exceed the observation response budget, the control keeps its name and current state and reports omitted choices with `options_truncated: true`. The same flag indicates that the source collection limit was reached.
+- Fixed cancellation while opening URLs, batch operations, state cleanup after application quit and server shutdown. Improved manual update checks made immediately after cancelling an earlier check.
+- Updated Japanese and English installation guides, including AI-client registration and removal.
 
 ## Installation and updates
 
-Use VS Code 1.101 or newer and select “Extensions: Install from VSIX...” to install the common `agentdesklink-0.1.3.vsix` package. No separate Node.js installation or helper build is needed. Reload the window after installation.
+Use VS Code 1.101 or newer and select “Extensions: Install from VSIX...” to install `agentdesklink-0.1.4.vsix`. The same VSIX supports macOS / Apple silicon, Windows x64 and Linux x64. It bundles Node.js and image-processing libraries for each OS plus the macOS/Windows helpers, and selects the matching runtime at startup. Reload the window after installation.
 
-The updater in 0.1.2 and earlier does not recognize the new common filename. To upgrade to this version, download the common VSIX and `SHA256SUMS` from the release page, verify the hash and install it manually. Version 0.1.3 and later check the official GitHub releases for the common VSIX.
+The updater in 0.1.3 supports the common VSIX. Use the update-check and automatic-update settings, or download the VSIX and `SHA256SUMS` from the release page, verify the hash and install manually. Updating from 0.1.2 or earlier requires manual installation.
 
-After updating, configure the allowed origins/app and operation permissions again. Enabling MCP alone does not allow operations. Physical input and unredacted native images default to off.
+Registration with other AI clients is opt-in. Review the allowed origins/app and operation permissions, then select **AI Clients → Enable all**. Each client may require reconnection, a new conversation or a restart. Registration uses user settings, so the selected workspace's granted scope is also available from other projects in those clients. Codex TOML is reformatted while preserving its configuration values. Nonstandard configuration locations are outside automatic registration.
 
 See the [installation guide](INSTALL_en.md) and [update guide](UPDATES_en.md).
 
 ## Usage notes
 
-MCP starts disabled. Enabling the connection grants no target access or operation permissions. Configure browser origins, the desktop app, operations, physical input and unredacted native images separately in workspace settings. There is no dedicated approval UI for consequential actions. Review the actions and targets you give the AI.
-
+- MCP starts disabled. Enabling it grants no target access or operation permissions. There is no dedicated approval UI for consequential actions.
+- Physical input and unredacted native images default to off. `interactive_desktop` uses the real mouse and keyboard; do not use it while someone is interacting with the desktop.
 - Unknown secrets in images or text cannot be detected completely. Captured information is passed to the connected AI host.
 - Emergency stop cannot undo input or processing already dispatched to an application.
 - macOS desktop control requires Accessibility permission; capture requires Screen Recording.
 - The Windows helper is unsigned and the macOS helper is ad-hoc signed.
-- Linux supports browser operations only and requires a working Chromium operating system sandbox.
+- Linux supports browser operations only. Ubuntu 24.04 x64 requires the shared libraries needed by Chrome / Chromium and a working OS sandbox.
+- Use **Disable all** to remove managed external-client registrations before uninstalling the extension.
 
 ## License
 
