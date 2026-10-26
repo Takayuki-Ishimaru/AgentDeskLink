@@ -4,6 +4,7 @@
     "strict": true, "noUncheckedIndexedAccess": true, "esModuleInterop": true, "types": ["node"],
     "noUnusedLocals": true, "noUnusedParameters": true,
     "noImplicitReturns": true, "noFallthroughCasesInSwitch": true,
+    "noImplicitOverride": true, "allowUnreachableCode": false, "allowUnusedLabels": false,
     "skipLibCheck": true, "outDir": "dist", "rootDir": ".",
     "declaration": true, "sourceMap": true
   },

@@ -55,3 +55,18 @@ test('all 64 configured origins can open their root without allocating another t
   const engine=new Engine(policy,{browser:adapter});
   try{await engine.openUrl(`${browserOrigins[0]}/`);assert.equal(policy.browserTargets.length,64);}finally{await engine.shutdown();}
 });
+
+
+test('effective permission summary agrees with browser grants and native prerequisites',()=>{
+  const effective=(bundled as any).effectivePermissions as (grants:unknown,helper?:string,platform?:string)=>any;
+  assert.equal(typeof effective,'function');
+  const grants={desktopAppId:'test.app',desktopAppPath:'/app',allowPhysicalInput:true};
+  for(const platform of ['darwin','win32']){
+    const missingImages=effective(grants,'/helper',platform);assert.equal(missingImages.allowPhysicalInput,false);assert.ok(missingImages.reasons.some((r:string)=>/images|画像/.test(r)));
+    assert.equal(effective({...grants,allowUnredactedImages:true},'/helper',platform).allowPhysicalInput,true);
+    assert.equal(effective({...grants,allowUnredactedImages:true},undefined,platform).allowPhysicalInput,false);
+    assert.equal(effective({...grants,allowUnredactedImages:true},'relative-helper',platform).allowPhysicalInput,false);
+  }
+  assert.equal(effective({...grants,allowUnredactedImages:true},'/helper','linux').allowPhysicalInput,false);
+  assert.equal(effective({browserOrigins:['https://example.com'],allowAllOperations:true},undefined,'linux').allowAllOperations,true,'browser-wide operation grant must not depend on native app');
+});

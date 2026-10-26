@@ -6,6 +6,9 @@ await build({
   bundle: true,
   external: ['vscode'],
   platform: 'node',
+  // jsonc-parser's UMD factory contains relative runtime requires; bundle its
+  // published ESM entry so the VSIX remains self-contained.
+  mainFields: ['module', 'main'],
   format: 'cjs',
   target: 'node22',
   logLevel: 'warning',

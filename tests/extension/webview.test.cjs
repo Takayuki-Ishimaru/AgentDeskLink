@@ -120,3 +120,34 @@ test('emergency stop remains clickable while stop itself is busy; hidden control
   const css=fs.readFileSync(path.join(__dirname,'../../media/settings.css'),'utf8');
   assert.match(css,/\[hidden\]\s*\{[^}]*display\s*:\s*none\s*!important/);
 });
+
+test('bulk client controls show detection and per-client errors as text, and disabling stays available', async () => {
+  const p=panel();
+  p.state({trusted:false,hasFolder:false,busy:{clients:true},clients:{busy:true,error:'',rows:[
+    {id:'claude-code',name:'Claude Code',detected:true,status:'enabled',message:''},
+    {id:'cursor',name:'Cursor',detected:false,status:'not-detected',message:''},
+    {id:'codex',name:'Codex',detected:true,status:'conflict',message:'<img src=x onerror=alert(1)>'}
+  ]}});
+  assert.equal(p.get('clients-list').children.length,3);
+  assert.match(p.get('clients-list').textContent,/Claude Code登録済み/);
+  assert.match(p.get('clients-error').textContent,/<img src=x onerror=alert\(1\)>/);
+  assert.equal(p.get('clients-error').innerHTML,undefined);
+  assert.equal(p.get('clients-enable').disabled,true);
+  assert.equal(p.get('clients-disable').disabled,false);
+  await p.get('clients-disable').trigger('click');
+  assert.ok(p.messages.some(m=>m.type==='disableAllClients'));
+  p.state({trusted:true,hasFolder:true,busy:{clients:false},clients:{busy:false,error:'',rows:[]}});
+  assert.equal(p.get('clients-enable').disabled,false);
+  await p.get('clients-enable').trigger('click');
+  assert.ok(p.messages.some(m=>m.type==='enableAllClients'));
+  await p.get('clients-refresh').trigger('click');
+  assert.ok(p.messages.some(m=>m.type==='refreshClients'));
+});
+
+
+test('permission summary renders effective physical denial and missing prerequisites as safe text',()=>{
+  const p=panel();const reason='画像許可が必要 <img src=x onerror=alert(1)>';
+  p.state({permissions:{requested:{allowPhysicalInput:true},effective:{browserOrigins:[],desktopAppId:'',allowAllOperations:false,allowPhysicalInput:false,allowUnredactedImages:false,allowLoopback:false,allowPrivateNetwork:false,reasons:[reason]}}});
+  const row=p.get('permissions').children[3];assert.match(row.children[1].textContent,/off|オフ/);assert.doesNotMatch(row.children[1].textContent,/^on$/);
+  assert.ok(p.get('permissions-hint').textContent.includes(reason));assert.equal(p.get('permissions-hint').innerHTML,undefined);
+});

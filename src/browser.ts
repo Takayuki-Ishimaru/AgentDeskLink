@@ -6,7 +6,7 @@ import {resolveAllowedAddresses} from './policy.js';
 import {captureBrowserImage} from './browser-visual.js';
 import {runBrowserGesture} from './browser-gesture.js';
 import {preflightBrowserInput} from './browser-preflight.js';
-import {SECRET_LABEL_PATTERN} from './privacy.js';
+import {SECRET_LABEL_PATTERN, BROWSER_PRIVACY_RULES} from './privacy.js';
 import {ensureBrowserPrivacySelectors} from './browser-privacy.js';
 import type {GesturePolicy,GesturePlan,GestureReference,GestureExecution} from './gesture-types.js';
 import type {CapturedImage,VisualPolicy} from './visual-types.js';
@@ -118,7 +118,7 @@ type Store = {ids: WeakMap<object, string>; nodes: Map<string, object>; seq: num
 // closure (WeakMap/Map not on window, unreachable from page scripts).
 // Bounded TreeWalker traversal: visit cap, depth cap, output cap; only
 // bounded text nodes are read (never textContent on huge subtrees).
-function snapshotPageFn(store: Store, cfg: {maxOut: number; visitCap: number; maxDepth: number; fieldMax: number; secretLabelPattern:string}): {elements: ElementInfo[]; sig: string; truncated: boolean} {
+function snapshotPageFn(store: Store, cfg: {maxOut: number; visitCap: number; maxDepth: number; fieldMax: number; secretLabelPattern:string; privacyRules:typeof BROWSER_PRIVACY_RULES}): {elements: ElementInfo[]; sig: string; truncated: boolean} {
   const clip = (s: string): string => s.length > cfg.fieldMax ? s.slice(0, cfg.fieldMax) : s;
   const idFor = (n: object): string => {
     let id = store.ids.get(n);
@@ -146,10 +146,20 @@ function snapshotPageFn(store: Store, cfg: {maxOut: number; visitCap: number; ma
   };
   const secretPattern=new RegExp(cfg.secretLabelPattern,'iu');
   const sensitiveLabel=(text:string)=>secretPattern.test(text.normalize('NFKC').replace(/([A-Z])([A-Z][a-z])/g,'$1 $2').replace(/([a-z0-9])([A-Z])/g,'$1 $2').replace(/([A-Za-z])([0-9])/g,'$1 $2').replace(/([0-9])([A-Za-z])/g,'$1 $2'));
+  const inSensitiveRegion=(element:Element):boolean=>{
+    let node:Element|null=element,depth=0;
+    while(node&&depth++<cfg.privacyRules.ancestorCap){
+      if(node.matches(cfg.privacyRules.regionSelector))return true;
+      node=node.parentElement;
+    }
+    return node!==null; // Incomplete ancestry cannot establish a public region.
+  };
   const descendantText=(el:Element,includeHidden=false):string=>{
-    const walker=document.createTreeWalker(el,NodeFilter.SHOW_ELEMENT|NodeFilter.SHOW_TEXT);
+    if(inSensitiveRegion(el))return "x".repeat(cfg.fieldMax);
+    let scanned=0, exhausted=false;
+    const walker=document.createTreeWalker(el,NodeFilter.SHOW_ELEMENT|NodeFilter.SHOW_TEXT,{acceptNode:node=>{if(++scanned>128){exhausted=true;return NodeFilter.FILTER_ACCEPT;}return node.nodeType===1&&(node as Element).matches(cfg.privacyRules.textSkipSelector+","+cfg.privacyRules.regionSelector)?NodeFilter.FILTER_REJECT:NodeFilter.FILTER_ACCEPT;}});
     let node:Node|null=walker.nextNode(),text='',visits=0;
-    while(node&&visits++<128&&text.length<cfg.fieldMax){
+    while(node&&!exhausted&&visits++<128&&text.length<cfg.fieldMax){
       if(node.nodeType===3&&!node.parentElement?.closest('script,style')&&(includeHidden||!node.parentElement?.closest('[hidden],[aria-hidden="true"]')))text+=node.textContent?.slice(0,cfg.fieldMax-text.length)??'';
       node=walker.nextNode();
     }
@@ -224,13 +234,13 @@ function snapshotPageFn(store: Store, cfg: {maxOut: number; visitCap: number; ma
       if(rawNameAttr.length>512)throw new Error('Snapshot field limit');
       const hints=[rawName,labelText,...(labelEl?[descendantText(labelEl,true)]:[]),referenceText,cur.getAttribute('aria-label')||'',cur.getAttribute('placeholder')||'',cur.getAttribute('title')||'',cur.getAttribute('autocomplete')||'',cur.id,rawNameAttr];
       if(hints.some(hint=>hint.length>4096))throw new Error('Snapshot field limit');
-      let sensitive = isPassword || cur.hasAttribute('data-adl-sensitive') || /^(secret|unknown)$/i.test(cur.getAttribute('data-adl-classification')||'') || hints.some(hint=>hint.length>=cfg.fieldMax||sensitiveLabel(hint));
+      let sensitive = isPassword || inSensitiveRegion(cur) || hints.some(hint=>hint.length>=cfg.fieldMax||sensitiveLabel(hint));
       let rawVal = '';
       if (tag === 'input' || tag === 'textarea') rawVal = (cur as HTMLInputElement).value ?? '';
       else if (tag === 'select') {
         const sel = cur as HTMLSelectElement;
         rawVal = sel.options[sel.selectedIndex]?.value ?? '';
-        if(sensitiveLabel(sel.options[sel.selectedIndex]?.label??''))sensitive=true;
+        if(sel.selectedIndex>=0&&(inSensitiveRegion(sel.options[sel.selectedIndex]!)||sensitiveLabel(sel.options[sel.selectedIndex]?.label??'')))sensitive=true;
       }
       if(rawVal.length>4096)throw new Error('Snapshot field limit');
       const value = isPassword ? undefined : clip(rawVal);
@@ -238,15 +248,16 @@ function snapshotPageFn(store: Store, cfg: {maxOut: number; visitCap: number; ma
       const checked = tag === 'input' && (type === 'checkbox' || type === 'radio') ? (cur as HTMLInputElement).checked : undefined;
       const selected = tag === 'select' ? (cur as HTMLSelectElement).selectedIndex >= 0 : undefined;
       let options:ElementInfo['options'];
+      let optionsTruncated=false;
       if(tag==='select'){
         const entries=(cur as HTMLSelectElement).options;
-        if(entries.length>100)truncated=true;
+        if(entries.length>100){truncated=true;optionsTruncated=true;}
         options=[];
         for(let i=0;i<Math.min(entries.length,100);i++){
           const option=entries[i]!;
           if(option.label.length>4096||option.value.length>4096)throw new Error('Snapshot field limit');
-          const hidden=sensitiveLabel(option.label);
-          if(option.label.length>cfg.fieldMax||option.value.length>cfg.fieldMax)truncated=true;
+          const hidden=inSensitiveRegion(option)||sensitiveLabel(option.label);
+          if(option.label.length>cfg.fieldMax||option.value.length>cfg.fieldMax){truncated=true;optionsTruncated=true;}
           options.push({label:hidden?'[redacted]':clip(option.label),value:hidden?'[redacted]':clip(option.value),disabled:option.disabled||option.parentElement?.matches('optgroup:disabled')===true,selected:option.selected});
         }
       }
@@ -257,8 +268,8 @@ function snapshotPageFn(store: Store, cfg: {maxOut: number; visitCap: number; ma
       if(href.length>2048||actionAttr.length>2048)throw new Error('Snapshot field limit');
       const id = idFor(cur);
       store.seen.add(id);
-      sigParts.push(JSON.stringify([id, role, rawName, enabled, checked, selected, type, consequential, href, actionAttr, rawVal,ownText,sensitive,options,depth]));
-      elements.push({id, role, name, depth, ...(options?{options}:{}), ...(value !== undefined ? {value} : {}), enabled, ...(checked !== undefined ? {checked} : {}), ...(selected !== undefined ? {selected} : {}), ...(sensitive ? {sensitive: true} : {})});
+      sigParts.push(JSON.stringify([id, role, rawName, enabled, checked, selected, type, consequential, href, actionAttr, rawVal,ownText,sensitive,options,optionsTruncated,depth]));
+      elements.push({id, role, name, depth, ...(options?{options,...(optionsTruncated?{options_truncated:true}:{})}:{}), ...(value !== undefined ? {value} : {}), enabled, ...(checked !== undefined ? {checked} : {}), ...(selected !== undefined ? {selected} : {}), ...(sensitive ? {sensitive: true} : {})});
     }
     // Only a depth skip continues (with later siblings); the visit and output
     // caps above set the flag and break out of the traversal immediately.
@@ -383,7 +394,7 @@ class BrowserSession implements AdapterSession {
     this.checkAlive();
     if(new URL(this.page.url()).origin!==this.origin){await this.close();throw new AdlError('E_POLICY_DENIED');}
     const maxOut = this.policy.maxElements > 0 ? this.policy.maxElements : 5000;
-    const cfg = {maxOut, visitCap: Math.min(maxOut * 8, 5000), maxDepth: 12, fieldMax: 512,secretLabelPattern:SECRET_LABEL_PATTERN};
+    const cfg = {maxOut, visitCap: Math.min(maxOut * 8, 5000), maxDepth: 12, fieldMax: 512,secretLabelPattern:SECRET_LABEL_PATTERN,privacyRules:BROWSER_PRIVACY_RULES};
     let res: {elements: ElementInfo[]; sig: string; truncated: boolean};
     try {
       res = await this.store!.evaluate(snapshotPageFn, cfg);
@@ -522,7 +533,7 @@ class BrowserSession implements AdapterSession {
       throw new AdlError('E_TARGET_NOT_FOUND');
     }
     try {
-      const info = await el.evaluate((node, secretLabelPattern:string) => {
+      const info = await el.evaluate((node, {secretLabelPattern,privacyRules}:{secretLabelPattern:string;privacyRules:typeof BROWSER_PRIVACY_RULES}) => {
         const e = node as HTMLElement;
         const tag = e.tagName.toLowerCase();
         const type = tag === 'input' ? ((e as HTMLInputElement).type || 'text').toLowerCase() : '';
@@ -531,10 +542,17 @@ class BrowserSession implements AdapterSession {
         const form = e.closest('form');
         const name = e.getAttribute('aria-label') || e.id || '';
         const nameAttr = e.getAttribute('name') || '';
+        const inSensitiveRegion=(element:Element):boolean=>{
+          let node:Element|null=element,depth=0;
+          while(node&&depth++<privacyRules.ancestorCap){if(node.matches(privacyRules.regionSelector))return true;node=node.parentElement;}
+          return node!==null;
+        };
         const textOf=(element:Element):string=>{
-          const walker=document.createTreeWalker(element,NodeFilter.SHOW_ELEMENT|NodeFilter.SHOW_TEXT);
+          if(inSensitiveRegion(element))return "x".repeat(512);
+          let scanned=0, exhausted=false;
+          const walker=document.createTreeWalker(element,NodeFilter.SHOW_ELEMENT|NodeFilter.SHOW_TEXT,{acceptNode:node=>{if(++scanned>128){exhausted=true;return NodeFilter.FILTER_ACCEPT;}return node.nodeType===1&&(node as Element).matches(privacyRules.textSkipSelector+","+privacyRules.regionSelector)?NodeFilter.FILTER_REJECT:NodeFilter.FILTER_ACCEPT;}});
           let node=walker.nextNode(),text='',visits=0;
-          while(node&&visits++<128&&text.length<512){if(node.nodeType===3&&!node.parentElement?.closest('script,style'))text+=(node.textContent??'').slice(0,512-text.length);node=walker.nextNode();}
+          while(node&&!exhausted&&visits++<128&&text.length<512){if(node.nodeType===3&&!node.parentElement?.closest('script,style'))text+=(node.textContent??'').slice(0,512-text.length);node=walker.nextNode();}
           return node?'x'.repeat(512):text.trim();
         };
         const hints=[name,e.id,nameAttr,e.getAttribute('placeholder')||'',e.getAttribute('title')||'',e.getAttribute('autocomplete')||''];
@@ -545,10 +563,10 @@ class BrowserSession implements AdapterSession {
         return {
           tag,
           type,
-          sensitive: (tag === 'input' && type === 'password') || e.hasAttribute('data-adl-sensitive') || /^(secret|unknown)$/i.test(e.getAttribute('data-adl-classification')||'') || hints.some(sensitiveLabel),
+          sensitive: (tag === 'input' && type === 'password') || inSensitiveRegion(e) || hints.some(sensitiveLabel),
           consequential: CONSEQUENTIAL_RE.test(name) || CONSEQUENTIAL_RE.test(nameAttr) || (tag === 'button' && (e.getAttribute('type') || 'submit') === 'submit' && !!form) || (tag === 'input' && type === 'submit'),
         };
-      },SECRET_LABEL_PATTERN);
+      },{secretLabelPattern:SECRET_LABEL_PATTERN,privacyRules:BROWSER_PRIVACY_RULES});
       const authorized = this.policy.allowAllOperations ? await el.evaluate(node=>{
         // Derive an exact selector from the retained element without modifying the page.
         const parts:string[]=[];let current:Element|null=node;

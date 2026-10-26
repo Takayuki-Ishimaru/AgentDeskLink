@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import * as crypto from 'node:crypto';
-import { readSettings, log, type ExtensionPermissions } from './shared.js';
+import { readSettings, log, type PermissionSummary } from './shared.js';
+import type { ClientRow } from './client-manager.js';
 
 export interface PanelHooks {
   checkForUpdates(): Promise<void>;
@@ -11,10 +12,13 @@ export interface PanelHooks {
   operationsStopped(): boolean;
   mcpStatus(): string;
   mcpError(): string | null;
-  permissions(): ExtensionPermissions;
+  permissions(): PermissionSummary;
   updateStatus(): string;
   version(): string;
   refreshMcp(): Promise<void>;
+  clientState(): { rows: ClientRow[]; busy: boolean; error: string; owner: string };
+  refreshClients(): Promise<void>;
+  setAllClientsEnabled(enabled: boolean): Promise<void>;
 }
 
 const KEYS = ['enabled', 'autoUpdate', 'checkForUpdates'] as const;
@@ -60,12 +64,21 @@ export class SettingsPanelProvider implements vscode.WebviewViewProvider {
   <p class="status" id="stopped-status" role="status" hidden>操作を緊急停止中です。再開するには「操作を再開」を押してください。</p>
   <div class="row"><label class="check"><input type="checkbox" id="enabled"><span>このワークスペースで MCP を有効にする</span></label></div>
   <p class="hint" id="enabled-hint">変更はこのワークスペースに保存されます。</p>
-  <h4 class="perm-title">現在の権限 / Current permissions</h4>
+  <h4 class="perm-title">現在の実効権限 / Effective permissions</h4>
   <ul class="permissions" id="permissions"></ul>
   <p class="hint" id="permissions-hint"></p>
   <p class="error" id="enabled-error" role="alert"></p>
   <p class="status" id="mcp-status" role="status"></p>
   <p class="error" id="mcp-error" role="alert"></p>
+</section>
+<section class="section" aria-labelledby="clients-title">
+  <h3 id="clients-title">AIクライアント</h3>
+  <p class="hint">インストール済みのクライアントを自動検出します。一括有効で、このワークスペースの権限を共有します。</p>
+  <div class="actions"><button id="clients-enable">すべて有効</button><button id="clients-disable" class="secondary">すべて無効</button><button id="clients-refresh" class="secondary">再検出</button></div>
+  <ul class="client-list" id="clients-list" aria-label="AIクライアントの登録状態"></ul>
+  <p class="status" id="clients-status" role="status"></p>
+  <p class="error" id="clients-error" role="alert"></p>
+  <p class="hint">反映には各クライアントでの再接続・新しい会話・再起動が必要な場合があります。同名の手動設定は保持します。最後に一括有効にしたワークスペースが接続を管理します。</p>
 </section>
 <section class="section" aria-labelledby="updates-title">
   <h3 id="updates-title">拡張機能の更新</h3>
@@ -105,6 +118,9 @@ export class SettingsPanelProvider implements vscode.WebviewViewProvider {
       }
       case 'emergencyStop': return this.runGuarded('stop', () => this.hooks.emergencyStop());
       case 'resumeOperations': return this.runGuarded('resume', () => this.hooks.resumeOperations());
+      case 'enableAllClients': return this.saveClients(true);
+      case 'disableAllClients': return this.saveClients(false);
+      case 'refreshClients': return this.runGuarded('clients', () => this.hooks.refreshClients());
       case 'checkForUpdates': return this.checkForUpdates();
       case 'openLogs': this.hooks.openLogs(); return Promise.resolve();
       case 'openWorkspaceSettings': this.hooks.openWorkspaceSettings(); return Promise.resolve();
@@ -115,6 +131,13 @@ export class SettingsPanelProvider implements vscode.WebviewViewProvider {
 
   private save(key: typeof KEYS[number], value: boolean, target: vscode.ConfigurationTarget, errorKey: 'enabledError' | 'globalError'): Promise<void> {
     const saved = this.saves.then(() => this.performSave(key, value, target, errorKey));
+    this.saves = saved.catch(() => {});
+    return saved;
+  }
+
+  private saveClients(enabled: boolean): Promise<void> {
+    if (!enabled) return this.runGuarded('clients', () => this.hooks.setAllClientsEnabled(false));
+    const saved = this.saves.then(() => this.runGuarded('clients', () => this.hooks.setAllClientsEnabled(enabled)));
     this.saves = saved.catch(() => {});
     return saved;
   }
@@ -198,7 +221,8 @@ export class SettingsPanelProvider implements vscode.WebviewViewProvider {
       trusted: vscode.workspace.isTrusted,
       hasFolder,
       permissions: this.hooks.permissions(),
-      busy: Object.fromEntries(['enabled', 'auto', 'check', 'checkNow', 'stop', 'resume'].map(k => [k, this.busy.has(k)])),
+      clients: this.hooks.clientState(),
+      busy: Object.fromEntries(['enabled', 'auto', 'check', 'checkNow', 'stop', 'resume', 'clients'].map(k => [k, this.busy.has(k)])),
       status: {
         version: this.hooks.version(),
         mcp: this.hooks.mcpStatus(),

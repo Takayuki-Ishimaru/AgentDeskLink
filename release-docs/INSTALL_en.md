@@ -2,12 +2,12 @@
 
 [日本語](INSTALL.md) | **English**
 
-Target version: `0.1.3` (beta)
+Target version: `0.1.4` (beta)
 
 ## Requirements
 
 - VS Code 1.101 or newer.
-- The common `agentdesklink-0.1.3.vsix` package. Check the [supported environments and known limitations](KNOWN_ISSUES_en.md).
+- The common `agentdesklink-0.1.4.vsix` package. Check the [supported environments and known limitations](KNOWN_ISSUES_en.md).
 - A network connection for the first Chromium download if Chrome is not installed.
 
 One VSIX bundles Node.js and image-processing libraries for macOS / Apple silicon, Windows x64 and Linux x64. It also includes the macOS and Windows desktop helpers. It selects the matching runtime at startup, so no separate build is needed.
@@ -16,7 +16,7 @@ The distribution file is shared across these operating systems. This common VSIX
 
 ## Installation
 
-1. Download `agentdesklink-0.1.3.vsix` and `SHA256SUMS` from the release page.
+1. Download `agentdesklink-0.1.4.vsix` and `SHA256SUMS` from the release page.
 2. Compute the SHA-256 using the [update guide](UPDATES_en.md) and confirm it matches the list.
 3. In the VS Code Command Palette, choose “Extensions: Install from VSIX...” and select the VSIX.
 4. Open the folder you want to use, review its contents and trust the workspace.
@@ -24,6 +24,14 @@ The distribution file is shared across these operating systems. This common VSIX
 6. Choose “Open Settings” in the panel and configure the browser origins or desktop app and the operation permissions you need. See “Initial settings and scope” below.
 7. Turn on “Enable the AgentDeskLink MCP server for this workspace”.
 8. Approve the server start in the VS Code MCP management view.
+
+## Use Claude Code and other AI clients
+
+The **AI clients** section detects standard installations of Claude Code, Claude Desktop, Codex, Cursor, Windsurf, Devin, Gemini CLI, Cline and Roo Code. **Enable all** registers AgentDeskLink with detected clients and enables the VS Code provider. Claude Code uses its own MCP settings, so the VS Code provider alone does not make tools available there. Reconnect or start a new conversation after registration.
+
+**Detect again** finds newly installed clients. With `agentdesklink.syncClients` enabled, registrations also synchronize on startup and permission changes. Each client displays its registration, detection, conflict or error status. Other servers are preserved, and manual entries named `agentdesklink` are never overwritten or removed. Codex TOML is reformatted while preserving its configuration values.
+
+External clients share the permissions of the workspace where **Enable all** was last clicked. Opening another workspace does not take ownership. **Disable all** removes managed registrations and stops existing external connections. Permission changes and emergency stop also revoke old connections; reconnect when required. Registrations remain after VS Code exits. User-level registration makes that workspace's granted scope available from other projects in the client. Nonstandard locations and unsupported AI clients require manual setup.
 
 ## Initial settings and scope
 
@@ -72,6 +80,8 @@ Use **AgentDeskLink: Emergency Stop** from the settings panel or Command Palette
 Stop servers launched manually from another MCP host through that host.
 
 ## Stopping and uninstalling
+
+If you registered other AI clients, first use **AI Clients → Disable all** to remove managed registrations. Uninstalling the extension alone does not remove entries from those clients.
 
 1. Stop running servers in the VS Code MCP management view.
 2. Turn off MCP for this workspace.

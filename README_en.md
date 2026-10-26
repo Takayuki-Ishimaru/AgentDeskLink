@@ -12,7 +12,7 @@ AgentDeskLink is an MCP server that connects AI agents to your local browser and
 
 [Get started](release-docs/INSTALL_en.md) · [What you can do](#what-you-can-do) · [Supported environments](#supported-environments) · [Release guide](release-docs/README_en.md) · [MIT License](LICENSE)
 
-> **0.1.3 / Beta**  
+> **0.1.4 / Beta**  
 > This beta is intended for a limited range of use. Before installing, review [supported environments and known limitations](release-docs/KNOWN_ISSUES_en.md).
 
 ## What you can do
@@ -28,7 +28,7 @@ Drag inside the browser, touch swipes and timestamped continuous frame capture a
 
 ## Get started in VS Code
 
-1. Download the common `agentdesklink-0.1.3.vsix` package, then install it with "Extensions: Install from VSIX".
+1. Download the common `agentdesklink-0.1.4.vsix` package, then install it with "Extensions: Install from VSIX".
 2. Open a folder and trust the workspace.
 3. Open **AgentDeskLink** in the activity bar.
 4. Choose **Open Settings** and configure the allowed browser origins or desktop app and the operation permissions you need.
@@ -39,6 +39,12 @@ Drag inside the browser, touch swipes and timestamped continuous frame capture a
 AgentDeskLink itself needs no external AI API key. AI connection and authentication happen on the MCP host side.
 
 [See the installation steps →](release-docs/INSTALL_en.md)
+
+### Connect other AI clients together
+
+In the settings panel, choose **AI clients → Enable all** to detect installed Claude Code, Claude Desktop, Codex, Cursor, Windsurf, Devin, Gemini CLI, Cline and Roo Code clients and register MCP. This also enables the VS Code MCP provider. **Disable all** removes managed registrations and stops connected external clients.
+
+Clients share the permissions of the workspace where you last explicitly enabled them. Other MCP settings are preserved; existing manual registrations with the same name are reported individually. Clients may require reconnection, a new conversation or a restart.
 
 ## Supported environments
 
@@ -60,6 +66,10 @@ Which actions are available depends on your OS, app and display setup. See [supp
 - **Physical input uses a dedicated mode.** `interactive_desktop` uses your real mouse and keyboard, so do not run it alongside your own input.
 
 There is no dedicated approval UI for consequential actions. Review the targets and actions you give the AI. Unknown secrets in images or text cannot be detected completely. Use Emergency Stop in the settings panel or Command Palette to stop extension-managed operations, and Resume Operations to resume. Processing already dispatched to an application cannot be undone.
+
+Browser regions marked `data-adl-sensitive` or `data-adl-classification="SECRET"` / `"UNKNOWN"` protect their descendants as well. A child marked `PUBLIC` cannot remove that protection. Semantic observations redact protected content; ordinary control allowlists cannot authorize actions within these regions. Browser captures and retained crops mask them. These explicit markers complement automatic detection.
+
+If a select candidate list exceeds the observation budget, the control retains its name and current state and reports `options_truncated: true`. Reobserve with `scope: "id:<element_id>"` and a larger `token_budget` to retrieve candidates, or omit `options` from `include`. At most 100 candidates are collected; reaching that source limit or clipping candidate text also sets this flag. Check it even when the last cursor page has `truncated: false`.
 
 ## Try it from source
 

@@ -31,3 +31,9 @@ test('gesture rechecks hover-created editable overlay before pressing',{timeout:
 test('gesture stops on surface movement and releases a pressed mouse',{timeout:10000},async()=>{
  const f=await fixture('<canvas id="art"></canvas>',`document.getElementById('board').addEventListener('mousedown',()=>{document.getElementById('board').style.left='20px'},{once:true});`);try{await assert.rejects(runBrowserGesture(f.page,f.request(),f.policy,f.reference,f.signal,()=>{}),(e:unknown)=>e instanceof AdlError&&e.code==='E_STALE_STATE'&&e.mayHaveExecuted);assert.deepEqual(await f.counts(),{clicks:0,presses:1,releases:1});}finally{await f.close();}
 });
+
+
+for(const marker of ['SECRET','UNKNOWN'])test(`gesture rejects inherited ${marker} classification above its allowed surface`,{timeout:10000},async()=>{
+ const f=await fixture('<canvas id="art"></canvas>',`document.body.setAttribute('data-adl-classification','${marker}');`);
+ try{await assert.rejects(runBrowserGesture(f.page,f.request(),f.policy,f.reference,f.signal,()=>{}),{code:'E_POLICY_DENIED'});assert.equal((await f.counts()).presses,0);}finally{await f.close();}
+});

@@ -1,5 +1,6 @@
 import type {CDPSession, ElementHandle, Page} from 'playwright';
 import {AdlError} from './types.js';
+import {BROWSER_PRIVACY_RULES} from './privacy.js';
 import type {GestureExecution, GestureKind, GesturePlan, GesturePolicy, GestureReference} from './gesture-types.js';
 
 const MIN_POINTS=2;
@@ -9,7 +10,7 @@ const EPSILON=0.51;
 
 interface Viewport {width:number;height:number;scroll_x:number;scroll_y:number;device_scale_factor:number}
 interface Box {x:number;y:number;width:number;height:number}
-interface ProbeArg {allowAllOperations?:boolean;origin:string;viewport:Viewport;selector:string;points:{x:number;y:number}[]}
+interface ProbeArg {privacyRules:typeof BROWSER_PRIVACY_RULES;allowAllOperations?:boolean;origin:string;viewport:Viewport;selector:string;points:{x:number;y:number}[]}
 interface Probe {ok:boolean;reason:string;origin:string;viewport:Viewport;box:Box;touch_action:string}
 
 function invalid():never{throw new AdlError('E_INVALID_ARGUMENT');}
@@ -95,6 +96,10 @@ function probeSurface(el:Element,arg:ProbeArg):Probe{
     if(!inside){reason='occluded';break;}
     for(let j=0;!arg.allowAllOperations&&j<stack.length;j++){
       const node=stack[j]!;
+      let region:Element|null=node,regionDepth=0;
+      while(region&&regionDepth++<arg.privacyRules.ancestorCap){if(region.matches(arg.privacyRules.regionSelector)){reason='blocked_target';break;}region=region.parentElement;}
+      if(region){reason='blocked_target';break;}
+
       if(typeof node.closest==='function'&&node.closest('input,textarea,select,button,a[href],iframe,frame,[contenteditable],[data-adl-sensitive],[role="button"],[role="link"],[role="textbox"],[role="searchbox"],[role="combobox"],[role="checkbox"],[role="radio"],[role="switch"],[role="menuitem"],[role="option"],[role="tab"]')){reason='blocked_target';break;}
       // A trusted drawing surface can contain custom widgets without native tags.
       // Bound the ancestor walk and reject known sensitive/consequential names.
@@ -143,7 +148,7 @@ export async function runBrowserGesture(page:Page,plan:GesturePlan,policy:Gestur
   if(!origin||origin==='null')stale();
   // Snapshot caller-owned path and viewport before awaiting external code.
   const points=plan.points.map(p=>({...p}));
-  const arg:ProbeArg={allowAllOperations,origin,viewport:{...viewport},selector,points:points.map(p=>({x:p.x,y:p.y}))};
+  const arg:ProbeArg={privacyRules:BROWSER_PRIVACY_RULES,allowAllOperations,origin,viewport:{...viewport},selector,points:points.map(p=>({x:p.x,y:p.y}))};
   let handle:ElementHandle|null=null,session:CDPSession|undefined;
   let mousePressed=false,touchActive=false,sent=false,executed=0;
   let failure:unknown;
