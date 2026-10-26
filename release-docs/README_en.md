@@ -6,7 +6,7 @@
   <img src="../media/readme-hero-v2.png" alt="AgentDeskLink — Browser + Desktop, over MCP" width="1200">
 </p>
 
-Target version: `0.1.2`
+Target version: `0.1.3`
 
 **The browser and the desktop, from the AI agent you already use.**
 

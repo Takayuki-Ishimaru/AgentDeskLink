@@ -3,6 +3,7 @@ import ipaddr from 'ipaddr.js';
 import {isIP} from 'node:net';
 import { z } from 'zod';
 import { AdlError, type Action, type ActionName, type Element, type PolicyConfig } from './types.js';
+import {isSensitiveLabel, TEXT_REDACTION_RULES} from './privacy.js';
 
 const MAX_BATCH_STEPS = 20;
 const MAX_TEXT = 512;
@@ -21,6 +22,7 @@ const interactiveConfig=z.object({
 }).strict().refine(v=>Buffer.byteLength(JSON.stringify(v))<=8000&&new Set(v.surfaces.map(s=>s.id)).size===v.surfaces.length&&v.surfaces.every(s=>s.region.x+s.region.width<=4096&&s.region.y+s.region.height<=4096&&new Set(s.kinds).size===s.kinds.length));
 const desktopConfig = z.object({
   allowAllOperations:z.boolean().optional(),
+  restrictTargets:z.boolean().optional(),
   helperPath: absolutePath,
   appId: z.string().min(1).max(128),
   appPath: absolutePath,
@@ -33,6 +35,7 @@ const desktopConfig = z.object({
 
 const policySchema = z.object({
   allowAllOperations:z.boolean().optional(),
+  restrictTargets:z.boolean().optional(),
   allowedOrigins: z.array(origin).max(64).default([]),
   browserTargets: z.array(z.object({
     id: z.string().min(1).max(128),
@@ -144,7 +147,7 @@ export async function resolveAllowedAddresses(url: string, policy: PolicyConfig,
   if (hostname.endsWith('.') && hostname.slice(0, -1) !== '') hostname = hostname.slice(0, -1);
   if (hostname === '') deny();
   const allowed = new Set(policy.allowedOrigins.map((o) => originKey(new URL(o))));
-  if (!policy.allowAllOperations&&!allowed.has(originKey(parsed))) deny();
+  if ((!policy.allowAllOperations||policy.restrictTargets)&&!allowed.has(originKey(parsed))) deny();
 
   const literal = normalizeAddress(hostname);
   if (hostname.startsWith('[') && literal === null) deny();
@@ -176,30 +179,18 @@ export async function assertUrlAllowed(url: string, policy: PolicyConfig, resolv
   await resolveAllowedAddresses(url, policy, resolver);
 }
 
-const SECRET_LABEL = /(?:password|passwd|pwd|passcode|secret|token|api[_ -]?key|access[_ -]?key|private[_ -]?key|key|credential|authorization|auth|bearer|otp|cvv|session|cookie|pin)/i;
-const NAME_IS_SECRET = /^(?:password|passwd|pwd|passcode|secret|token|apikey|api_key|access_token|refresh_token|authorization|auth|bearer|otp|cvv|session|sessionid|session_id|cookie|pin)$/i;
 const SAFE_ROLES=new Set(['alert','button','checkbox','combobox','dialog','generic','heading','img','link','list','listbox','listitem','menu','menuitem','option','progressbar','radio','region','searchbox','slider','spinbutton','status','switch','tab','table','tabpanel','text','textbox','toolbar','tree','treeitem','window']);
 
 export function redactString(text: string): string {
   let out = typeof text === 'string' ? text.slice(0, MAX_TEXT) : '';
-  out = out.replace(/([?&][a-z0-9_]*(?:token|key|secret|password|passwd|pwd|signature|sig|code|auth|session|api|access)[a-z0-9_]*)=[^&\s"'<>]*/gi, `$1=${REDACTED}`);
-  out = out.replace(/\b([a-z0-9_.-]*(?:password|passwd|pwd|passcode|secret|token|key|credential|authorization|auth|bearer|session|cookie|otp|cvv|pin)[a-z0-9_.-]*)(\s*[=:]\s*)([^\s,;&]{2,})/gi, `$1$2${REDACTED}`);
-  out = out.replace(/\b(bearer|basic|digest|token)\s+([a-z0-9._~+/=-]{4,})/gi, `$1 ${REDACTED}`);
-  out = out.replace(/[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/gi, REDACTED);
-  out = out.replace(/\b(?:employee|emp|staff|user|member)[_-]?(?:id|no|number)\s*[:=]\s*[^\s,;&]+/gi, REDACTED);
-  out = out.replace(/\b(?:sk|pk|rk|ak|ghp|gho|ghu|ghs|xox[baps])[-_][a-z0-9_-]{12,}\b/gi, REDACTED);
-  out = out.replace(/\b[a-z0-9+/_-]{28,}={0,2}\b/gi, REDACTED);
+  for (const [source, replacement] of TEXT_REDACTION_RULES) out = out.replace(new RegExp(source, 'gi'), replacement);
   return out.slice(0, MAX_TEXT);
-}
-
-function isSecretName(...names: (string | undefined)[]): boolean {
-  return names.some((n) => typeof n === 'string' && n.length > 0 && (NAME_IS_SECRET.test(n) || SECRET_LABEL.test(n)));
 }
 
 export function redactElement(element: Element): Omit<Element, 'sensitive'> {
   const { sensitive, ...safe } = element;
   safe.role=SAFE_ROLES.has(safe.role)?safe.role:'generic';
-  const secret = sensitive === true || isSecretName(safe.name, safe.role, safe.id);
+  const secret = sensitive === true || isSensitiveLabel(safe.name, safe.id);
   if (secret) {
     if (safe.name) safe.name = REDACTED;
     if (safe.value !== undefined) safe.value = REDACTED;
@@ -207,6 +198,10 @@ export function redactElement(element: Element): Omit<Element, 'sensitive'> {
     safe.name = redactString(safe.name);
     if (safe.value !== undefined) safe.value = redactString(safe.value);
   }
+  if (safe.options) safe.options = safe.options.map(option => {
+    const hidden=secret||isSensitiveLabel(option.label);
+    return {...option,label:hidden?REDACTED:redactString(option.label),value:hidden?REDACTED:redactString(option.value)};
+  });
   return safe;
 }
 
@@ -224,8 +219,8 @@ export function authorizeAction(action: Action, element?: Element, allowAllOpera
   if(allowAllOperations){if(element.enabled===false)throw new AdlError('E_POLICY_DENIED');return;}
   if (element.sensitive === true) throw new AdlError('E_PRIVACY_BLOCKED');
   if (element.enabled === false) throw new AdlError('E_POLICY_DENIED');
-  if (isSecretName(element.name, element.role, element.id)) throw new AdlError('E_PRIVACY_BLOCKED');
-  if (typeof element.value === 'string' && isSecretName(element.value)) throw new AdlError('E_PRIVACY_BLOCKED');
+  if (isSensitiveLabel(element.name, element.id)) throw new AdlError('E_PRIVACY_BLOCKED');
+  if (typeof element.value === 'string' && isSensitiveLabel(element.value)) throw new AdlError('E_PRIVACY_BLOCKED');
   if (CONSEQUENTIAL.test(element.name ?? '') || CONSEQUENTIAL.test(element.role ?? '')) throw new AdlError('E_APPROVAL_REQUIRED');
   if (typeof action.value === 'string') {
     assertNoRedacted(action.value);

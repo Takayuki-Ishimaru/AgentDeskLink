@@ -186,7 +186,40 @@ std::string ExpectedRole(const ControlsTable& t, const std::string& automation_i
 }
 
 bool IsSensitiveText(const std::string& text) {
-  return MatchesSet(text, kSensitive, sizeof(kSensitive) / sizeof(*kSensitive));
+  // Normalize full-width ASCII identifiers without locale-dependent ctype calls.
+  std::string normalized;
+  for(size_t i=0;i<text.size();++i){
+    const auto a=static_cast<unsigned char>(text[i]);
+    if(i+2<text.size()&&a==0xef){
+      const auto b=static_cast<unsigned char>(text[i+1]),c=static_cast<unsigned char>(text[i+2]);
+      if((b&0xc0)==0x80&&(c&0xc0)==0x80){
+        const unsigned cp=((a&0x0f)<<12)|((b&0x3f)<<6)|(c&0x3f);
+        if(cp>=0xff01&&cp<=0xff5e){normalized.push_back(static_cast<char>(cp-0xfee0));i+=2;continue;}
+      }
+    }
+    normalized.push_back(text[i]);
+  }
+  if(normalized.find('@')!=std::string::npos)return true;
+  for (const auto* label : {u8"パスワード",u8"暗証番号",u8"認証コード",u8"認証情報",u8"認証トークン",u8"認証キー",u8"ワンタイム",u8"秘密鍵",u8"秘密キー",u8"シークレット",u8"アクセストークン",u8"apiキー"})
+    if (Lower(normalized).find(label) != std::string::npos) return true;
+  std::string split;
+  for (size_t i=0;i<normalized.size();++i) {
+    const auto c=static_cast<unsigned char>(normalized[i]);
+    const auto prev=i?static_cast<unsigned char>(normalized[i-1]):0;
+    const auto next=i+1<normalized.size()?static_cast<unsigned char>(normalized[i+1]):0;
+    if(i&&((std::isalpha(prev)&&std::isdigit(c))||(std::isdigit(prev)&&std::isalpha(c))||(std::isupper(c)&&(std::islower(prev)||(std::isupper(prev)&&std::islower(next))))))split.push_back(' ');
+    split.push_back(static_cast<char>(c));
+  }
+  const auto tokens=Tokens(Lower(split));
+  for(size_t i=0;i<tokens.size();++i) {
+    for(const auto* entry:kSensitive) {
+      std::string key=entry;if(!key.empty()&&key.back()=='*')key.pop_back();
+      if(tokens[i]==key || (key=="credential"&&tokens[i]=="credentials"))return true;
+    }
+    for(const auto* entry:{"key","auth","authorization","bearer","session","cookie","cvc","accesskey","accesstoken","refreshtoken"})if(tokens[i]==entry)return true;
+    if(i+1<tokens.size())for(const auto* entry:{"apikey","accesskey","accesstoken","refreshtoken","privatekey","authcode","cardnumber","creditcard","onetime","ccnumber","cccsc"})if(tokens[i]+tokens[i+1]==entry)return true;
+  }
+  return false;
 }
 
 bool IsBlockedControl(const ElemInfo& e) {

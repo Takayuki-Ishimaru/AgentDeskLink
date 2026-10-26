@@ -2,7 +2,7 @@
 
 [日本語](INSTALL.md) | **English**
 
-Target version: `0.1.2` (beta)
+Target version: `0.1.3` (beta)
 
 ## Requirements
 
@@ -12,6 +12,8 @@ Target version: `0.1.2` (beta)
 
 Each VSIX bundles Node.js. macOS and Windows builds also include the desktop helper, so no separate build is needed. Check the release attachments for the operating systems and CPUs being distributed.
 
+This release distributes macOS / Apple silicon and Windows x64 packages. It does not include a Linux VSIX.
+
 ## Installation
 
 1. Download the VSIX for your operating system and CPU and its `SHA256SUMS` file from the release page.
@@ -19,12 +21,26 @@ Each VSIX bundles Node.js. macOS and Windows builds also include the desktop hel
 3. In the VS Code Command Palette, choose “Extensions: Install from VSIX...” and select the VSIX.
 4. Open the folder you want to use, review its contents and trust the workspace.
 5. Open **AgentDeskLink** in the activity bar on the left.
-6. Turn on “Enable the AgentDeskLink MCP server for this workspace”.
-7. Approve the server start in the VS Code MCP management view.
+6. Choose “Open Settings” in the panel and configure the browser origins or desktop app and the operation permissions you need. See “Initial settings and scope” below.
+7. Turn on “Enable the AgentDeskLink MCP server for this workspace”.
+8. Approve the server start in the VS Code MCP management view.
 
 ## Initial settings and scope
 
-MCP is disabled by default for every workspace. Enabling it through the VS Code extension permits the supported browser and desktop operations. No policy JSON is required. There is no dedicated approval UI for consequential actions such as submission or purchases. Review the actions and targets you give the AI before enabling MCP.
+The following are workspace settings for the VS Code extension.
+
+MCP is disabled by default for every workspace. Enabling it grants no target access. Configure browser origins and the desktop app in AgentDeskLink settings, then enable broad operations, physical input and unredacted native images separately when needed. No policy JSON is required. There is no dedicated approval UI for consequential actions such as submission or purchases. Review the actions and targets you give the AI before enabling MCP.
+
+| Setting | What to configure |
+| --- | --- |
+| `agentdesklink.browserOrigins` | Exact allowed `http(s)` origins, such as `https://example.com`, without paths or wildcards |
+| `agentdesklink.desktopAppId` / `agentdesklink.desktopAppPath` | The ID and absolute executable path of one allowed app |
+| `agentdesklink.allowAllOperations` | Allows supported operations on permitted targets. Target access is a separate grant. Defaults to off |
+| `agentdesklink.allowUnredactedImages` | Allows unredacted native images. Defaults to off |
+| `agentdesklink.allowPhysicalInput` | Allows physical input. Also requires a configured app and `allowUnredactedImages`. Defaults to off |
+| `agentdesklink.allowLoopback` / `agentdesklink.allowPrivateNetwork` | Allows loopback/private-network connections. Defaults to off |
+
+Check “Current permissions” in the panel to see the effective grants. Observation alone does not require broad operation permissions or physical input.
 
 The extension uses its bundled Node.js and helper without manual path settings. Chrome runs with a dedicated profile and does not share your usual sign-in state. If Chrome is unavailable, a dedicated Chromium is downloaded and reused.
 
@@ -42,6 +58,7 @@ Virtual workspaces are not supported. MCP cannot be enabled in an untrusted work
 
 - If installation fails, check the VS Code version, operating system and CPU, and the VSIX hash.
 - If the server does not start, check workspace trust, MCP enablement and the emergency-stop state.
+- If no target appears or you receive `E_POLICY_DENIED`, check the allowed origins/app and operation permissions. Enabling MCP alone adds no grants.
 - If the bundled runtime or helper is missing, reinstall the VSIX for your operating system and CPU.
 - For `E_BACKEND_UNAVAILABLE`, check operating system permissions and browser requirements.
 - A failed update check usually means a temporary network or GitHub problem. See the [update guide](UPDATES_en.md).

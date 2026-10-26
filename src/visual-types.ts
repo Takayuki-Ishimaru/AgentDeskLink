@@ -15,6 +15,8 @@ export interface CapturedImage {
   input_token?:string;
   viewport: { width: number; height: number; scroll_x: number; scroll_y: number; device_scale_factor: number };
   redacted: boolean;
+  /** Describes masking performed; detection is not a claim of complete OCR protection. */
+  redaction?:{scope:'detected_regions'|'configured_regions'|'unredacted';methods:string[];complete:false};
 }
 export interface VisualViewOptions {
   /** Coordinates refer to the retained source frame, before any overview resizing. */
@@ -39,6 +41,7 @@ export interface VisualMetadata extends VisualOwner {
   region: ImageRegion;
   output: { width: number; height: number; source_pixels_per_output_x: number; source_pixels_per_output_y: number };
   redacted: boolean;
+  redaction?:CapturedImage['redaction'];
   /** Geometry estimate only, never a model's billed token count. */
   estimated_patch_tokens: number;
   token_estimate_basis: '32px_grid_not_model_billing';

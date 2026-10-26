@@ -219,3 +219,13 @@ test('all-operation desktop mode permits semantic input without a controls file'
     const session=await open(h,targets[0]!);await session.snapshot();await session.act({action:'click',element_id:'e1'},sig());
   }finally{await h.dispose();}
 });
+
+test('native app restriction is a separate trusted launch flag alongside broad operations',async()=>{
+  const h=await harness({},'darwin',{controlsPath:undefined,allowAllOperations:true,restrictTargets:true});
+  try{
+    const targets=await discover(h);const args=h.children()[0]!.spawnargs;
+    assert.ok(args.includes('--restrict-targets'));assert.ok(args.includes('--allow-all'));
+    assert.equal(args[args.indexOf('--app-id')+1],APP_ID);
+    const session=await open(h,targets[0]!);await session.snapshot();await session.act({action:'click',element_id:'e1'},sig());
+  }finally{await h.dispose();}
+});

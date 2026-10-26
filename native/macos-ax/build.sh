@@ -22,6 +22,9 @@ swiftc -swift-version 5 -target arm64-apple-macos14.0 -O tools/monitor.swift -o 
 swiftc -swift-version 5 -target "$(uname -m)-apple-macos14.0" -O src/Contract.swift tests/main.swift -o build/adl-macos-contract-tests
 build/adl-macos-contract-tests
 
+swiftc -swift-version 5 -target "$(uname -m)-apple-macos14.0" -O src/Contract.swift tests/semantic/main.swift -o build/adl-semantic-replay-tests
+build/adl-semantic-replay-tests tests/semantic/cases.json
+
 swiftc -swift-version 5 -target "$(uname -m)-apple-macos14.0" -O src/Contract.swift src/Capture.swift src/Interactive.swift src/Lifecycle.swift tests/lifecycle/main.swift -o build/adl-macos-lifecycle-tests
 build/adl-macos-lifecycle-tests
 

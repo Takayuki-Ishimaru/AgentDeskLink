@@ -128,6 +128,11 @@ test('manifest contributes the sidebar, workspace switch and application update 
   const props = pkg.contributes.configuration.properties;
   assert.equal(props['agentdesklink.enabled'].default, false);
   assert.equal(props['agentdesklink.enabled'].scope, 'window');
+  for(const key of ['allowAllOperations','allowPhysicalInput','allowUnredactedImages','allowLoopback','allowPrivateNetwork']){
+    assert.equal(props[`agentdesklink.${key}`].default,false);assert.equal(props[`agentdesklink.${key}`].scope,'window');
+  }
+  assert.deepEqual(props['agentdesklink.browserOrigins'].default,[]);
+  for(const key of ['desktopAppId','desktopAppPath'])assert.equal(props[`agentdesklink.${key}`].default,'');
   for (const key of ['autoUpdate', 'checkForUpdates']) assert.equal(props[`agentdesklink.${key}`].scope, 'application');
   assert.equal(props['agentdesklink.updateManifestUrl'], undefined, 'the update source is fixed to GitHub');
   const css = fs.readFileSync(path.join(root, 'media/settings.css'), 'utf8').toLowerCase();
@@ -142,12 +147,12 @@ test('MCP is opt-in and absent in empty and untrusted windows', async () => {
     assert.equal((await p.provideMcpServerDefinitions()).length, 0);
   }
 });
-test('enabled MCP always uses bundled Node and permits operations without legacy policy inputs', async () => {
+test('enabled MCP uses bundled Node with default-deny permissions and no legacy policy inputs', async () => {
   const h=harness({enabled:true,nodePath:'/invalid/old/node',configPath:'missing-policy.json'});await h.ready;
   const p=h.providers.get('agentdesklink.mcp'),[definition]=await p.provideMcpServerDefinitions();
   assert.equal(definition.command,path.join(h.extensionRoot,'runtime',process.platform==='win32'?'node.exe':'node'));
   assert.deepEqual(Array.from(definition.args),[path.join(h.extensionRoot,'dist/src/server.js')]);
-  assert.equal(definition.env.ADL_ALLOW_ALL_OPERATIONS,'1');assert.ok(definition.env.ADL_OPERATION_CONTROL);assert.ok(definition.env.ADL_OPERATION_EPOCH);
+  assert.equal(definition.env.ADL_ALLOW_ALL_OPERATIONS,undefined);assert.deepEqual(JSON.parse(definition.env.ADL_MCP_PERMISSIONS),{browserOrigins:[],desktopAppId:'',desktopAppPath:'',allowAllOperations:false,allowPhysicalInput:false,allowUnredactedImages:false,allowLoopback:false,allowPrivateNetwork:false});assert.ok(definition.env.ADL_OPERATION_CONTROL);assert.ok(definition.env.ADL_OPERATION_EPOCH);
   let refreshed=0;p.onDidChangeMcpServerDefinitions(()=>refreshed++);
   h.config.enabled=false;h.changes.fire({affectsConfiguration:name=>name.startsWith('agentdesklink')});
   assert.ok(refreshed>0);assert.equal((await p.provideMcpServerDefinitions()).length,0);

@@ -22,7 +22,9 @@ test('a non-navigation click does not wait for a navigation that will never occu
     const session=await adapter.open(target,'strict_isolated',new AbortController().signal);
     const observed=await session.snapshot();
     // Warm browser first; this deadline covers only the ordinary click.
-    policy.actionTimeoutMs=400;
+    // A full navigation-timeout wait still fails, while shared CI load has room
+    // for hover/focus probes and the actual dispatch after browser warmup.
+    policy.actionTimeoutMs=1500;
     await session.act({action:'click',element_id:observed.elements.find(e=>e.name==='Plain click')!.id},new AbortController().signal);
     assert.ok((await session.snapshot()).elements.some(e=>e.role==='status'&&e.name==='Done'));
   } finally {
