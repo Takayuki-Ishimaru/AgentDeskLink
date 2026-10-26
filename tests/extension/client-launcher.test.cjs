@@ -104,14 +104,15 @@ function writeStub(dir) {
   return file;
 }
 
-test('writeManagedLauncher: fixed paths, owner-only dir, idempotent', () => {
+test('writeManagedLauncher: fixed paths, POSIX owner-only dir, idempotent', () => {
   const dir = mkTmp();
   try {
     const r1 = writeManagedLauncher(dir);
     assert.equal(r1.launcherPath, path.join(dir, 'ai-clients', 'launcher.cjs'));
     assert.equal(r1.descriptorPath, path.join(dir, 'ai-clients', 'launch.json'));
     const mode = fs.statSync(path.join(dir, 'ai-clients')).mode & 0o777;
-    assert.equal(mode & 0o077, 0, 'directory must be owner-only');
+    // Windows chmod does not expose POSIX owner/group/other permission bits.
+    if (process.platform !== 'win32') assert.equal(mode & 0o077, 0, 'directory must be owner-only');
     const src1 = fs.readFileSync(r1.launcherPath, 'utf8');
     assert.ok(!src1.includes('vscode'));
     const mtime1 = fs.statSync(r1.launcherPath).mtimeMs;
@@ -132,7 +133,7 @@ test('descriptor round-trip, schema and size validation', () => {
     writeDescriptor(file, d);
     const got = readManagedDescriptor(file);
     assert.deepEqual(got, d);
-    assert.equal(fs.statSync(file).mode & 0o777, 0o600);
+    if (process.platform !== 'win32') assert.equal(fs.statSync(file).mode & 0o777, 0o600);
 
     fs.writeFileSync(path.join(dir, 'bad1.json'), JSON.stringify(Object.assign({}, d, { extra: 1 })));
     assert.equal(readManagedDescriptor(path.join(dir, 'bad1.json')), undefined, 'unknown field rejected');
