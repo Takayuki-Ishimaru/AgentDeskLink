@@ -12,7 +12,7 @@ AgentDeskLink is an MCP server that connects AI agents to your local browser and
 
 [Get started](release-docs/INSTALL_en.md) · [What you can do](#what-you-can-do) · [Supported environments](#supported-environments) · [Release guide](release-docs/README_en.md) · [MIT License](LICENSE)
 
-> **0.1.2 / Beta**  
+> **0.1.3 / Beta**  
 > This beta is intended for a limited range of use. Before installing, review [supported environments and known limitations](release-docs/KNOWN_ISSUES_en.md).
 
 ## What you can do
@@ -28,12 +28,13 @@ Drag inside the browser, touch swipes and timestamped continuous frame capture a
 
 ## Get started in VS Code
 
-1. Download the VSIX for your OS and CPU, then install it with "Extensions: Install from VSIX".
+1. Download the common `agentdesklink-0.1.3.vsix` package, then install it with "Extensions: Install from VSIX".
 2. Open a folder and trust the workspace.
 3. Open **AgentDeskLink** in the activity bar.
-4. Turn on **Enable MCP for this workspace**, then start the server from the MCP management view.
+4. Choose **Open Settings** and configure the allowed browser origins or desktop app and the operation permissions you need.
+5. Turn on **Enable MCP for this workspace**, then start the server from the MCP management view.
 
-**No separate Node.js installation or helper build is required.** A matching runtime ships inside the VSIX. Chrome runs in a dedicated profile, and if it is not found a dedicated Chromium is downloaded automatically on first use.
+**No separate Node.js installation or helper build is required.** The same VSIX includes the runtimes for all supported operating systems and selects one automatically at startup. Chrome runs in a dedicated profile, and if it is not found a dedicated Chromium is downloaded automatically on first use.
 
 AgentDeskLink itself needs no external AI API key. AI connection and authentication happen on the MCP host side.
 
@@ -45,7 +46,7 @@ AgentDeskLink itself needs no external AI API key. AI connection and authenticat
 | --- | --- |
 | **macOS 14 or later / Apple silicon** | Browser and desktop. Requires the OS accessibility permission, plus screen recording for image capture |
 | **Windows 11 x64** | Browser and desktop. Desktop actions run in the same interactive session as the target app |
-| **Linux x64** | Browser. Requires an environment where the Chromium OS sandbox works |
+| **Linux x64 (Ubuntu 24.04)** | Browser. Requires shared libraries for Chrome or Chromium and a working OS sandbox |
 
 On macOS and Windows you can also check the state of, launch and normally close the apps you have allowed. Apps launched on Windows are placed on a dedicated Win32 desktop. Launching and closing are available when explicitly permitted in a CLI policy.
 
@@ -53,7 +54,7 @@ Which actions are available depends on your OS, app and display setup. See [supp
 
 ## Decide how far it can reach
 
-- **Off by default.** Enable MCP per workspace. Enabling it permits the supported browser and desktop operations.
+- **Off by default.** MCP connection permission is separate from target access. Configure browser origins and the desktop app per workspace. Physical input and unredacted native images each default to off.
 - **No configuration file is required.** The VS Code extension uses its bundled profile. When launching the CLI directly, configure targets and actions in a policy JSON.
 - **Keep it apart from your everyday browser.** No human profile or sign-in state is shared.
 - **Physical input uses a dedicated mode.** `interactive_desktop` uses your real mouse and keyboard, so do not run it alongside your own input.
@@ -62,7 +63,7 @@ There is no dedicated approval UI for consequential actions. Review the targets 
 
 ## Try it from source
 
-Prepare Node.js 24 or later.
+Clone this repository and run the following commands in its folder. Node.js 24 or later is required. The VSIX and documentation ZIP do not include the demo source.
 
 ```sh
 npm ci

@@ -16,7 +16,7 @@ const require = createRequire(import.meta.url);
 const yauzl = createRequire(require.resolve('@vscode/vsce'))('yauzl');
 const root = fileURLToPath(new URL('../', import.meta.url));
 const pkg = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'));
-const vsix = resolve(process.argv.slice(2).find(arg => !arg.startsWith('--')) ?? join(root, 'artifacts', `${pkg.name}-${process.platform}-${process.arch}-${pkg.version}.vsix`));
+const vsix = resolve(process.argv.slice(2).find(arg => !arg.startsWith('--')) ?? join(root, 'artifacts', `${pkg.name}-${pkg.version}.vsix`));
 const forceBrowserDownload = process.argv.includes('--download-browser');
 const temp = await mkdtemp(join(tmpdir(), 'adl-vsix-cold-'));
 
@@ -68,8 +68,12 @@ let client, http;
 try {
   await extract();
   const extension = join(temp, 'extension');
-  const runtime = join(extension, 'runtime');
-  const manifest = JSON.parse(await readFile(join(runtime, 'manifest.json'), 'utf8'));
+  // Consume the archive the way the extension does: the bundled resolver selects the host child
+  // of a schema 3 universal bundle, or validates a schema 2 component bundle directly.
+  const {resolveRuntime} = await import(pathToFileURL(join(extension, 'dist/src/extension/runtime.js')).href);
+  const resolved = await resolveRuntime({extensionRoot: extension});
+  const runtime = resolved.runtimeDir;
+  const manifest = resolved.manifest;
   assert.equal(manifest.target, `${process.platform}-${process.arch}`);
   const home = join(temp, 'empty-home');
   await mkdir(home);
@@ -80,14 +84,14 @@ try {
     ...(process.platform === 'win32' ? {} : {USERPROFILE:home, LOCALAPPDATA:home}),
     XDG_CACHE_HOME:join(home, 'cache'),
     PLAYWRIGHT_BROWSERS_PATH:join(runtime, 'browsers'), PLAYWRIGHT_SKIP_BROWSER_GC:'1',
-    ...(manifest.helper ? {ADL_BUNDLED_HELPER_PATH:join(runtime, manifest.helper)} : {}),
+    ...resolved.env,
   };
   delete env.NODE_PATH;
   delete env.NODE_OPTIONS;
-  const node = join(runtime, manifest.node);
+  const node = resolved.nodePath;
   const version = await run(node, ['--version'], env);
   assert.equal(version, manifest.nodeVersion);
-  if (manifest.helper) await run(join(runtime, manifest.helper), [], env, 2);
+  if (manifest.helper) await run(resolved.helperPath, [], env, 2);
   const {prepareBrowser} = await import(pathToFileURL(join(extension,'dist/src/extension/browser-setup.js')).href);
   const browserOptions = {extensionRoot:extension,nodePath:node,storageDir:join(temp,'browser-storage'),playwrightVersion:manifest.playwrightVersion,
     ...(forceBrowserDownload ? {probePaths:[]} : {})};
@@ -147,9 +151,9 @@ try {
   assert.ok(extensionManifest.contributes.commands.some(command=>command.command==='agentdesklink.emergencyStop'));
   const {initializeOperationState,readOperationState,writeOperationState}=await import(pathToFileURL(join(extension,'dist/src/operation-control.js')).href);
   const controlPath=join(temp,'operations.json');initializeOperationState(controlPath);
-  client=new Client({name:'vsix-default-permissions',version:'1'},{versionNegotiation:{mode:'legacy'}});
+  client=new Client({name:'vsix-explicit-permissions',version:'1'},{versionNegotiation:{mode:'legacy'}});
   await client.connect(new StdioClientTransport({command:node,args:[join(extension,'dist/src/server.js')],cwd:home,stderr:'pipe',
-    env:{...env,ADL_ALLOW_ALL_OPERATIONS:'1',ADL_OPERATION_CONTROL:controlPath,ADL_OPERATION_EPOCH:readOperationState(controlPath).epoch}}));
+    env:{...env,ADL_ALLOW_ALL_OPERATIONS:'',ADL_MCP_PERMISSIONS:JSON.stringify({browserOrigins:[origin],allowLoopback:true,allowAllOperations:true}),ADL_OPERATION_CONTROL:controlPath,ADL_OPERATION_EPOCH:readOperationState(controlPath).epoch}}));
   assert.equal((await call('adl_capabilities')).result.permissions.all_operations,true);
   const defaultSession=(await call('adl_open',{url:origin})).result;
   const defaultObserved=(await call('adl_observe',{session_id:defaultSession.session_id})).result;
@@ -161,7 +165,7 @@ try {
   assert.equal(stopped.error.code,'E_CANCELLED');
   const blocked=JSON.parse((await client.callTool({name:'adl_open',arguments:{url:origin}})).content.find(item=>item.type==='text').text);
   assert.equal(blocked.error.code,'E_CANCELLED');
-  console.log(JSON.stringify({ok:true,vsix,target:manifest.target,node:version,systemPath:'empty',browser:browser.source,browserBundled:false,cacheReuse:browser.source==='chromium',nativeHelper:manifest.helper ? 'loader and policy default verified; OS permissions require interactive acceptance' : null,mcpTools:16,browserFill:true,browserCapture:true,defaultPermissions:true,emergencyStop:true}));
+  console.log(JSON.stringify({ok:true,vsix,target:manifest.target,node:version,systemPath:'empty',browser:browser.source,browserBundled:false,cacheReuse:browser.source==='chromium',nativeHelper:manifest.helper ? 'loader and policy default verified; OS permissions require interactive acceptance' : null,mcpTools:16,browserFill:true,browserCapture:true,explicitPermissions:true,emergencyStop:true}));
 } finally {
   await client?.close();
   if (http) await new Promise(accept => http.close(accept));

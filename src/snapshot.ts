@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { AdlError, type Element, type RawSnapshot } from './types.js';
 import { redactElement } from './policy.js';
 
+export type Representation = 'auto' | 'full' | 'delta';
 export interface ObserveOptions {
   token_budget: number;
   since_revision?: number;
@@ -9,6 +10,7 @@ export interface ObserveOptions {
   scope?: string;
   depth?: number;
   include?: string[];
+  representation?: Representation;
 }
 export interface SnapshotChange { op: 'added' | 'removed' | 'changed'; id: string; element?: Element }
 export interface ObserveResult {
@@ -20,6 +22,8 @@ export interface ObserveResult {
   redactions: number;
   truncated: boolean;
   next_cursor: string | null;
+  representation?: 'full' | 'delta';
+  reset?: boolean;
 }
 
 const MAX_SESSIONS = 32;
@@ -32,7 +36,7 @@ const MAX_BUDGET = 8_000;
 const NAME_CAP = 48;
 const VALUE_CAP = 96;
 
-const FIELDS = ['id', 'role', 'name', 'value', 'enabled', 'checked', 'selected'] as const;
+const FIELDS = ['id', 'role', 'name', 'value', 'enabled', 'checked', 'selected', 'options'] as const;
 type Field = (typeof FIELDS)[number];
 const INCLUDE_KEYS = new Map(FIELDS.map((f) => [f.toLowerCase(), f]));
 const SCOPE_KEYS = new Map([
@@ -44,6 +48,7 @@ interface Stored { revision: number; elements: Element[]; truncated: boolean; re
 interface Cursor {
   sessionId: string; revision: number; budget: number; since: number | null;
   optionsKey: string; offset: number; expires: number;
+  representation: 'full' | 'delta' | null; reset: boolean;
 }
 
 function deny(code: 'E_INVALID_ARGUMENT' | 'E_STALE_STATE' | 'E_TARGET_NOT_FOUND' | 'E_RESOURCE_LIMIT'): never {
@@ -61,6 +66,11 @@ function normalizeInclude(include?: string[]): Field[] | null {
     if (!out.includes(field)) out.push(field);
   }
   return out;
+}
+
+function matchesDepth(element: Element, depth: number | undefined): boolean {
+  if (depth === undefined) return true;
+  return element.depth === undefined || element.depth <= depth;
 }
 
 function matchesScope(element: Element, scope: string | undefined): boolean {
@@ -84,7 +94,11 @@ function matchesScope(element: Element, scope: string | undefined): boolean {
 }
 
 function project(element: Element, include: Field[] | null): Element {
-  if (!include) return element;
+  if (!include) {
+    if (!('depth' in element)) return element;
+    const { depth: _depth, ...rest } = element;
+    return rest as Element;
+  }
   const out: Record<string, unknown> = {};
   for (const field of include) if (element[field] !== undefined) out[field] = element[field];
   return out as unknown as Element;
@@ -110,7 +124,10 @@ export class SnapshotStore {
     if (!Number.isInteger(revision) || revision < 0) deny('E_INVALID_ARGUMENT');
     if (!snapshot || !Array.isArray(snapshot.elements)) deny('E_INVALID_ARGUMENT');
     const elements = snapshot.elements.slice(0, MAX_ELEMENTS).map((e) => redactElement(e) as Element);
-    const redactions=elements.reduce((count,e,i)=>count+(e.name!==snapshot.elements[i]!.name?1:0)+(e.value!==snapshot.elements[i]!.value?1:0),0);
+    const redactions=elements.reduce((count,e,i)=>{
+      const raw=snapshot.elements[i]!;
+      return count+(e.name!==raw.name?1:0)+(e.value!==raw.value?1:0)+(e.options??[]).reduce((n,option,index)=>n+(option.label!==raw.options?.[index]?.label?1:0)+(option.value!==raw.options?.[index]?.value?1:0),0);
+    },0);
     const stored: Stored = { revision, elements, truncated: snapshot.truncated === true || snapshot.elements.length>MAX_ELEMENTS,redactions };
     let history = this.sessions.get(sessionId);
     if (!history) {
@@ -146,16 +163,46 @@ export class SnapshotStore {
     }
     const include = normalizeInclude(options.include);
     if (options.scope !== undefined && typeof options.scope !== 'string') deny('E_INVALID_ARGUMENT');
-    if (options.depth !== undefined && (!Number.isInteger(options.depth) || options.depth < 0)) deny('E_INVALID_ARGUMENT');
+    if (options.depth !== undefined && (!Number.isInteger(options.depth) || options.depth < 1 || options.depth > 12)) deny('E_INVALID_ARGUMENT');
+    const representation = options.representation;
+    if (representation !== undefined && representation !== 'auto' && representation !== 'full' && representation !== 'delta') deny('E_INVALID_ARGUMENT');
     const scope = options.scope;
-    const items = this.items(current, base, include, scope);
+    const depth = options.depth;
     const key = this.optionsKey(options, include, scope);
     let offset = 0;
+    let carried: Cursor | null = null;
     if (options.cursor !== undefined) {
-      const cursor = this.takeCursor(options.cursor, sessionId, revision, budget, since ?? null, key);
-      offset = cursor.offset;
+      carried = this.takeCursor(options.cursor, sessionId, revision, budget, since ?? null, key);
+      offset = carried.offset;
     }
-    return this.pack(sessionId, revision, items, offset, budget, base !== null, current.truncated, key, since ?? null,current.redactions);
+    let items: SnapshotChange[] | null = null;
+    let mode: 'full' | 'delta';
+    let reset: boolean;
+    if (carried && carried.representation !== null) {
+      mode = carried.representation;
+      reset = carried.reset;
+    } else if (representation === undefined) {
+      mode = base !== null ? 'delta' : 'full';
+      reset = false;
+    } else if (representation === 'delta') {
+      mode = base !== null ? 'delta' : 'full';
+      reset = false;
+    } else if (representation === 'full') {
+      mode = 'full';
+      reset = base !== null;
+    } else {
+      items = this.items(current, base, include, scope, depth);
+      const deltaItems = items;
+      const fullItems = this.items(current, null, include, scope, depth);
+      const deltaBytes = this.payloadBytes(sessionId, revision, deltaItems, false, current.redactions, 'delta', false);
+      const fullBytes = this.payloadBytes(sessionId, revision, fullItems, true, current.redactions, 'full', base !== null);
+      mode = base === null ? 'full' : (fullBytes < deltaBytes ? 'full' : 'delta');
+      reset = mode === 'full' && base !== null;
+      items = mode === 'full' ? fullItems : deltaItems;
+    }
+    if (items === null) items = this.items(current, mode === 'full' ? null : base, include, scope, depth);
+    const advertised = representation === undefined ? null : mode;
+    return this.pack(sessionId, revision, items, offset, budget, mode === 'delta', current.truncated, key, since ?? null, current.redactions, advertised, reset);
   }
 
   close(sessionId: string): void { this.dropSession(sessionId); }
@@ -169,14 +216,14 @@ export class SnapshotStore {
     return Math.floor(budget);
   }
 
-  private items(current: Stored, base: Stored | null, include: Field[] | null, scope: string | undefined): SnapshotChange[] {
+  private items(current: Stored, base: Stored | null, include: Field[] | null, scope: string | undefined, depth: number | undefined): SnapshotChange[] {
     if (!base) {
       return current.elements
-        .filter((e) => matchesScope(e, scope))
+        .filter((e) => matchesScope(e, scope) && matchesDepth(e, depth))
         .map((element) => ({ op: 'added' as const, id: element.id, element: project(element, include) }));
     }
-    const before = new Map(base.elements.map((e) => [e.id, e]));
-    const after = new Map(current.elements.map((e) => [e.id, e]));
+    const before = new Map(base.elements.filter((e) => matchesScope(e, scope) && matchesDepth(e, depth)).map((e) => [e.id, e]));
+    const after = new Map(current.elements.filter((e) => matchesScope(e, scope) && matchesDepth(e, depth)).map((e) => [e.id, e]));
     const changes: SnapshotChange[] = [];
     for (const [id, element] of after) {
       const old = before.get(id);
@@ -184,18 +231,24 @@ export class SnapshotStore {
       else if (JSON.stringify(old) !== JSON.stringify(element)) changes.push({ op: 'changed', id, element });
     }
     for (const id of before.keys()) if (!after.has(id)) changes.push({ op: 'removed', id });
-    return changes.filter((c) => {
-      if (c.element) return matchesScope(c.element, scope);
-      const old = before.get(c.id);
-      return old ? matchesScope(old, scope) : true;
-    }).map(c=>c.element?{...c,element:project(c.element,include)}:c).sort((a, b) => (changeKey(a) < changeKey(b) ? -1 : 1));
+    return changes.map((c) => (c.element ? { ...c, element: project(c.element, include) } : c)).sort((a, b) => (changeKey(a) < changeKey(b) ? -1 : 1));
   }
 
-  private pack(sessionId: string, revision: number, items: SnapshotChange[], offset: number, budget: number, delta: boolean, sourceTruncated: boolean, key: string, since: number | null,redactions:number): ObserveResult {
+  private payloadBytes(sessionId: string, revision: number, items: SnapshotChange[], full: boolean, redactions: number, mode: 'full' | 'delta', reset: boolean): number {
+    const envelope: Record<string, unknown> = { ok: true, session_id: sessionId, revision, representation: mode, redactions, truncated: false, next_cursor: null };
+    if (reset) envelope.reset = true;
+    envelope[full ? 'elements' : 'changes'] = full ? items.map((c) => c.element as Element) : items;
+    return Buffer.byteLength(JSON.stringify(envelope) ?? '', 'utf8');
+  }
+
+  private pack(sessionId: string, revision: number, items: SnapshotChange[], offset: number, budget: number, delta: boolean, sourceTruncated: boolean, key: string, since: number | null,redactions:number,mode:'full'|'delta'|null=null,reset=false): ObserveResult {
     const limit = budget * 4;
-    const head = (redactions: number, truncated: boolean, cursor: string | null): ObserveResult => delta
-      ? { ok: true, session_id: sessionId, revision, changes: [], redactions, truncated, next_cursor: cursor }
-      : { ok: true, session_id: sessionId, revision, elements: [], redactions, truncated, next_cursor: cursor };
+    const head = (redactions: number, truncated: boolean, cursor: string | null): ObserveResult => ({
+      ok: true, session_id: sessionId, revision,
+      ...(mode ? { representation: mode, ...(reset ? { reset: true } : {}) } : {}),
+      ...(delta ? { changes: [] as SnapshotChange[] } : { elements: [] as Element[] }),
+      redactions, truncated, next_cursor: cursor,
+    } as unknown as ObserveResult);
     const size = (list: SnapshotChange[], redactions: number, cursor: string | null): number => {
       const base = head(redactions, false, cursor);
       const payload = delta ? (list as unknown[]) : list.map((c) => c.element as Element);
@@ -216,7 +269,7 @@ export class SnapshotStore {
     }
     const truncated = i < items.length || sourceTruncated || shortened;
     if (i >= items.length) return emit(chosen, redactions, truncated, null);
-    const token = this.issue(sessionId, revision, budget, since, key, i);
+    const token = this.issue(sessionId, revision, budget, since, key, i, mode, reset);
     const cursor = this.cursors.get(token)!;
     while (chosen.length > 0 && size(chosen, redactions, token) > limit) { chosen.pop(); i -= 1; }
     cursor.offset = i;
@@ -245,13 +298,13 @@ export class SnapshotStore {
   }
 
   private optionsKey(options: ObserveOptions, include: Field[] | null, scope: string | undefined): string {
-    return JSON.stringify([scope ?? null, options.depth ?? null, include ?? null]);
+    return JSON.stringify([scope ?? null, options.depth ?? null, include ?? null, options.representation ?? null]);
   }
 
-  private issue(sessionId: string, revision: number, budget: number, since: number | null, key: string, offset: number): string {
+  private issue(sessionId: string, revision: number, budget: number, since: number | null, key: string, offset: number, representation: 'full' | 'delta' | null = null, reset = false): string {
     this.pruneCursors();
     const token = randomUUID();
-    this.cursors.set(token, { sessionId, revision, budget, since, optionsKey: key, offset, expires: Date.now() + CURSOR_TTL_MS });
+    this.cursors.set(token, { sessionId, revision, budget, since, optionsKey: key, offset, expires: Date.now() + CURSOR_TTL_MS, representation, reset });
     return token;
   }
 

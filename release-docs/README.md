@@ -6,7 +6,7 @@
   <img src="../media/readme-hero-v2.png" alt="AgentDeskLink — Browser + Desktop, over MCP" width="1200">
 </p>
 
-対象バージョン: `0.1.2`
+対象バージョン: `0.1.3`
 
 **ブラウザも、デスクトップも。使い慣れた AI エージェントから。**
 
@@ -21,7 +21,7 @@ AgentDeskLink は、AI エージェントとローカルのブラウザ・デス
 | [対応環境と既知の制限](KNOWN_ISSUES.md) | 対応する OS と利用上の制限 |
 | [更新の設定](UPDATES.md) | GitHub 固定の更新元とファイルの整合性確認 |
 
-このバージョンはベータ版です。利用する OS・CPU に合った配布ファイルを選び、対応環境と制限を確認してください。
+このバージョンはベータ版です。共通パッケージ `agentdesklink-0.1.3.vsix` を利用し、対応する OS・CPU と制限を確認してください。
 
 ## ライセンス
 

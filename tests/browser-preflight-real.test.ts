@@ -45,8 +45,8 @@ test('real Chromium Engine accepts a noninteractive descendant at the intended b
 test('real Chromium Engine refuses readonly and disabled-fieldset inputs',{timeout:20000},async()=>{
  for(const body of [`<input readonly id="target" aria-label="Reference" oninput="fetch('/event?input')">`,`<fieldset disabled><input id="target" aria-label="Reference" oninput="fetch('/event?input')"></fieldset>`]){const f=await fixture(body);try{await assert.rejects(f.act());await delay(40);assert.equal(f.events.length,0);}finally{await f.close();}}
 });
-test('real Chromium Engine names a wrapping label using bounded direct text',{timeout:12000},async()=>{
- const f=await fixture(`<label>Reference<span>decorative subtree text</span><input id="target" oninput="fetch('/event?input=target')"></label>`);try{assert.equal(f.element.name,'Reference');await f.act();const observed=await f.engine.observe(f.session.session_id);assert.equal(observed.elements!.find(e=>e.id===f.element.id)?.value,'AI intended text');}finally{await f.close();}
+test('real Chromium Engine names a wrapping label using bounded text and skips hidden decoration',{timeout:12000},async()=>{
+ const f=await fixture(`<label>Reference<span aria-hidden="true">decorative subtree text</span><input id="target" oninput="fetch('/event?input=target')"></label>`);try{assert.equal(f.element.name,'Reference');await f.act();const observed=await f.engine.observe(f.session.session_id);assert.equal(observed.elements!.find(e=>e.id===f.element.id)?.value,'AI intended text');}finally{await f.close();}
 });
 
 test('real Chromium Engine preserves snapshot role for input buttons and exact aria-label spacing',{timeout:20000},async()=>{

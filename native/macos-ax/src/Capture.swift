@@ -124,6 +124,7 @@ final class WindowCaptureBroker {
     var input:NativeInteractiveCoordinator?
     let enabled: Bool
     let allowAll:Bool
+    let restrictTargets:Bool
     let appID: String
     let appPath: String
     private let source: WindowCaptureSource
@@ -132,12 +133,12 @@ final class WindowCaptureBroker {
     private var targets: [CaptureTarget] = []
     private var sessions: [String: CaptureSession] = [:]
     init(_ appID: String, _ appPath: String, _ enabled: Bool,
-         allowAll:Bool=false, source: WindowCaptureSource = ScreenCaptureSource(), permission: @escaping () -> Bool = CGPreflightScreenCaptureAccess,
+         allowAll:Bool=false, restrictTargets:Bool=false, source: WindowCaptureSource = ScreenCaptureSource(), permission: @escaping () -> Bool = CGPreflightScreenCaptureAccess,
          approve: ((CaptureWindow) -> Bool)? = nil) {
-        self.allowAll=allowAll;self.appID = appID; self.appPath = appPath; self.enabled = enabled; self.source = source; self.permission = permission
+        self.allowAll=allowAll;self.restrictTargets=restrictTargets;self.appID = appID; self.appPath = appPath; self.enabled = enabled; self.source = source; self.permission = permission
         self.approve = approve ?? { window in
             guard let app = NSRunningApplication(processIdentifier: window.pid), !app.isTerminated else { return false }
-            return (allowAll ? app.activationPolicy == .regular && app.bundleIdentifier == window.bundleID : app.bundleIdentifier == appID && window.bundleID == appID && app.executableURL?.resolvingSymlinksInPath().path == appPath) && captureProcessStart(window.pid) == window.started
+            return (allowAll && !restrictTargets ? app.activationPolicy == .regular && app.bundleIdentifier == window.bundleID : app.bundleIdentifier == appID && window.bundleID == appID && app.executableURL?.resolvingSymlinksInPath().path == appPath) && captureProcessStart(window.pid) == window.started
         }
     }
     var available: Bool { enabled && permission() }
@@ -145,7 +146,7 @@ final class WindowCaptureBroker {
     func owns(_ targetID: String) -> Bool { targets.contains { $0.id == targetID } }
     private func permittedWindows() throws -> [CaptureWindow] {
         try checkPermission()
-        return try source.windows().filter { (allowAll || $0.bundleID == appID) && $0.layer == 0 && approve($0) }
+        return try source.windows().filter { (allowAll && !restrictTargets || $0.bundleID == appID) && $0.layer == 0 && approve($0) }
     }
     private func retireUnlisted(_ windows: [CaptureWindow]) {
         let identities = Set(windows.map { $0.identity })

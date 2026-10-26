@@ -6,7 +6,7 @@
   <img src="../media/readme-hero-v2.png" alt="AgentDeskLink — Browser + Desktop, over MCP" width="1200">
 </p>
 
-Target version: `0.1.2`
+Target version: `0.1.3`
 
 **The browser and the desktop, from the AI agent you already use.**
 
@@ -21,7 +21,7 @@ AgentDeskLink connects AI agents with the browser and desktop on your local mach
 | [Supported environments and known limitations](KNOWN_ISSUES_en.md) | Supported operating systems and usage limits |
 | [Update settings](UPDATES_en.md) | The fixed GitHub update source and verifying file integrity |
 
-This version is a beta. Choose the distribution file that matches your operating system and CPU, and read the supported environments and limitations.
+This version is a beta. Use the common `agentdesklink-0.1.3.vsix` package and check the supported operating systems, CPUs and limitations.
 
 ## License
 

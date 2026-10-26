@@ -3,7 +3,7 @@ import {appendFile, chmod, mkdir} from 'node:fs/promises';
 import {dirname} from 'node:path';
 import {setTimeout as delay} from 'node:timers/promises';
 import {AdlError, NativeError, safeError, type Action, type Adapter, type AdapterSession, type Condition, type Mode, type PolicyConfig, type RawSnapshot, type Target} from './types.js';
-import {authorizeAction,redactElement,redactString} from './policy.js';
+import {assertUrlAllowed,authorizeAction,redactElement,redactString} from './policy.js';
 import {SnapshotStore} from './snapshot.js';
 import {VisualStore} from './visual.js';
 import {visualRequestSchema} from './visual-request.js';
@@ -27,6 +27,9 @@ export class Engine {
   private visuals=new VisualStore();
   private inputProofs=new InputProofStore();
   private queue:Promise<unknown>=Promise.resolve();
+  private readonly sessionQueues=new Map<string,Promise<unknown>>();
+  private desktopLane:Promise<unknown>|undefined;
+  private readonly expiring=new Set<string>();
   private stopped=false;
   private shut=false;
   private queued=0;
@@ -39,8 +42,14 @@ export class Engine {
       const target:Target={target_id:`t_${randomUUID()}`,surface:'browser',application_id:config.id,label:redactString(config.label),policy_class:config.classification,capabilities:['observe','click','fill','select','check','scroll','navigate','read_state','wait_for',...(config.visual?.enabled?['capture','crop','record']:[]),...(config.gestures?.enabled?['gesture']:[])]};
       this.targets.set(target.target_id,target);
     }
-    adapters.desktop?.onInvalidated?.(()=>{void this.enqueue(async()=>{this.replaceDesktopTargets([]);for(const s of [...this.sessions.values()])if(s.target.surface==='desktop')await this.destroy(s);}).catch(()=>{});});
-    this.timer=setInterval(()=>{this.visuals.prune();this.inputProofs.prune();void this.enqueue(async()=>{for(const s of this.sessions.values())if(s.expires<=Date.now())await this.destroy(s);}).catch(()=>{});},1000);this.timer.unref();
+    adapters.desktop?.onInvalidated?.(()=>{void this.enqueueDesktop(async()=>{this.replaceDesktopTargets([]);for(const s of [...this.sessions.values()])if(s.target.surface==='desktop')await this.destroy(s);}).catch(()=>{});});
+    this.timer=setInterval(()=>{
+      this.visuals.prune();this.inputProofs.prune();
+      for(const s of this.sessions.values())if(s.expires<=Date.now()&&!this.expiring.has(s.id)){
+        this.expiring.add(s.id);
+        void this.sessionLane(s.id,async()=>{if(this.sessions.get(s.id)===s&&s.expires<=Date.now())await this.destroy(s);}).catch(()=>{}).finally(()=>this.expiring.delete(s.id));
+      }
+    },1000);this.timer.unref();
   }
   private replaceDesktopTargets(targets:Target[]){
     for(const [id,target] of this.targets)if(target.surface==='desktop')this.targets.delete(id);
@@ -49,31 +58,51 @@ export class Engine {
   capabilities() {
     const probe=(this.adapters.desktop as {desktopCapabilities?:()=>{available:boolean;mutations:boolean;focus_control?:string;interactive_input?:boolean;gesture_backends?:string[];lifecycle?:boolean}}|undefined)?.desktopCapabilities?.();
     const interactive=this.desktopConfig()?.interactive?.enabled===true;
-    return {ok:true,permissions:{all_operations:this.policy.allowAllOperations===true},version:'0.1.2',transport:'stdio',modes:['strict_isolated',...(this.adapters.desktop?['background_semantic',...(interactive?['interactive_desktop']:[])]:[])],
+    const p=this.policy,blanket=p.allowAllOperations===true,app=this.platform==='darwin'?p.macos:this.platform==='win32'?p.windows:undefined;
+    return {ok:true,permissions:{all_operations:blanket,restricted_targets:p.restrictTargets===true,origins:blanket&&!p.restrictTargets?'all_allowed':p.allowedOrigins.slice(),targets:blanket&&!p.restrictTargets?'all_allowed':p.browserTargets.map(t=>({application_id:t.id,origin:new URL(t.url).origin})),desktop_app:app?.appId??'',physical_input:app?.interactive?.enabled===true,unredacted_images:app?.visual?.allowUnredacted===true,loopback:p.allowLoopback,private_network:p.allowPrivateNetwork},version:'0.1.3',transport:'stdio',modes:['strict_isolated',...(this.adapters.desktop?['background_semantic',...(interactive?['interactive_desktop']:[])]:[])],
       adapters:{browser:'chromium_headless',desktop:this.adapters.desktop?(probe?.focus_control==='probe_guarded_semantic'?'macos_ax_probe_required':'windows_uia_probe_required'):'unavailable',...(probe?{desktop_mutations:probe.mutations}:{})},
       lifecycle:{configured:this.policy.macos?.lifecycle?.enabled===true||this.policy.windows?.lifecycle?.enabled===true,available:probe?.lifecycle===true&&this.lifecyclePlatformSupported(),platform_supported:this.lifecyclePlatformSupported(),mode:'background_semantic'},
       limits:{max_sessions:this.policy.maxSessions,max_batch_steps:this.policy.maxBatchSteps,max_elements:this.policy.maxElements},
       visual:{browser:true,desktop:!!(this.policy.macos?.visual?.enabled||this.policy.windows?.visual?.enabled),formats:['image/png'],sources:['viewport','exact_window'],max_source_pixels:4194304,max_source_bytes:8388608,max_frames:16,max_retained_bytes:33554432,frame_ttl_ms:60000,max_output_dimension:2048,max_output_pixels:4194304,max_output_bytes:6291456,video:'timestamped_png_sequence',audio:false,gestures:'isolated_browser_and_opt_in_desktop',max_sequence_frames:16,max_sequence_span_ms:6000,gesture_frame_max_age_ms:5000},
       physical_input:{configured:interactive,available:probe?.interactive_input===true,backends:probe?.gesture_backends??[],requires_foreground:true,exclusive_lease:true,confirmation_ttl_ms:30000,pre_dispatch_target_check:true},
-      limitations:['Visuals require trusted per-target opt-in. Native images may need explicit unredacted-pixel permission. Sequences sample discrete frames without audio.',
+      limitations:[blanket&&!p.restrictTargets?'Broad policy supplies default browser visuals; native images follow the native visual policy. Sequences sample discrete frames without audio.':'Visuals require trusted per-target opt-in. Native images may need explicit unredacted-pixel permission. Sequences sample discrete frames without audio.',
         'interactive_desktop shares the human desktop and moves the real pointer. Human input or focus changes stop execution; partial input cannot be rolled back.',
         'Native scroll_swipe is wheel/scroll input, distinct from genuine touch_swipe. Check each target backend capability.',
-        ...(this.policy.allowAllOperations?[]:['Credentials, uploads, arbitrary code and consequential operations are disabled.']),'Desktop strict isolation requires a separate isolated runner.','background_semantic preserves its native focus-control probe and trusted control allowlist.',
+        ...(blanket?[]:['Credentials, uploads and consequential operations are disabled.']),
+        ...(p.restrictTargets?['Origin and application grants remain enforced even with broad operation permission.']:[]),
+        'Arbitrary code execution is unavailable. Desktop strict isolation requires a separate isolated runner.',
+        app?.allowAllOperations?'background_semantic preserves native focus probes; the explicit native operation grant replaces the control allowlist.':'background_semantic preserves native focus probes and requires a trusted control allowlist.',
         'Application lifecycle is noninterfering background launch/status/quit for the one configured opted-in application only; it never sends input or focus changes and never falls back to interactive control automatically.']};
   }
   listTargets(surface?:string,cancel?:AbortSignal) {return this.enqueue(async()=>{
     if(surface!=='browser'&&this.adapters.desktop?.discover){
-      try{this.replaceDesktopTargets(await this.deadline(signal=>this.adapters.desktop!.discover!(signal),this.policy.actionTimeoutMs,cancel));}
+      try{this.replaceDesktopTargets(await this.enqueueDesktop(()=>this.deadline(signal=>this.adapters.desktop!.discover!(signal),this.policy.actionTimeoutMs,cancel)));}
       catch(error){this.replaceDesktopTargets([]);throw error;}
     }
     return {ok:true,targets:[...this.targets.values()].filter(t=>!surface||t.surface===surface)};
   });}
-  private enqueue<T>(fn:()=>Promise<T>):Promise<T> {
+  private enqueue<T>(fn:()=>Promise<T>):Promise<T> {return this.runQueued(this.queue,p=>{this.queue=p;},fn);}
+  private enqueueSession<T>(session_id:string,fn:()=>Promise<T>):Promise<T> {
+    const prior=this.sessionQueues.get(session_id)??Promise.resolve();
+    let tail:Promise<unknown>|undefined;
+    return this.runQueued(prior,p=>{tail=p;this.sessionQueues.set(session_id,p);},fn).finally(()=>{if(tail&&this.sessionQueues.get(session_id)===tail)this.sessionQueues.delete(session_id);});
+  }
+  private enqueueDesktop<T>(fn:()=>Promise<T>):Promise<T> {
+    const prior=this.desktopLane??Promise.resolve();
+    let tail:Promise<unknown>|undefined;
+    return this.runQueued(prior,p=>{tail=p;this.desktopLane=p;},fn).finally(()=>{if(tail&&this.desktopLane===tail)this.desktopLane=undefined;});
+  }
+  private runQueued<T>(chain:Promise<unknown>,bind:(tail:Promise<unknown>)=>void,fn:()=>Promise<T>):Promise<T> {
     if(this.stopped||!this.operationAllowed())return Promise.reject(new AdlError('E_CANCELLED'));
     if(this.queued>=64)return Promise.reject(new AdlError('E_RESOURCE_LIMIT'));
     this.queued++;
-    const run=this.queue.then(()=>{if(this.stopped||!this.operationAllowed())throw new AdlError('E_CANCELLED');return fn();});
-    this.queue=run.catch(()=>{});return run.finally(()=>{this.queued--;});
+    const run=chain.then(()=>{if(this.stopped||!this.operationAllowed())throw new AdlError('E_CANCELLED');return fn();});
+    bind(run.catch(()=>{}));return run.finally(()=>{this.queued--;});
+  }
+  private sessionLane<T>(session_id:string,fn:()=>Promise<T>):Promise<T> {
+    const s=this.sessions.get(session_id);
+    if(s?.target.surface==='desktop')return this.enqueueDesktop(fn);
+    return this.enqueueSession(session_id,fn);
   }
   private get(id:string):Session {
     const s=this.sessions.get(id);if(!s||s.expires<=Date.now())throw new AdlError('E_TARGET_NOT_FOUND');
@@ -117,23 +146,38 @@ export class Engine {
   private boundSnapshot(raw:RawSnapshot):RawSnapshot{return {...raw,elements:raw.elements.slice(0,this.policy.maxElements),truncated:raw.truncated||raw.elements.length>this.policy.maxElements};}
   openUrl(url:string,mode:Mode='strict_isolated',cancel?:AbortSignal){
     if(this.stopped||!this.operationAllowed())return Promise.reject(new AdlError('E_CANCELLED'));
-    if(!this.policy.allowAllOperations)return Promise.reject(new AdlError('E_POLICY_DENIED'));
     let parsed:URL;try{parsed=new URL(url);}catch{return Promise.reject(new AdlError('E_INVALID_ARGUMENT'));}
     if(!['http:','https:'].includes(parsed.protocol)||parsed.username||parsed.password||url.length>2048)return Promise.reject(new AdlError('E_INVALID_ARGUMENT'));
+    // Origin and network grants are both checked before any catalogue mutation or open; the
+    // extension profile sets restrictTargets so allowAllOperations cannot bypass them.
+    return assertUrlAllowed(url,this.policy).then(()=>this.enqueue(async()=>{
+      if(cancel?.aborted)throw new AdlError('E_CANCELLED');
+      return this.openInternal(this.openGranted(parsed),mode,cancel);
+    }));
+  }
+  private openGranted(parsed:URL):Target{
+    const origin=parsed.origin;
     // A bounded per-process target catalogue lets clients open a URL without a policy file.
-    let config=this.policy.browserTargets.find(t=>t.url===parsed.href);
+    let config=this.policy.browserTargets.find(t=>new URL(t.url).href===parsed.href);
     if(!config){
-      if(this.policy.browserTargets.length>=64)return Promise.reject(new AdlError('E_RESOURCE_LIMIT'));
-      config={id:`browser_${randomUUID()}`,label:parsed.origin,url:parsed.href,classification:'PUBLIC',visual:{enabled:true,maskSelectors:[]},gestures:{enabled:true,surfaces:[{id:'page',selector:'body',kinds:['drag','swipe']}]}};
+      const granted=this.policy.browserTargets.find(t=>new URL(t.url).origin===origin);
+      if(!granted&&(!this.policy.allowAllOperations||this.policy.restrictTargets))throw new AdlError('E_POLICY_DENIED');
+      if(this.policy.browserTargets.length>=64)throw new AdlError('E_RESOURCE_LIMIT');
+      // Preserve the exact requested path without mutating another live target's
+      // configuration; inherit only permissions already granted to this origin.
+      config={...(granted??{label:origin,classification:'PUBLIC' as const,visual:{enabled:true,maskSelectors:[]},gestures:{enabled:true,surfaces:[{id:'page',selector:'body',kinds:['drag' as const,'swipe' as const]}]}}),id:`browser_${randomUUID()}`,url:parsed.href};
       this.policy.browserTargets.push(config);
-      const target:Target={target_id:`t_${randomUUID()}`,surface:'browser',application_id:config.id,label:parsed.origin,policy_class:'PUBLIC',capabilities:['observe','click','fill','select','check','scroll','navigate','read_state','wait_for','capture','crop','record','gesture']};
+      const target:Target={target_id:`t_${randomUUID()}`,surface:'browser',application_id:config.id,label:redactString(config.label),policy_class:config.classification,capabilities:['observe','click','fill','select','check','scroll','navigate','read_state','wait_for',...(config.visual?.enabled?['capture','crop','record']:[]),...(config.gestures?.enabled?['gesture']:[])]};
       this.targets.set(target.target_id,target);
     }
-    return this.open([...this.targets.values()].find(t=>t.application_id===config!.id)!.target_id,mode,cancel);
+    const target=[...this.targets.values()].find(t=>t.application_id===config!.id);if(!target)throw new AdlError('E_TARGET_NOT_FOUND');return target;
   }
   open(target_id:string,mode:Mode='strict_isolated',cancel?:AbortSignal) {return this.enqueue(async()=>{
-    if(this.sessions.size>=this.policy.maxSessions)throw new AdlError('E_RESOURCE_LIMIT');
     const target=this.targets.get(target_id);if(!target)throw new AdlError('E_TARGET_NOT_FOUND');
+    return target.surface==='desktop'?this.enqueueDesktop(()=>this.openInternal(target,mode,cancel)):this.openInternal(target,mode,cancel);
+  });}
+  private async openInternal(target:Target,mode:Mode,cancel?:AbortSignal){
+    if(this.sessions.size>=this.policy.maxSessions)throw new AdlError('E_RESOURCE_LIMIT');
     if(target.surface==='desktop'&&mode==='strict_isolated')throw new AdlError('E_INTERFERENCE_RISK');
     if(mode==='interactive_desktop'){
       if(target.surface!=='desktop')throw new AdlError('E_INTERFERENCE_RISK');
@@ -152,8 +196,8 @@ export class Engine {
       this.sessions.set(s.id,s);this.snapshots.record(s.id,1,raw);
       return {ok:true,session_id:s.id,revision:1,capabilities:instance.capabilities??target.capabilities,mode};
     }catch(error){if(instance)await this.stopAdapter(instance);throw error;}
-  });}
-  capture(session_id:string,options:VisualRequest={},cancel?:AbortSignal):Promise<VisualObservation>{return this.enqueue(async()=>{
+  }
+  capture(session_id:string,options:VisualRequest={},cancel?:AbortSignal):Promise<VisualObservation>{return this.sessionLane(session_id,async()=>{
     const s=this.get(session_id);
     const parsed=visualRequestSchema.safeParse(options);if(!parsed.success)throw new AdlError('E_INVALID_ARGUMENT');
     this.assertCaptureAllowed(s);
@@ -182,7 +226,7 @@ export class Engine {
       const observation=await this.visuals.view(s.id,id,view,signal);s.latestFrame=id;return observation;
     }catch(error){this.visuals.discard(s.id,id);throw error;}
   }
-  record(session_id:string,options:SequenceOptions={},cancel?:AbortSignal):Promise<SequenceObservation>{return this.enqueue(async()=>{
+  record(session_id:string,options:SequenceOptions={},cancel?:AbortSignal):Promise<SequenceObservation>{return this.sessionLane(session_id,async()=>{
     const s=this.get(session_id);const parsed=sequenceRequestSchema.safeParse(options);if(!parsed.success)throw new AdlError('E_INVALID_ARGUMENT');this.assertCaptureAllowed(s);
     return this.deadline(signal=>recordSequence({
       capture:(view,sig)=>this.captureFrame(s,view,sig),
@@ -190,7 +234,7 @@ export class Engine {
       discard:ids=>{for(const id of ids)this.visuals.discard(s.id,id);if(s.latestFrame&&ids.includes(s.latestFrame))delete s.latestFrame;},
     },parsed.data,signal),Math.min(30000,this.policy.actionTimeoutMs+6000),cancel,s).catch(async error=>{if(error instanceof AdlError&&['E_TIMEOUT','E_CANCELLED'].includes(error.code))await this.destroy(s);throw error;});
   });}
-  gesture(session_id:string,request:GestureRequest,cancel?:AbortSignal):Promise<VisualObservation&{metadata:VisualObservation['metadata']&{gesture:GestureExecution}}>{return this.enqueue(async()=>{
+  gesture(session_id:string,request:GestureRequest,cancel?:AbortSignal):Promise<VisualObservation&{metadata:VisualObservation['metadata']&{gesture:GestureExecution}}>{return this.sessionLane(session_id,async()=>{
     const s=this.get(session_id);const parsed=gestureRequestSchema.safeParse(request);if(!parsed.success)throw new AdlError('E_INVALID_ARGUMENT');
     this.assertCaptureAllowed(s);
     if(!s.adapter.gesture)throw new AdlError('E_UNSUPPORTED_ACTION');
@@ -226,7 +270,7 @@ export class Engine {
       }
     },this.policy.actionTimeoutMs+5000,cancel,s).catch(error=>{if(dispatched&&error instanceof AdlError&&['E_CANCELLED','E_TIMEOUT'].includes(error.code))error.mayHaveExecuted=true;throw error;});
   });}
-  prepareInput(session_id:string,request:PrepareInputRequest,cancel?:AbortSignal):Promise<PreparedObservation>{return this.enqueue(async()=>{
+  prepareInput(session_id:string,request:PrepareInputRequest,cancel?:AbortSignal):Promise<PreparedObservation>{return this.sessionLane(session_id,async()=>{
     const s=this.get(session_id),parsed=prepareInputSchema.safeParse(request);if(!parsed.success)throw new AdlError('E_INVALID_ARGUMENT');
     if(s.target.surface!=='desktop'||s.mode!=='interactive_desktop'||!s.adapter.prepareInput)throw new AdlError('E_UNSUPPORTED_ACTION');
     this.assertCaptureAllowed(s);
@@ -258,7 +302,7 @@ export class Engine {
       return {metadata:{...prepared,...proof,ok:true as const,session_id:s.id,revision:s.revision},...(image?{image}:{})};
     },this.policy.actionTimeoutMs,cancel,s).catch(async error=>{this.inputProofs.invalidateSession(s.id);if(dispatched&&error instanceof AdlError&&['E_TIMEOUT','E_CANCELLED'].includes(error.code))error.mayHaveExecuted=true;if(error instanceof AdlError&&(error.mayHaveExecuted||['E_TIMEOUT','E_CANCELLED'].includes(error.code)))await this.destroy(s);throw error;});
   });}
-  commitInput(session_id:string,request:CommitInputRequest,cancel?:AbortSignal):Promise<VisualObservation&{metadata:VisualObservation['metadata']&{input:InputExecution}}>{return this.enqueue(async()=>{
+  commitInput(session_id:string,request:CommitInputRequest,cancel?:AbortSignal):Promise<VisualObservation&{metadata:VisualObservation['metadata']&{input:InputExecution}}>{return this.sessionLane(session_id,async()=>{
     const s=this.get(session_id),parsed=commitInputSchema.safeParse(request);if(!parsed.success)throw new AdlError('E_INVALID_ARGUMENT');
     if(s.mode!=='interactive_desktop'||!s.adapter.commitInput)throw new AdlError('E_UNSUPPORTED_ACTION');
     const proof=this.inputProofs.consume(s.id,parsed.data.confirmation_id);
@@ -278,8 +322,10 @@ export class Engine {
       return {...image,metadata:{...image.metadata,input:execution}};
     },this.policy.actionTimeoutMs,cancel,s).catch(async error=>{const safe=error instanceof AdlError?error:new AdlError('E_INTERNAL');if(completed||dispatched&&['E_TIMEOUT','E_CANCELLED'].includes(safe.code))safe.mayHaveExecuted=true;if(safe.mayHaveExecuted||['E_TIMEOUT','E_CANCELLED'].includes(safe.code))await this.destroy(s);throw safe;});
   });}
-  observe(session_id:string,options:{token_budget?:number;since_revision?:number;cursor?:string;scope?:string;depth?:number;include?:string[]}={},cancel?:AbortSignal) {return this.enqueue(async()=>{
-    const s=this.get(session_id);await this.refresh(s,cancel);
+  observe(session_id:string,options:{token_budget?:number;since_revision?:number;cursor?:string;scope?:string;depth?:number;include?:string[];representation?:'auto'|'full'|'delta'}={},cancel?:AbortSignal) {return this.sessionLane(session_id,async()=>{
+    const s=this.get(session_id);
+    if(options.depth!==undefined){if(s.target.surface!=='browser')throw new AdlError('E_UNSUPPORTED_ACTION');if(!Number.isSafeInteger(options.depth)||options.depth<1||options.depth>12)throw new AdlError('E_INVALID_ARGUMENT');}
+    await this.refresh(s,cancel);
     return this.snapshots.observe(s.id,s.revision,{...options,token_budget:options.token_budget??this.policy.defaultTokenBudget});
   });}
   private async action(s:Session,action:Action,expected:number,signal?:AbortSignal){
@@ -304,7 +350,7 @@ export class Engine {
       return {ok:true,session_id:s.id,revision:s.revision,audit_id};
     }catch(error){await this.destroy(s);const safe=error instanceof AdlError?error:new AdlError('E_INTERNAL');if(acknowledged||!(error instanceof NativeError))safe.mayHaveExecuted=true;throw safe;}
   }
-  act(session_id:string,action:Action,expected_revision:number,cancel?:AbortSignal){return this.enqueue(()=>this.action(this.get(session_id),action,expected_revision,cancel));}
+  act(session_id:string,action:Action,expected_revision:number,cancel?:AbortSignal){return this.sessionLane(session_id,()=>this.action(this.get(session_id),action,expected_revision,cancel));}
   private async waitInternal(s:Session,condition:Condition,timeout:number,cancel?:AbortSignal){
     if(!condition.role&&!condition.name&&!condition.element_id)throw new AdlError('E_INVALID_ARGUMENT');
     return this.deadline(async signal=>{
@@ -317,7 +363,7 @@ export class Engine {
       }
     },Math.min(timeout,30000),cancel,s);
   }
-  wait(session_id:string,condition:Condition,timeout_ms:number,cancel?:AbortSignal){return this.enqueue(()=>this.waitInternal(this.get(session_id),condition,timeout_ms,cancel));}
+  wait(session_id:string,condition:Condition,timeout_ms:number,cancel?:AbortSignal){return this.sessionLane(session_id,()=>this.waitInternal(this.get(session_id),condition,timeout_ms,cancel));}
   private validateAction(action:Action,surface:'browser'|'desktop'){
     if(!['click','fill','select','check','scroll','navigate','read_state','wait_for'].includes(action.action))throw new AdlError('E_INVALID_ARGUMENT');
     if(action.action==='navigate'){try{const url=new URL(action.url!);if(!['http:','https:'].includes(url.protocol)||url.username||url.password)throw new Error();}catch{throw new AdlError('E_INVALID_ARGUMENT');}}
@@ -339,15 +385,13 @@ export class Engine {
     }
     if(this.tasks.size>=128){const done=[...this.tasks.values()].find(t=>!['queued','running'].includes(t.status));if(done)this.tasks.delete(done.id);else throw new AdlError('E_RESOURCE_LIMIT');}
     const task:Task={id:`task_${randomUUID()}`,status:'queued',controller:new AbortController(),results:[],created:Date.now()};this.tasks.set(task.id,task);
-    void this.enqueue(async()=>{
+    void Promise.resolve().then(async()=>{
       if(task.controller.signal.aborted)throw new AdlError('E_CANCELLED');
       task.status='running';const expected={...expected_revisions};
       for(const [step_index,step] of steps.entries()){
         if(task.controller.signal.aborted)throw new AdlError('E_CANCELLED');
         try{
-          const s=this.get(step.session_id);
-          const result=await this.action(s,step,step.expected_revision??expected[s.id]!,task.controller.signal);
-          expected[s.id]=s.revision;
+          const result=await this.sessionLane(step.session_id,async()=>{const s=this.get(step.session_id);const outcome=await this.action(s,step,step.expected_revision??expected[s.id]!,task.controller.signal);expected[s.id]=s.revision;return outcome;});
           task.results.push({step_index,status:'completed',...result});
         }catch(error){task.results.push({step_index,status:'failed',error:safeError(error)});throw error;}
       }
@@ -362,7 +406,7 @@ export class Engine {
     if(command==='cancel'&&['queued','running'].includes(t.status))t.controller.abort();
     return {ok:true,task_id:t.id,status:t.status,results:t.results.map(r=>({...r})),...(t.error?{error:t.error}: {})};
   }
-  close(session_id:string){return this.enqueue(async()=>{const s=this.get(session_id);await this.destroy(s);return {ok:true,closed:true};});}
+  close(session_id:string){return this.sessionLane(session_id,async()=>{const s=this.get(session_id);await this.destroy(s);return {ok:true,closed:true};});}
   private lifecyclePlatformSupported(){return this.platform==='darwin'||this.platform==='win32';}
   private lifecycleAdapter():Adapter|undefined{
     const config=this.desktopConfig();
@@ -375,7 +419,7 @@ export class Engine {
     const config=this.desktopConfig()!;
     return {ok:true,applications:[{application_id:config.appId,capabilities:['status','launch','quit'],mode:'background_semantic'}]};
   });}
-  application(application_id:string,action:'status'|'launch'|'quit',cancel?:AbortSignal){return this.enqueue(async()=>{
+  application(application_id:string,action:'status'|'launch'|'quit',cancel?:AbortSignal){return this.enqueue(()=>this.enqueueDesktop(async()=>{
     if(this.stopped||!this.operationAllowed())throw new AdlError('E_CANCELLED');
     const adapter=this.lifecycleAdapter();
     if(!adapter||action!=='status'&&action!=='launch'&&action!=='quit')throw new AdlError('E_POLICY_DENIED');
@@ -390,6 +434,6 @@ export class Engine {
       this.replaceDesktopTargets([]);
     }
     return {ok:true,application_id,...state};
-  });}
+  }));}
   async shutdown(){if(this.shut)return;this.shut=true;this.stopped=true;clearInterval(this.timer);this.master.abort();this.visuals.clear();this.inputProofs.clear();for(const t of this.tasks.values())t.controller.abort();await Promise.allSettled([...this.sessions.values()].map(s=>this.destroy(s)));await Promise.allSettled([this.adapters.browser.close(),this.adapters.desktop?.close()]);this.snapshots.clear();}
 }

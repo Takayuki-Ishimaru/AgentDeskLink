@@ -122,6 +122,8 @@ int Run(int argc, char** argv) {
       cfg.lifecycle_enabled = true;
     } else if (a == "--allow-all") {
       cfg.allow_all = true;
+    } else if (a == "--restrict-targets") {
+      cfg.restrict_targets = true;
     } else if (a == "--lifecycle-worker") {
       // Verified against the actual non-input desktop in wmain, before COM.
     } else if (a == "--interactive-config") {

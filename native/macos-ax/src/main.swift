@@ -42,8 +42,8 @@ func digest(_ value: Any) -> String {
     guard let data = try? JSONSerialization.data(withJSONObject:value,options:[.sortedKeys,.fragmentsAllowed]) else { return "" }
     return SHA256.hash(data:data).map{String(format:"%02x",$0)}.joined()
 }
-let blocked = try! NSRegularExpression(pattern:"password|secret|credential|token|api.?key|delete|remove|upload|send|submit|purchase|checkout|pay(?:ment)?|log.?in|sign.?in|transfer",options:.caseInsensitive)
-func unsafe(_ s: String) -> Bool { blocked.firstMatch(in:s,range:NSRange(s.startIndex...,in:s)) != nil }
+let blocked = try! NSRegularExpression(pattern:"delete|remove|upload|send|submit|purchase|checkout|pay(?:ment)?|log.?in|sign.?in|transfer",options:.caseInsensitive)
+func unsafe(_ s: String) -> Bool { secretLabel(s) || blocked.firstMatch(in:s,range:NSRange(s.startIndex...,in:s)) != nil }
 func redact(_ s: String) -> String {
     if unsafe(s) || s.contains("@") || s.range(of:#"(?:sk-|Bearer |EMP[-_]?\d)"#,options:.regularExpression) != nil { return "[redacted]" }
     var result = ""
@@ -73,26 +73,50 @@ final class Session {
     var poisoned = false
     init(_ t:WindowTarget) { target=t }
 }
-struct Probe {
-    let pid:pid_t
-    let focusedApp:AXUIElement?
-    let focusedWindow:AXUIElement?
-    let focused:AXUIElement?
-    let point:CGPoint
-    static func equal(_ a:AXUIElement?,_ b:AXUIElement?) -> Bool {
-        switch (a,b) { case (nil,nil):return true; case(let a?,let b?):return CFEqual(a,b);default:return false }
+// A separate read-only run loop keeps receiving events while AX IPC blocks the
+// broker thread. If monitoring is unavailable/interrupted the comparison falls
+// back to the original strict guard. History is bounded and protected by lock.
+final class SemanticInputMonitor: @unchecked Sendable {
+    static let shared=SemanticInputMonitor()
+    private let lock=NSLock()
+    private var history=SemanticInputHistory()
+    private var tap:CFMachPort?
+    private init(){
+        let ready=DispatchSemaphore(value:0)
+        let thread=Thread{self.run(ready)};thread.name="adl.semantic-input-observer";thread.start()
+        _=ready.wait(timeout:.now()+1)
     }
-    func matches(_ b:Probe)->Bool { pid==b.pid && point==b.point && Self.equal(focusedApp,b.focusedApp) && Self.equal(focusedWindow,b.focusedWindow) && Self.equal(focused,b.focused) }
+    func snapshot()->SemanticInputHistory{lock.lock();defer{lock.unlock()};return history}
+    private func healthy(_ value:Bool){lock.lock();history.setHealthy(value);lock.unlock()}
+    private func receive(_ type:CGEventType,_ event:CGEvent){
+        if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+            healthy(false);if let tap{CGEvent.tapEnable(tap:tap,enable:true)};healthy(true);return
+        }
+        guard let kind=semanticInputKind(type) else{return}
+        let rawSource=event.getIntegerValueField(.eventSourceUnixProcessID)
+        let source=rawSource>=0 && rawSource<=Int64(Int32.max) ? pid_t(rawSource):pid_t(-1)
+        lock.lock();history.record(source:source,point:kind.pointer ? event.location:nil,activation:kind.activation,time:ProcessInfo.processInfo.systemUptime);lock.unlock()
+    }
+    private func run(_ ready:DispatchSemaphore){
+        let mask=semanticInputTypes.reduce(CGEventMask(0)){$0|(CGEventMask(1)<<$1.rawValue)}
+        tap=CGEvent.tapCreate(tap:.cgSessionEventTap,place:.headInsertEventTap,options:.listenOnly,eventsOfInterest:mask,callback:{_,type,event,context in
+            if let context{Unmanaged<SemanticInputMonitor>.fromOpaque(context).takeUnretainedValue().receive(type,event)}
+            return Unmanaged.passUnretained(event)
+        },userInfo:Unmanaged.passUnretained(self).toOpaque())
+        guard let tap,let source=CFMachPortCreateRunLoopSource(nil,tap,0) else{ready.signal();return}
+        CFRunLoopAddSource(CFRunLoopGetCurrent(),source,.commonModes);CGEvent.tapEnable(tap:tap,enable:true)
+        healthy(CGEvent.tapIsEnabled(tap:tap));ready.signal();CFRunLoopRun();healthy(false)
+    }
 }
 final class Broker {
-    let appID:String; let appPath:String; let rules:[String:Rule];let allowAll:Bool
+    let appID:String; let appPath:String; let rules:[String:Rule];let allowAll:Bool;let restrictTargets:Bool
     var targets:[WindowTarget]=[]; var sessions:[String:Session]=[:]; var observers:[pid_t:(start:String,observer:AXObserver)]=[:]
     let system = AXUIElementCreateSystemWide()
     let captureBroker: WindowCaptureBroker
     let lifecycle:NativeApplicationLifecycle
-    init(_ appID:String,_ appPath:String,_ controls:String?,_ visualEnabled:Bool=false,_ interactiveConfig:String?=nil,_ lifecycleEnabled:Bool=false,_ allowAll:Bool=false) throws {
-        self.allowAll=allowAll;self.appID=appID;self.appPath=URL(fileURLWithPath:appPath).resolvingSymlinksInPath().path
-        self.captureBroker=WindowCaptureBroker(appID,self.appPath,visualEnabled,allowAll:allowAll)
+    init(_ appID:String,_ appPath:String,_ controls:String?,_ visualEnabled:Bool=false,_ interactiveConfig:String?=nil,_ lifecycleEnabled:Bool=false,_ allowAll:Bool=false,_ restrictTargets:Bool=false) throws {
+        self.allowAll=allowAll;self.restrictTargets=restrictTargets;self.appID=appID;self.appPath=URL(fileURLWithPath:appPath).resolvingSymlinksInPath().path
+        self.captureBroker=WindowCaptureBroker(appID,self.appPath,visualEnabled,allowAll:allowAll,restrictTargets:restrictTargets)
         self.lifecycle=NativeApplicationLifecycle(appID,self.appPath,lifecycleEnabled)
         guard appPath.hasPrefix("/"), !appID.isEmpty, appID.utf8.count<=128 else {throw fail("E_INVALID_ARGUMENT")}
         var parsed:[String:Rule]=[:]
@@ -111,7 +135,7 @@ final class Broker {
         guard AXIsProcessTrusted(), AXUIElementSetMessagingTimeout(system,0.25) == .success else {throw fail("E_BACKEND_UNAVAILABLE")}
     }
     func approved(_ app:NSRunningApplication)->Bool {
-        !app.isTerminated && (allowAll ? app.activationPolicy == .regular && app.executableURL != nil : app.bundleIdentifier==appID && app.executableURL?.resolvingSymlinksInPath().path==appPath) && processStart(app.processIdentifier) != nil
+        !app.isTerminated && (allowAll && !restrictTargets ? app.activationPolicy == .regular && app.executableURL != nil : app.bundleIdentifier==appID && app.executableURL?.resolvingSymlinksInPath().path==appPath) && processStart(app.processIdentifier) != nil
     }
     func watch(_ t:WindowTarget) throws {
         let pid=t.app.processIdentifier
@@ -256,6 +280,31 @@ final class Broker {
         guard NSWorkspace.shared.frontmostApplication?.processIdentifier==front.processIdentifier else {throw fail("E_FOCUS_CHANGED")}
         return Probe(pid:front.processIdentifier,focusedApp:focusedApp,focusedWindow:window,focused:focused,point:point)
     }
+    func semanticProbe(_ monitor:SemanticInputMonitor) throws -> (probe:SemanticProbe,history:SemanticInputHistory) {
+        guard let front=NSWorkspace.shared.frontmostApplication else{throw fail("E_FOCUS_CHANGED")}
+        let application=AXUIElementCreateApplication(front.processIdentifier)
+        AXUIElementSetMessagingTimeout(application,0.05)
+        var focused:CFTypeRef?,window:CFTypeRef?
+        let focusCode=AXUIElementCopyAttributeValue(application,kAXFocusedUIElementAttribute as CFString,&focused)
+        let windowCode=AXUIElementCopyAttributeValue(application,kAXFocusedWindowAttribute as CFString,&window)
+        let codes=[focusCode,windowCode]
+        let known=codes.allSatisfy{$0 == .success || $0 == .noValue || $0 == .attributeUnsupported}
+        let transient=codes.allSatisfy{$0 == .success || $0 == .noValue || $0 == .attributeUnsupported || $0 == .cannotComplete || $0 == .failure || $0 == .invalidUIElement}
+        let focus=axElement(focused),root=axElement(window)
+        var read:SemanticFocusRead=known ? .known : (transient ? .transient:.denied)
+        if (focused != nil && focus==nil) || (window != nil && root==nil) || (focusCode == .success && focus==nil) || (windowCode == .success && root==nil){read = .denied}
+        for element in [application]+[focus,root].compactMap({$0}){
+            var pid:pid_t=0;let status=AXUIElementGetPid(element,&pid)
+            if status == .success{if pid != front.processIdentifier{read = .denied}}
+            else if read != .denied && [AXError.cannotComplete,.failure,.invalidUIElement].contains(status){read = .transient}
+            else{read = .denied}
+        }
+        // An activation raced these foreign-app reads. Do not attach stale AX
+        // identities to the newly foreground application, or invent an empty one.
+        guard let cursor=coherentSemanticCursor(history:{monitor.snapshot()},point:{CGEvent(source:nil)?.location}),let current=NSWorkspace.shared.frontmostApplication else{throw fail("E_FOCUS_CHANGED")}
+        if read != .denied && current.processIdentifier != front.processIdentifier{read = .transient}
+        return (SemanticProbe(state:Probe(pid:current.processIdentifier,focusedApp:read == .known ? application:nil,focusedWindow:read == .known ? root:nil,focused:read == .known ? focus:nil,point:cursor.point),focusRead:read),cursor.history)
+    }
     func settable(_ e:AXUIElement,_ key:String)->Bool {var yes:DarwinBoolean=false;return AXUIElementIsAttributeSettable(e,key as CFString,&yes) == .success && yes.boolValue}
     func press(_ e:AXUIElement,_ action:String) throws {
         var names:CFArray?;guard AXUIElementCopyActionNames(e,&names) == .success,let names=names as? [String],names.contains(action) else {throw fail("E_UNSUPPORTED_ACTION")}
@@ -272,7 +321,12 @@ final class Broker {
         }
         guard node.publicData["enabled"] as? Bool == true else{throw fail("E_POLICY_DENIED")}
         guard try numericValue(s.target.root,kAXMinimizedAttribute,false)?.boolValue==false else {throw fail("E_UNSUPPORTED_ACTION")}
-        let e=node.ref;let before=try probe();var dispatched=false;var operationError:Error?
+        let monitor=SemanticInputMonitor.shared
+        let started=ProcessInfo.processInfo.systemUptime
+        let checkpoint=monitor.snapshot().checkpoint(started)
+        let e=node.ref;let before=try semanticProbe(monitor);var dispatched=false;var operationError:Error?
+        var safety=SemanticGuardState(anchor:before.probe,checkpoint:checkpoint,target:s.target.app.processIdentifier,own:getpid())
+        guard safety.accept(before.probe,history:before.history,now:ProcessInfo.processInfo.systemUptime) else{throw fail("E_FOCUS_CHANGED")}
         do {
             try validate(s.target)
             // Retained references must still belong to this exact root immediately before dispatch.
@@ -310,7 +364,8 @@ final class Broker {
             let settled=Date().addingTimeInterval(dispatched ? 0.10 : 0)
             repeat {
                 if dispatched {RunLoop.current.run(until:Date().addingTimeInterval(0.01))}
-                let after=try probe();guard before.matches(after) else {throw fail("E_FOCUS_CHANGED",dispatched)}
+                let after=try semanticProbe(monitor)
+                guard safety.accept(after.probe,history:after.history,now:ProcessInfo.processInfo.systemUptime) else {throw fail("E_FOCUS_CHANGED",dispatched)}
             } while Date()<settled
         } catch {s.poisoned=true;throw fail("E_FOCUS_CHANGED",dispatched)}
         if let error=operationError {if dispatched {s.poisoned=true};if let error=error as? Failure {throw Failure(code:error.code,uncertain:dispatched || error.uncertain)};throw fail("E_INTERNAL",dispatched)}
@@ -355,13 +410,14 @@ if Array(CommandLine.arguments.dropFirst())==["--release-input"]{
 var args=Array(CommandLine.arguments.dropFirst());var opts:[String:String]=[:]
 let visualFlags=args.filter{$0=="--visual-enabled"}.count
 let allowAllFlags=args.filter{$0=="--allow-all"}.count
+let restrictTargetFlags=args.filter{$0=="--restrict-targets"}.count
 let lifecycleFlags=args.filter{$0=="--lifecycle-enabled"}.count
-guard visualFlags<=1,lifecycleFlags<=1,allowAllFlags<=1 else {exit(2)}
-args.removeAll{$0=="--visual-enabled" || $0=="--lifecycle-enabled" || $0=="--allow-all"}
+guard visualFlags<=1,lifecycleFlags<=1,allowAllFlags<=1,restrictTargetFlags<=1 else {exit(2)}
+args.removeAll{$0=="--visual-enabled" || $0=="--lifecycle-enabled" || $0=="--allow-all" || $0=="--restrict-targets"}
 while args.count>=2 {let key=args.removeFirst();if !["--app-id","--app-path","--controls-file","--interactive-config"].contains(key) || opts[key] != nil {exit(2)};opts[key]=args.removeFirst()}
 guard args.isEmpty,let appID=opts["--app-id"],let appPath=opts["--app-path"] else {exit(2)}
 let broker:Broker
-do {broker=try Broker(appID,appPath,opts["--controls-file"],visualFlags==1,opts["--interactive-config"],lifecycleFlags==1,allowAllFlags==1)} catch {FileHandle.standardError.write(Data("AgentDeskLink: native setup unavailable.\n".utf8));exit(2)}
+do {broker=try Broker(appID,appPath,opts["--controls-file"],visualFlags==1,opts["--interactive-config"],lifecycleFlags==1,allowAllFlags==1,restrictTargetFlags==1)} catch {FileHandle.standardError.write(Data("AgentDeskLink: native setup unavailable.\n".utf8));exit(2)}
 var running=true
 let reader=DispatchQueue(label:"adl.stdin")
 let pending=NativeRequestQueue()

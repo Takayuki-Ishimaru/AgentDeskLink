@@ -16,6 +16,7 @@ struct LaunchConfig {
   bool visual_enabled = false; // trusted launch option, never a protocol request
   bool lifecycle_enabled = false;
   bool allow_all = false;  // trusted launch option, never a protocol request
+  bool restrict_targets = false; // keep configured app boundary with broad control permissions
   std::string app_path;  // absolute, canonicalised
 };
 

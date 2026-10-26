@@ -16,9 +16,13 @@ function tagVersion(tag: unknown): string | undefined {
   return valid(version) ?? undefined;
 }
 
-/** Newest published release with an exact VSIX for platform-arch; throws on a non-array API response. */
+/** Universal VSIX names are valid for exactly the three bundled universal targets. */
+const UNIVERSAL_TARGETS = new Set(['darwin-arm64', 'win32-x64', 'linux-x64']);
+
+/** Newest published release with an exact VSIX for platform-arch; universal assets win over legacy target assets. Throws on a non-array API response. */
 export function findGitHubUpdate(data: unknown, platform: string, arch: string): GitHubUpdate | undefined {
   if (!Array.isArray(data)) throw new Error('GitHub リリース情報の形式が不正です。');
+  const target = `${platform}-${arch}`;
   let best: GitHubUpdate | undefined;
   for (const item of data as unknown[]) {
     if (typeof item !== 'object' || item === null || Array.isArray(item)) continue;
@@ -26,17 +30,22 @@ export function findGitHubUpdate(data: unknown, platform: string, arch: string):
     if (release.draft !== false) continue;
     const version = tagVersion(release.tag_name);
     if (!version || !Array.isArray(release.assets)) continue;
-    const name = `agentdesklink-${platform}-${arch}-${version}.vsix`;
-    for (const asset of release.assets as unknown[]) {
-      if (typeof asset !== 'object' || asset === null || Array.isArray(asset)) continue;
-      const a = asset as Record<string, unknown>;
-      if (a.name !== name || a.state !== 'uploaded' || typeof a.digest !== 'string') continue;
-      const match = /^sha256:([0-9a-f]{64})$/i.exec(a.digest);
-      if (!match) continue;
-      const url = canonicalUrl(String(release.tag_name), name);
-      if (a.browser_download_url !== url) continue;
-      if (!best || gt(version, best.version)) best = { version, url, sha256: match[1]!.toLowerCase() };
-      break;
+    // Common universal name first so it is preferred over the legacy target-specific name on the same release.
+    const candidates: string[] = [];
+    if (UNIVERSAL_TARGETS.has(target)) candidates.push(`agentdesklink-${version}.vsix`);
+    candidates.push(`agentdesklink-${target}-${version}.vsix`);
+    for (const name of candidates) {
+      for (const asset of release.assets as unknown[]) {
+        if (typeof asset !== 'object' || asset === null || Array.isArray(asset)) continue;
+        const a = asset as Record<string, unknown>;
+        if (a.name !== name || a.state !== 'uploaded' || typeof a.digest !== 'string') continue;
+        const match = /^sha256:([0-9a-f]{64})$/i.exec(a.digest);
+        if (!match) continue;
+        const url = canonicalUrl(String(release.tag_name), name);
+        if (a.browser_download_url !== url) continue;
+        if (!best || gt(version, best.version)) best = { version, url, sha256: match[1]!.toLowerCase() };
+        break;
+      }
     }
   }
   return best;

@@ -62,6 +62,7 @@ struct Impl {
   bool visual_enabled = false;
   bool lifecycle_enabled = false;
   bool allow_all = false;  // trusted --allow-all: any current-user desktop window
+  bool restrict_targets = false;
   std::unique_ptr<HumanFocusProbe> human_probe;
   HANDLE owned_process=nullptr;
   DWORD owned_pid=0;
@@ -537,7 +538,7 @@ Status RefreshRetained(Impl* im, HWND hwnd, RetainedTarget** out) {
   unsigned long long start = 0;
   const std::wstring exe = ExePathFromHandle(h);
   if (!ProcessStartHandle(h, start) || exe.empty() ||
-      (!im->allow_all && exe != im->want_path)) {
+      ((!im->allow_all || im->restrict_targets) && exe != im->want_path)) {
     CloseHandle(h);
     return Status::Fail("E_TARGET_NOT_FOUND", "target process identity could not be verified");
   }
@@ -609,7 +610,7 @@ Status EnumerateTargets(void* ctx, std::vector<TargetObservation>& out, std::str
   if (!init.ok()) return init;
   EnumContext ec;
   ec.want_path = &im->want_path;
-  ec.allow_all = im->allow_all;
+  ec.allow_all = im->allow_all&&!im->restrict_targets;
   out_app_id=im->app_id;
   if(im->lifecycle_enabled){
     if(!im->owned_process||WaitForSingleObject(im->owned_process,0)!=WAIT_TIMEOUT){PruneRetained(im,{});return Status::Ok();}
@@ -784,7 +785,7 @@ Status CaptureMasks(void* ctx, Session& s, std::vector<RECT>& masks, std::map<st
   // Walk() intentionally skips foreign/unknown process branches for semantic
   // observation. Pixel redaction cannot treat such a branch as absent.
   Impl* im=static_cast<Impl*>(ctx);
-  if(im->allow_all)return Status::Ok();  // trusted mode discloses without restrictive masks
+  // Mutation permissions never disable automatic image privacy masks.
   ComPtr<IUIAutomationTreeWalker> walker;
   if(FAILED(im->uia->get_RawViewWalker(&walker))||!walker)
     return Status::Fail("E_POLICY_DENIED","cannot establish capture tree membership");
@@ -1002,6 +1003,7 @@ void* CreateBackendImpl(const LaunchConfig& cfg) {
   im->app_id = cfg.app_id;
   im->lifecycle_enabled=cfg.lifecycle_enabled;
   im->allow_all=cfg.allow_all;
+  im->restrict_targets=cfg.restrict_targets;
   im->visual_enabled = cfg.visual_enabled&&!cfg.lifecycle_enabled;
   if(cfg.input_cancelled)im->input_cancelled=cfg.input_cancelled;
   if(!ParseInteractiveConfig(cfg.interactive_config,im->input_surfaces,im->interactive_enabled)||
