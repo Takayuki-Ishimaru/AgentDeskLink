@@ -19,6 +19,8 @@ Even on the same operating system, the available operations can differ by applic
 
 This release uses the same VSIX on macOS / Apple silicon, Windows x64 and Linux x64. Desktop control is unavailable on Linux. Linux distributions other than Ubuntu 24.04 have not been verified.
 
+Ubuntu's user-namespace restrictions may require additional sandbox setup for automatically downloaded Chromium. See [Linux preparation](INSTALL_en.md#per-operating-system-preparation).
+
 ## Applications and input
 
 - Application status, launch and normal quit are available on macOS and Windows with explicit permission in a CLI policy. The default VS Code extension profile does not enable this launch/quit feature. On Windows, applications launch on a dedicated Win32 desktop; existing human-started applications are not moved to that desktop.

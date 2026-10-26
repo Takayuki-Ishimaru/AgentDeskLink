@@ -114,7 +114,20 @@ jobs:
           path: artifacts
       # Every host verifies the identical universal archive with an empty PATH.
       - run: npm run verify:vsix
+      - if: runner.os == 'Linux'
+        name: Check system Chromium sandbox helper
+        run: |
+          python3 - <<'PY'
+          import os, stat
+          helper = '/opt/google/chrome/chrome-sandbox'
+          info = os.stat(helper)
+          assert info.st_uid == 0 and info.st_mode & stat.S_ISUID, helper
+          PY
       - run: npm run verify:vsix -- --download-browser
+        env:
+          # Chromium documents this system SUID helper for distros restricting user namespaces.
+          CHROME_DEVEL_SANDBOX: ${{ runner.os == 'Linux' && '/opt/google/chrome/chrome-sandbox' || '' }}
+          DEBUG: pw:browser
   windows-native-build:
     runs-on: windows-2022
     timeout-minutes: 15
