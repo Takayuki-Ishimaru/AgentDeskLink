@@ -2,6 +2,9 @@ name: Beta validation
 on: [push, pull_request, workflow_dispatch]
 permissions:
   contents: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   browser:
     strategy:
@@ -25,7 +28,7 @@ jobs:
       - run: npm audit --audit-level=low
       - run: npm run benchmark
   linux-core:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
@@ -39,11 +42,18 @@ jobs:
       - run: npm run test:extension
       - run: npm run test:package
       # Chromium requires a runner that supports its OS sandbox.
-      - run: npm run package:vsix
-  vsix-distribution:
+      - run: npm run package:component
+  vsix-components:
     strategy:
+      fail-fast: false
       matrix:
-        os: [macos-latest, windows-2022]
+        include:
+          - os: macos-latest
+            target: darwin-arm64
+          - os: windows-2022
+            target: win32-x64
+          - os: ubuntu-24.04
+            target: linux-x64
     runs-on: ${{ matrix.os }}
     timeout-minutes: 25
     steps:
@@ -53,14 +63,58 @@ jobs:
           node-version: '24'
           cache: npm
       - run: npm ci
-      - run: npm run package:vsix
-      # Extract the actual VSIX, clear PATH and browser caches, then exercise MCP.
-      - run: npm run verify:vsix
-      - run: npm run verify:vsix -- --download-browser
+      - run: node -e "require('node:assert/strict').equal(process.platform+'-'+process.arch, '${{ matrix.target }}')"
+      - run: npm run package:component
       - uses: actions/upload-artifact@v4
         with:
-          name: agentdesklink-${{ runner.os }}-${{ runner.arch }}
+          name: runtime-component-${{ matrix.target }}
           path: artifacts/*.vsix
+          retention-days: 3
+  vsix-universal:
+    needs: vsix-components
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: runtime-component-*
+          path: artifacts/components
+          merge-multiple: true
+      - run: npm run package:vsix
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agentdesklink-universal
+          path: artifacts/agentdesklink-*.vsix
+  vsix-universal-verify:
+    needs: vsix-universal
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-2022, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      - if: runner.os == 'Linux'
+        run: npx playwright install-deps chromium
+      - uses: actions/download-artifact@v4
+        with:
+          name: agentdesklink-universal
+          path: artifacts
+      # Every host verifies the identical universal archive with an empty PATH.
+      - run: npm run verify:vsix
+      - run: npm run verify:vsix -- --download-browser
   windows-native-build:
     runs-on: windows-2022
     timeout-minutes: 15
@@ -72,11 +126,10 @@ jobs:
       - run: cmake -S native/windows-uia-cpp -B native/windows-uia-cpp/build -G "Visual Studio 17 2022" -A x64
       - run: cmake --build native/windows-uia-cpp/build --config Release
       - run: dotnet build native/windows-uia-cpp/tools/fixture/FixtureApp.csproj -c Release
-      # Runtime UIA acceptance runs in an interactive Windows desktop, not Session 0.
   native-protocol:
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-2022]
+        os: [ubuntu-24.04, macos-latest, windows-2022]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 10
     steps:

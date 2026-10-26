@@ -6,21 +6,35 @@ const vm = require('node:vm');
 
 function panel() {
   const elements = new Map(), messages = [], listeners = new Map();
+  const make = () => ({ value: '', _text: '', children: [], checked: false, disabled: false, dataset: {}, listeners: new Map(),
+    set textContent(value) { this._text=value; this.children=[]; }, get textContent() { return this._text+this.children.map(c=>c.textContent).join(''); },
+    appendChild(child) { this.children.push(child); },
+    setAttribute(key, value) { this[key]=value; },
+    addEventListener(type, listener) { this.listeners.set(type,listener); },
+    async trigger(type) { await this.listeners.get(type)?.({target:this,preventDefault(){}}); }
+  });
   const get = id => {
-    if (!elements.has(id)) elements.set(id, { value: '', textContent: '', checked: false, disabled: false, dataset: {}, listeners: new Map(),
-      setAttribute(key, value) { this[key] = value; },
-      addEventListener(type, listener) { this.listeners.set(type, listener); },
-      async trigger(type) { await this.listeners.get(type)?.({ target: this, preventDefault() {} }); }
-    });
+    if (!elements.has(id)) elements.set(id, make());
     return elements.get(id);
   };
-  const document = { getElementById: get, activeElement: null };
+  const document = { getElementById: get, createElement:make, activeElement: null };
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../../media/settings.js'), 'utf8'), {
     acquireVsCodeApi: () => ({ postMessage: data => messages.push(data), getState: () => ({}), setState() {} }),
     document, window: { addEventListener: (type, listener) => listeners.set(type, listener) }, console, setTimeout, clearTimeout
   });
   return { get, messages, document, state: data => listeners.get('message')({ data: { type: 'state', ...data } }) };
 }
+
+test('permission summary separates target, physical and image grants and displays values as text',()=>{
+  const p=panel();
+  p.state({permissions:{browserOrigins:[],desktopAppId:'',allowAllOperations:false,allowPhysicalInput:false,allowUnredactedImages:false,allowLoopback:false,allowPrivateNetwork:false}});
+  assert.equal(p.get('permissions').children.length,7);assert.match(p.get('permissions').textContent,/なし \/ none/);assert.match(p.get('permissions-hint').textContent,/grants nothing/);
+  const value='<img src=x onerror=alert(1)>';
+  p.state({permissions:{browserOrigins:[value],desktopAppId:'test.app',allowAllOperations:true,allowPhysicalInput:false,allowUnredactedImages:true,allowLoopback:false,allowPrivateNetwork:false}});
+  const rows=p.get('permissions').children;
+  assert.equal(rows[0].children[1].textContent,value);assert.equal(rows[0].children[1].innerHTML,undefined);
+  assert.match(rows[3].children[1].textContent,/off/);assert.match(rows[4].children[1].textContent,/on/);
+});
 
 test('webview synchronizes saved toggles and locks only workspace settings without trust', async () => {
   const p = panel();

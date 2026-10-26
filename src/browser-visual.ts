@@ -2,6 +2,8 @@ import {Buffer} from 'node:buffer';
 import {errors,type Locator,type Page} from 'playwright';
 import {AdlError} from './types.js';
 import type {CapturedImage, VisualPolicy} from './visual-types.js';
+import {TEXT_REDACTION_RULES} from './privacy.js';
+import {browserPrivacyMaskSelector,ensureBrowserPrivacySelectors} from './browser-privacy.js';
 
 const MAX_DIMENSION = 4096;
 const MAX_PIXELS = 4194304;
@@ -89,7 +91,10 @@ function maskSelectors(visual: VisualPolicy): string[] {
   for (const selector of trusted) {
     if (typeof selector !== 'string' || selector.trim().length === 0) throw new AdlError('E_PRIVACY_BLOCKED');
   }
-  return [...new Set([...BASE_MASK_SELECTORS, ...trusted])];
+  // Playwright text locators resolve against the rendered DOM at capture time,
+  // including non-form text. They mask the smallest matching element.
+  const textMasks=TEXT_REDACTION_RULES.map(([source])=>`:text-matches(${JSON.stringify(source)}, "i")`);
+  return [...new Set([...BASE_MASK_SELECTORS, ...trusted,browserPrivacyMaskSelector,...textMasks])];
 }
 
 export async function captureBrowserImage(
@@ -97,6 +102,7 @@ export async function captureBrowserImage(
 ): Promise<CapturedImage> {
   assertActive(signal);
   if (visual?.enabled !== true) throw new AdlError('E_PRIVACY_BLOCKED');
+  await guarded(()=>ensureBrowserPrivacySelectors(),signal);
   const selectors = maskSelectors(visual);
   assertOrigin(page, origin);
 
@@ -138,6 +144,7 @@ export async function captureBrowserImage(
     captured_at: new Date().toISOString(),
     coordinate_space: 'viewport_css_pixels',
     viewport: before,
-    redacted: true
+    redacted: true,
+    redaction:{scope:'detected_regions',methods:['controls','frames','sensitive_labels','text_patterns','configured_selectors'],complete:false}
   };
 }

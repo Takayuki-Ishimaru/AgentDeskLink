@@ -7,6 +7,9 @@ export type ActionName = 'click' | 'fill' | 'select' | 'check' | 'scroll' | 'nav
 export interface Element {
   id: string; role: string; name: string; value?: string; enabled: boolean;
   checked?: boolean; selected?: boolean; sensitive?: boolean;
+  /** Internal DOM depth, projected out of public responses. */
+  depth?: number;
+  options?: {label:string;value:string;disabled:boolean;selected:boolean}[];
 }
 export interface RawSnapshot { elements: Element[]; fingerprint: string; truncated: boolean; }
 export interface TargetWindow {
@@ -27,6 +30,7 @@ export interface BrowserTargetConfig {
 }
 export interface DesktopConfig {
   allowAllOperations?:boolean;
+  restrictTargets?:boolean;
   helperPath: string; appId: string; appPath: string; controlsPath?: string;
   classification: 'PUBLIC' | 'INTERNAL';
   visual?:DesktopVisualPolicy;
@@ -35,6 +39,7 @@ export interface DesktopConfig {
 }
 export interface PolicyConfig {
   allowAllOperations?:boolean;
+  restrictTargets?:boolean;
   allowedOrigins: string[];
   browserTargets: BrowserTargetConfig[];
   allowLoopback: boolean;

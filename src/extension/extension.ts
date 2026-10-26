@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { createHash } from 'node:crypto';
-import { readSettings, log } from './shared.js';
+import { readSettings, log, mcpPermissions, permissionsEnvJson } from './shared.js';
 import { SettingsPanelProvider, PanelHooks } from './panel.js';
 import { UpdateChecker } from './updates.js';
 import { resolveRuntime } from './runtime.js';
@@ -60,7 +60,7 @@ class McpProvider {
     const args = [this.serverPath];
     const cwd = wsFolders[0]!.uri;
     const command = runtime.nodePath;
-    const env = {...runtime.env,PLAYWRIGHT_BROWSERS_PATH:browser.browsersPath,ADL_BROWSER_EXECUTABLE:browser.executablePath,ADL_ALLOW_ALL_OPERATIONS:'1',ADL_OPERATION_CONTROL:this.controlPath,ADL_OPERATION_EPOCH:control.epoch};
+    const env = {...runtime.env,PLAYWRIGHT_BROWSERS_PATH:browser.browsersPath,ADL_BROWSER_EXECUTABLE:browser.executablePath,ADL_MCP_PERMISSIONS:permissionsEnvJson(settings),ADL_OPERATION_CONTROL:this.controlPath,ADL_OPERATION_EPOCH:control.epoch};
     const fingerprint = createHash('sha256').update(JSON.stringify([command, env, args, cwd.toString(), this.seq])).digest('hex').slice(0, 16);
     const version = `${this.extVersion}+${fingerprint}`;
     this.lastError = null;
@@ -113,6 +113,7 @@ export function activate(context: vscode.ExtensionContext): void {
       return 'VS Code に MCP を提供中です。起動は MCP 管理画面で確認できます。';
     },
     mcpError: () => provider.lastError,
+    permissions: () => mcpPermissions(readSettings()),
     updateStatus: () => updater.status(),
     version: () => extVersion,
     refreshMcp: async () => { await provider.provideMcpServerDefinitions(); },
@@ -130,7 +131,8 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(vscode.workspace.onDidChangeConfiguration((e) => {
     if (!e.affectsConfiguration('agentdesklink')) return;
     if (['autoUpdate', 'checkForUpdates'].some(k => e.affectsConfiguration(`agentdesklink.${k}`))) updater.cancel();
-    if (['enabled'].some(k => e.affectsConfiguration(`agentdesklink.${k}`))) {
+    if (['enabled', 'browserOrigins', 'desktopAppId', 'desktopAppPath', 'allowAllOperations', 'allowPhysicalInput',
+      'allowUnredactedImages', 'allowLoopback', 'allowPrivateNetwork'].some(k => e.affectsConfiguration(`agentdesklink.${k}`))) {
       provider.refresh();
     }
     void panel?.refresh();

@@ -1039,6 +1039,9 @@ const TestCase kTests[] = {
 }  // namespace
 
 int main() {
+  g_test="sensitive_label_boundaries_and_japanese";
+  for(const auto* label:{"Shipping address","Author","spinbutton","monkey","Quantity"})CHECK(!IsSensitiveText(label));
+  for(const auto* label:{"PIN","auth","api_key","access-token","accessToken","newPassword","ApiKeyInput","apiKey1","password1","accessToken2","dummy@example.com",u8"暗証番号",u8"パスワード",u8"認証コード",u8"ＡＰＩキー",u8"apiキー"})CHECK(IsSensitiveText(label));
   for (const TestCase& t : kTests) {
     int before = g_failures;
     try { t.fn(); } catch(const std::exception& e) { Fail(__LINE__,"uncaught test exception",e.what()); }

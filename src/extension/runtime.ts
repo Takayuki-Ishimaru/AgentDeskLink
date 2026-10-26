@@ -12,6 +12,12 @@ export interface RuntimeManifest {
   helper: string | null;
 }
 
+// Universal bundle index shipped at <extensionRoot>/runtime/manifest.json with EXACTLY these two keys.
+export interface UniversalManifest {
+  schemaVersion: 3;
+  targets: string[];
+}
+
 export interface ResolvedRuntime {
   runtimeDir: string;
   nodePath: string;
@@ -30,6 +36,8 @@ export class RuntimeError extends Error {}
 
 const SUPPORTED_PLATFORMS = ['darwin', 'win32', 'linux'];
 const SUPPORTED_ARCHS = ['x64', 'arm64'];
+// Universal (schema 3) bundles carry exactly these three children.
+export const UNIVERSAL_TARGETS = ['darwin-arm64', 'win32-x64', 'linux-x64'];
 const HELPERS: Record<string, string> = {
   darwin: 'helper/adl-macos-ax-helper',
   win32: 'helper/adl-windows-uia-helper.exe',
@@ -116,29 +124,47 @@ function parseManifest(text: string): RuntimeManifest {
   return m as unknown as RuntimeManifest;
 }
 
-async function validate(options: ResolveOptions): Promise<ResolvedRuntime> {
-  const platform = options.platform ?? process.platform;
-  const arch = options.arch ?? process.arch;
-  if (!SUPPORTED_PLATFORMS.includes(platform) || !SUPPORTED_ARCHS.includes(arch)) {
-    fail(`このプラットフォームには対応していません / unsupported host platform/arch: ${platform}-${arch}`);
+function parseIndex(text: string): UniversalManifest {
+  let raw: unknown;
+  try { raw = JSON.parse(text); } catch { fail('index の manifest.json が読み取れません / universal manifest.json is not valid JSON'); }
+  const m = raw as Record<string, unknown>;
+  if (!m || typeof m !== 'object' || Array.isArray(m)) fail('index の manifest.json がオブジェクトではありません / universal manifest is not an object');
+  const keys = Object.keys(m).sort();
+  if (keys.length !== 2 || keys[0] !== 'schemaVersion' || keys[1] !== 'targets') {
+    fail('index の manifest.json のキーが不正です / universal manifest must have exactly schemaVersion and targets');
   }
-  const runtimeDir = path.join(options.extensionRoot, 'runtime');
+  if (m.schemaVersion !== 3) fail('index の schemaVersion が未対応です / unsupported universal manifest schemaVersion (expected 3)');
+  const targets = m.targets;
+  if (!Array.isArray(targets) || targets.length === 0) fail('index の targets が不正です / universal manifest targets must be a non-empty array');
+  const seen = new Set<string>();
+  for (const target of targets as unknown[]) {
+    if (typeof target !== 'string' || target.length === 0) fail('index の targets に不正な値 / target names must be non-empty strings');
+    if (seen.has(target)) fail(`index の targets に重複 / duplicate target in universal manifest: ${target}`);
+    seen.add(target);
+    if (!UNIVERSAL_TARGETS.includes(target)) fail(`index の targets に未対応のターゲット / unknown target in universal manifest: ${target}`);
+  }
+  return { schemaVersion: 3, targets: targets as string[] };
+}
+
+async function readManifestFile(runtimeDir: string): Promise<string> {
   const manifestPath = path.join(runtimeDir, 'manifest.json');
-  let text: string;
   try {
     const st = await fs.promises.stat(manifestPath);
     if (!st.isFile()) fail('manifest.json がファイルではありません / manifest.json is not a file');
     await assertInsideRuntime(runtimeDir, manifestPath, 'manifest.json'); // manifest symlink must stay inside
-    text = await fs.promises.readFile(manifestPath, 'utf8');
+    return await fs.promises.readFile(manifestPath, 'utf8');
   } catch (err) {
     if (err instanceof RuntimeError) throw err;
     fail(`manifest.json が読み取れません / cannot read ${manifestPath}`);
   }
-  const manifest = parseManifest(text);
-  const expectedTarget = `${platform}-${arch}`;
-  if (manifest.target !== expectedTarget) {
-    fail(`対象プラットフォーム不一致 / target mismatch: manifest は ${manifest.target}、このマシンは ${expectedTarget}`);
-  }
+}
+
+async function loadManifest(runtimeDir: string): Promise<RuntimeManifest> {
+  return parseManifest(await readManifestFile(runtimeDir));
+}
+
+// Applies the schema 2 contract (node/helper names, files, execute bits, realpath anchors) to one runtime directory.
+async function validateChild(runtimeDir: string, manifest: RuntimeManifest, platform: NodeJS.Platform): Promise<ResolvedRuntime> {
   const isWin = platform === 'win32';
   const expectedNode = isWin ? 'node.exe' : 'node';
   if (manifest.node !== expectedNode) fail(`node フィールドが不一致 / node must be "${expectedNode}" on ${platform}: ${manifest.node}`);
@@ -157,6 +183,55 @@ async function validate(options: ResolveOptions): Promise<ResolvedRuntime> {
   };
   if (helperPath !== null) env.ADL_BUNDLED_HELPER_PATH = helperPath;
   return { runtimeDir, nodePath, helperPath, env, manifest };
+}
+
+// Universal index: the host child directory must be a real directory inside the root runtime
+// (its own realpath anchor cannot see a child directory that is itself a symlink out).
+async function validateUniversal(index: UniversalManifest, runtimeDir: string, platform: NodeJS.Platform, arch: string): Promise<ResolvedRuntime> {
+  const expectedTarget = `${platform}-${arch}`;
+  if (!index.targets.includes(expectedTarget)) {
+    fail(`このホストは同梱されていません / host ${expectedTarget} is not bundled in this universal runtime (targets: ${index.targets.join(', ')})`);
+  }
+  const childDir = path.join(runtimeDir, expectedTarget);
+  let escaped = false;
+  try {
+    if (!(await fs.promises.lstat(childDir)).isDirectory()) escaped = await fs.promises.realpath(childDir) !== await fs.promises.realpath(runtimeDir) && !(await fs.promises.realpath(childDir)).startsWith(await fs.promises.realpath(runtimeDir) + path.sep);
+  } catch { /* missing or dangling link: reported below */ }
+  if (escaped) fail(`ターゲットディレクトリがランタイム外を指します / ${expectedTarget} escapes the runtime directory`);
+  try {
+    if (!(await fs.promises.lstat(childDir)).isDirectory()) fail(`ターゲットディレクトリが不正です / ${expectedTarget} is not a directory`);
+  } catch (err) {
+    if (err instanceof RuntimeError) throw err;
+    fail(`ターゲットディレクトリが見つかりません / missing runtime/${expectedTarget}`);
+  }
+  await assertInsideRuntime(runtimeDir, childDir, `runtime/${expectedTarget}`);
+  const manifest = await loadManifest(childDir);
+  if (manifest.target !== expectedTarget) {
+    fail(`対象プラットフォーム不一致 / target mismatch: child manifest は ${manifest.target}、ディレクトリは ${expectedTarget}`);
+  }
+  return validateChild(childDir, manifest, platform);
+}
+
+async function validate(options: ResolveOptions): Promise<ResolvedRuntime> {
+  const platform = options.platform ?? process.platform;
+  const arch = options.arch ?? process.arch;
+  if (!SUPPORTED_PLATFORMS.includes(platform) || !SUPPORTED_ARCHS.includes(arch)) {
+    fail(`このプラットフォームには対応していません / unsupported host platform/arch: ${platform}-${arch}`);
+  }
+  const runtimeDir = path.join(options.extensionRoot, 'runtime');
+  const text = await readManifestFile(runtimeDir);
+  let schemaVersion: unknown;
+  try {
+    const raw = JSON.parse(text) as Record<string, unknown> | null;
+    schemaVersion = raw && typeof raw === 'object' ? raw.schemaVersion : undefined;
+  } catch { schemaVersion = undefined; }
+  if (schemaVersion === 3) return validateUniversal(parseIndex(text), runtimeDir, platform, arch);
+  const manifest = parseManifest(text);
+  const expectedTarget = `${platform}-${arch}`;
+  if (manifest.target !== expectedTarget) {
+    fail(`対象プラットフォーム不一致 / target mismatch: manifest は ${manifest.target}、このマシンは ${expectedTarget}`);
+  }
+  return validateChild(runtimeDir, manifest, platform);
 }
 
 // Coalesces concurrent resolutions per bundle; failures are removed so the next call retries.

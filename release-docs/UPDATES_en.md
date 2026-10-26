@@ -2,58 +2,65 @@
 
 [日本語](UPDATES.md) | **English**
 
-Target version: `0.1.2`
+Target version: `0.1.3`
 
-## Upgrading from 0.1.1 or earlier
+## Updating from 0.1.2 or earlier
 
-If you use 0.1.1 or earlier, download the `0.1.2` VSIX for your operating system and CPU together with `SHA256SUMS` from the official release page, verify the hash, and install the VSIX manually. Reload the VS Code window after installation. Version 0.1.2 and later do not require an update URL. The former `agentdesklink.updateManifestUrl` setting is no longer used.
+Version 0.1.3 changes the distribution to the common `agentdesklink-0.1.3.vsix` file. The updater in 0.1.2 and earlier does not recognize this filename. Download the common VSIX and `SHA256SUMS` from the official release page, verify the hash and install the VSIX manually. Reload the VS Code window after installation.
+
+After updating, follow the [installation guide](INSTALL_en.md) to configure allowed origins/apps and operation permissions. Enabling MCP alone grants no additional permissions.
 
 ## Update source (no configuration needed)
 
-The update source is fixed to the official GitHub repository [Takayuki-Ishimaru/AgentDeskLink](https://github.com/Takayuki-Ishimaru/AgentDeskLink/releases). You do not set any URL. The extension reads the GitHub Releases API (`https://api.github.com/repos/Takayuki-Ishimaru/AgentDeskLink/releases?per_page=100`) and looks for updates among the 100 most recent releases.
+Updates use the official GitHub repository [Takayuki-Ishimaru/AgentDeskLink](https://github.com/Takayuki-Ishimaru/AgentDeskLink/releases). No URL setting is required. The extension reads the GitHub Releases API (`https://api.github.com/repos/Takayuki-Ishimaru/AgentDeskLink/releases?per_page=100`) and checks the most recent 100 releases.
 
-- Only published releases whose SemVer tag is newer than the installed version are considered, including GitHub prereleases (beta versions). Drafts and tags that cannot be read as a version are ignored.
-- The asset matching your operating system and CPU, `agentdesklink-<os>-<cpu>-<version>.vsix`, is selected automatically. Releases without a matching asset are ignored, and a package built for another platform is never installed.
-- The SHA-256 of the downloaded VSIX is always compared with the digest GitHub reports for the asset. Nothing is installed when the values differ.
+- Only published releases with a newer SemVer tag are considered, including GitHub prereleases (betas). Drafts and tags that are not valid version numbers are ignored.
+- On macOS / Apple silicon, Windows x64 and Linux x64, the updater prefers the common `agentdesklink-<version>.vsix`. The matching bundled runtime is selected automatically at startup.
+- Legacy platform-specific VSIX files remain eligible only when they exactly match your operating system and CPU. Hosts unsupported by the common VSIX do not install that common file.
+- The downloaded VSIX must match the SHA-256 digest attached to the GitHub asset. A mismatch prevents installation.
 
-| Operating system and CPU | Example asset name |
-| --- | --- |
-| macOS, Apple silicon | `agentdesklink-darwin-arm64-0.1.2.vsix` |
-| Windows x64 | `agentdesklink-win32-x64-0.1.2.vsix` |
+The former `agentdesklink.updateManifestUrl` setting is no longer used.
 
-## Update checks and stopping them
+## Checking and stopping updates
 
-- `agentdesklink.checkForUpdates`: when on, updates are checked 5 seconds after start and then every 6 hours. Turning it off stops both automatic and manual checks.
-- `agentdesklink.autoUpdate`: when off, a newer version is only announced and never installed.
-- Automatic updates verify the SHA-256 of the downloaded VSIX before installing it.
-- Reloading the window is required for changes to take effect. A window in use is never reloaded automatically.
-- Versions equal to or older than the installed one are never applied automatically. When no release matches your operating system and CPU, the extension reports that and neither downloads nor installs anything.
+- `agentdesklink.checkForUpdates`: when on, checks 5 seconds after startup and every 6 hours. Turning it off stops both automatic and manual checks.
+- `agentdesklink.autoUpdate`: when off, only notifies you of newer versions without installing them.
+- Automatic updates verify the downloaded VSIX SHA-256 before installation.
+- Reloading the window is required to apply an update. Your working window is never reloaded automatically.
+- The current or an older version is never installed automatically. If no compatible asset is available, the extension reports this and neither downloads nor installs a file.
 
-Automatic download from a distribution point that requires authentication is not supported. When automatic updates are unavailable, download the matching VSIX from the release page and install it manually.
+Authenticated distribution sources are unsupported. If automatic updates are unavailable, download the common VSIX from the release page and install it manually.
 
 ## Release format
 
-Each release carries one VSIX per target, named as follows. The extension identifies the asset by this name, the `sha256:` digest GitHub returns for it, and the canonical URL `https://github.com/Takayuki-Ishimaru/AgentDeskLink/releases/download/<tag>/<asset name>`. No custom manifest file (such as `update.json`) is read.
+This release attaches one VSIX:
 
 ```text
-agentdesklink-darwin-arm64-0.1.2.vsix
-agentdesklink-win32-x64-0.1.2.vsix
+agentdesklink-0.1.3.vsix
 ```
 
-## Verifying a downloaded VSIX
+The updater identifies it by this name, GitHub's `sha256:` digest and its canonical `https://github.com/Takayuki-Ishimaru/AgentDeskLink/releases/download/<tag>/<filename>` URL. It does not read a custom update-information file such as `update.json`.
 
-Compare the `SHA256SUMS` attached to the release with the SHA-256 of the file you downloaded. The following is an example to run in the folder where you saved the file.
+## Verify a downloaded VSIX
+
+Compare the SHA-256 of your downloaded file with the release's `SHA256SUMS`. Run the following in the download folder.
 
 macOS:
 
 ```sh
-shasum -a 256 agentdesklink-darwin-arm64-0.1.2.vsix
+shasum -a 256 agentdesklink-0.1.3.vsix
 ```
 
 Windows PowerShell:
 
 ```powershell
-Get-FileHash -Algorithm SHA256 .\agentdesklink-win32-x64-0.1.2.vsix | Format-List Hash
+Get-FileHash -Algorithm SHA256 .\agentdesklink-0.1.3.vsix | Format-List Hash
 ```
 
-If the values do not match, do not install the file and obtain it again from the release page of the official repository.
+Linux:
+
+```sh
+sha256sum agentdesklink-0.1.3.vsix
+```
+
+If the hashes differ, do not install the file. Download it again from the official repository's release page.
