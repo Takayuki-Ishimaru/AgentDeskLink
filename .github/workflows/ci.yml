@@ -115,8 +115,10 @@ jobs:
       # Every host verifies the identical universal archive with an empty PATH.
       - run: npm run verify:vsix
       - if: runner.os == 'Linux'
-        name: Check system Chromium sandbox helper
+        name: Prepare system Chromium sandbox helper
         run: |
+          sudo chown root:root /opt/google/chrome/chrome-sandbox
+          sudo chmod 4755 /opt/google/chrome/chrome-sandbox
           python3 - <<'PY'
           import os, stat
           helper = '/opt/google/chrome/chrome-sandbox'
