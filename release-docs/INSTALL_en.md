@@ -52,6 +52,8 @@ When launching the CLI from another MCP host, supply a policy JSON with `--confi
 - **Windows**: run the target application and server in the same interactive session.
 - **Linux x64 (Ubuntu 24.04)**: browser operations are supported. Install the operating system shared libraries needed by Chrome or Chromium and run as a regular user with a working OS sandbox. If libraries are missing, install the browser runtime dependencies through your operating system package manager.
 
+Ubuntu 24.04 restricts user namespaces, so automatically downloaded Chromium may need an administrator to configure its sandbox. Use an OS-installed Chrome or ask your administrator to review Chromium's [sandbox setup](https://chromium.googlesource.com/chromium/src/+/main/docs/security/apparmor-userns-restrictions.md). AgentDeskLink does not change operating system settings automatically or launch Chromium with its sandbox disabled.
+
 Virtual workspaces are not supported. MCP cannot be enabled in an untrusted workspace.
 
 ## If something does not work

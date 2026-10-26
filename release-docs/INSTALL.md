@@ -52,6 +52,8 @@ CLI を別の MCP ホストから起動する場合は、`--config` でポリシ
 - **Windows**: 対象アプリとサーバーを同じ対話セッションで実行します。
 - **Linux x64（Ubuntu 24.04）**: ブラウザ操作に対応します。Chrome または Chromium の実行に必要な共有ライブラリを OS 側で用意し、OS sandbox が動作する一般ユーザーの環境で実行してください。共有ライブラリが不足する場合は、OS のパッケージ管理機能でブラウザの実行環境を導入してください。
 
+Ubuntu 24.04 では、OS がユーザー名前空間を制限するため、自動取得した Chromium の起動に管理者による sandbox の設定が必要になる場合があります。OS に導入した Chrome を使うか、管理者に Chromium の [sandbox 設定](https://chromium.googlesource.com/chromium/src/+/main/docs/security/apparmor-userns-restrictions.md)を確認してもらってください。AgentDeskLink は OS の設定を自動変更せず、Chromium の sandbox を無効にして起動することもありません。
+
 仮想ワークスペースは非対応です。通常のフォルダーでも、信頼されていない間は MCP を有効にできません。
 
 ## 動作しない場合

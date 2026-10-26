@@ -47,8 +47,18 @@ function openZip(file) {
   }, (err, zip) => err ? reject(err) : resolve(zip)));
 }
 
-function withEntryStream(zip, entry) {
-  return new Promise((resolve, reject) => zip.openReadStream(entry, (err, stream) => err ? reject(err) : resolve(stream)));
+async function withEntryStream(zip, entry) {
+  const source = await new Promise((resolve, reject) => zip.openReadStream(entry, (err, stream) => err ? reject(err) : resolve(stream)));
+  // yauzl 2 uses legacy fd-slicer streams whose destroy() does not emit close.
+  // Keep modern pipeline/AbortSignal teardown on a native stream boundary.
+  const stream = new PassThrough();
+  source.on('error', error => stream.destroy(error));
+  stream.once('close', () => {
+    source.unpipe(stream);
+    if (!source.destroyed && !source.readableEnded) source.destroy();
+  });
+  source.pipe(stream);
+  return stream;
 }
 
 async function readEntryBuffer(zip, entry, limit, label, signal) {
@@ -234,9 +244,12 @@ export async function assembleUniversalVsix({ components, output, version, signa
     const staged = path.join(stagingDir, path.basename(output));
     zipOut = new ZipFile();
     zipOut.on('error', error => zipOut.outputStream.destroy(error));
+    zipOut.outputStream.on('error', () => {});
+    const outputFailure = new AbortController();
+    const copySignal = signal ? AbortSignal.any([signal, outputFailure.signal]) : outputFailure.signal;
     writing = pipeline(zipOut.outputStream, createWriteStream(staged, { flags: 'wx' }), { signal });
     // Observe early output errors while an input stream is still being fed.
-    writing.catch(() => {});
+    writing.catch(error => outputFailure.abort(error));
     const fixedDate = new Date('2000-01-01T00:00:00Z');
     const addBuffer = (bytes, name) => zipOut.addBuffer(bytes, name, { mode: 0o100644, mtime: fixedDate });
     addBuffer(mergeContentTypes(ordered), CONTENT_TYPES);
@@ -250,7 +263,7 @@ export async function assembleUniversalVsix({ components, output, version, signa
       const source = await withEntryStream(scan.zip, entry.zipEntry);
       const digest = crypto.createHash('sha256');
       const hashing = new Transform({ transform(chunk, _encoding, next) { digest.update(chunk); next(null, chunk); } });
-      await pipeline(source, hashing, bridge, { signal });
+      await pipeline(source, hashing, bridge, { signal: copySignal });
       if (digest.digest('hex') !== scan.digests.get(entry.name)) fail(`component changed during assembly: ${entry.name}`);
     }
     zipOut.end();
@@ -263,7 +276,7 @@ export async function assembleUniversalVsix({ components, output, version, signa
     zipOut?.outputStream.destroy();
     if (writing) await writing.catch(() => {});
     for (const scan of scans) scan.zip.close();
-    if (stagingDir) await fsp.rm(stagingDir, { recursive: true, force: true });
-    await release();
+    try { if (stagingDir) await fsp.rm(stagingDir, { recursive: true, force: true }); }
+    finally { await release(); }
   }
 }
