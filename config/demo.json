@@ -13,5 +13,5 @@
       {"selector": "#color", "actions": ["select"]}
     ]
   }],
-  "auditPath": "artifacts/demo-audit.jsonl"
+  "auditPath": "../artifacts/demo-audit.jsonl"
 }

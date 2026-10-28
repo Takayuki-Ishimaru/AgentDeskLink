@@ -8,6 +8,7 @@ import {AdlError,type Action} from '../src/types.js';
 function fixture(action:'click'|'fill'='click'){
  const state={occluded:false,occludedStack:false,replaced:false,focusRedirect:false,disabled:false,connected:true,count:1,origin:'https://example.com',name:'Reference',events:[] as string[],onHover:()=>{},onFocus:()=>{},onEvaluate:()=>{}};
  class FakeElement {
+  getRootNode(){return document}
   tagName=action==='fill'?'INPUT':'BUTTON';id='target';isContentEditable=false;readOnly=false;type='text';parentElement=null;
   get isConnected(){return state.connected}get disabled(){return state.disabled}get innerText(){return state.name}get textContent(){return state.name}
   getBoundingClientRect(){return {x:10,y:20,left:10,top:20,right:210,bottom:60,width:200,height:40}}
@@ -29,7 +30,7 @@ test('browser preflight verifies actual hovered target and intended role/name be
  const f=fixture();const p=await preflightBrowserInput(f.page,f.handle,f.request,'#target',f.signal,()=>{});assert.equal(p.pointer_on_target,true);assert.equal(p.target.name,'Reference');assert.equal(p.target.role,'button');assert.ok(f.state.events.includes('hover'));assert.ok(!f.state.events.includes('focus'));
 });
 test('browser preflight rejects an overlay even when the intended element remains lower in the hit stack',async()=>{
- const f=fixture();f.state.occludedStack=true;await assert.rejects(preflightBrowserInput(f.page,f.handle,f.request,'#target',f.signal,()=>{}));assert.equal(f.state.events.length,0);
+ const f=fixture();f.state.occludedStack=true;await assert.rejects(preflightBrowserInput(f.page,f.handle,f.request,'#target',f.signal,()=>{}),{code:'E_STALE_STATE',reason:'occluded'});assert.equal(f.state.events.length,0);
 });
 test('browser preflight stops before hover when cancellation arrives during the target probe',async()=>{
  const f=fixture(),abort=new AbortController();f.state.onEvaluate=()=>abort.abort();await assert.rejects(preflightBrowserInput(f.page,f.handle,f.request,'#target',abort.signal,()=>{}),{code:'E_CANCELLED'});assert.equal(f.state.events.length,0);

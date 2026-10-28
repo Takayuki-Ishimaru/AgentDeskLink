@@ -10,9 +10,11 @@ jobs:
     strategy:
       matrix:
         # The native helper currently builds with Visual Studio 2022.
-        os: [macos-latest, windows-2022]
+        os: [macos-latest, windows-2022, ubuntu-24.04]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
+    env:
+      CHROME_DEVEL_SANDBOX: ${{ matrix.os == 'ubuntu-24.04' && '/opt/google/chrome/chrome-sandbox' || '' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -20,7 +22,17 @@ jobs:
           node-version: '24'
           cache: npm
       - run: npm ci
-      - run: npx playwright install chromium
+      - run: npx playwright install --with-deps chromium
+      - if: runner.os == 'Linux'
+        name: Prepare system Chromium sandbox helper
+        run: |
+          sudo chown root:root /opt/google/chrome/chrome-sandbox
+          sudo chmod 4755 /opt/google/chrome/chrome-sandbox
+          python3 - <<'PY'
+          import os, stat
+          info = os.stat('/opt/google/chrome/chrome-sandbox')
+          assert info.st_uid == 0 and info.st_mode & stat.S_ISUID
+          PY
       - run: npm run check
       - run: npm test
       - run: npm run test:extension
@@ -43,6 +55,7 @@ jobs:
       - run: npm run test:package
       # Chromium requires a runner that supports its OS sandbox.
       - run: npm run package:component
+      - run: npm run verify:vsix
   vsix-components:
     strategy:
       fail-fast: false
@@ -65,6 +78,7 @@ jobs:
       - run: npm ci
       - run: node -e "require('node:assert/strict').equal(process.platform+'-'+process.arch, '${{ matrix.target }}')"
       - run: npm run package:component
+      - run: npm run verify:vsix
       - uses: actions/upload-artifact@v4
         with:
           name: runtime-component-${{ matrix.target }}
@@ -86,7 +100,7 @@ jobs:
           pattern: runtime-component-*
           path: artifacts/components
           merge-multiple: true
-      - run: npm run package:vsix
+      - run: npm run package:vsix -- --universal
       - uses: actions/upload-artifact@v4
         with:
           name: agentdesklink-universal
@@ -113,7 +127,7 @@ jobs:
           name: agentdesklink-universal
           path: artifacts
       # Every host verifies the identical universal archive with an empty PATH.
-      - run: npm run verify:vsix
+      - run: npm run verify:vsix -- --universal
       - if: runner.os == 'Linux'
         name: Prepare system Chromium sandbox helper
         run: |
@@ -125,7 +139,7 @@ jobs:
           info = os.stat(helper)
           assert info.st_uid == 0 and info.st_mode & stat.S_ISUID, helper
           PY
-      - run: npm run verify:vsix -- --download-browser
+      - run: npm run verify:vsix -- --universal --download-browser
         env:
           # Chromium documents this system SUID helper for distros restricting user namespaces.
           CHROME_DEVEL_SANDBOX: ${{ runner.os == 'Linux' && '/opt/google/chrome/chrome-sandbox' || '' }}
@@ -141,6 +155,7 @@ jobs:
       - run: cmake -S native/windows-uia-cpp -B native/windows-uia-cpp/build -G "Visual Studio 17 2022" -A x64
       - run: cmake --build native/windows-uia-cpp/build --config Release
       - run: dotnet build native/windows-uia-cpp/tools/fixture/FixtureApp.csproj -c Release
+      # Runtime UIA acceptance runs in an interactive Windows desktop, not Session 0.
   native-protocol:
     strategy:
       matrix:

@@ -1,19 +1,29 @@
 import { randomUUID } from 'node:crypto';
 import { AdlError, type Element, type RawSnapshot } from './types.js';
-import { redactElement } from './policy.js';
+import { redactElement,redactString } from './policy.js';
 
 export type Representation = 'auto' | 'full' | 'delta';
+export type ObservationFormat = 'json' | 'compact' | 'lines';
 export interface ObserveOptions {
   token_budget: number;
+  /** Internal per-response element limit; storage retains later scoped elements. */
+  element_limit?:number;
   since_revision?: number;
   cursor?: string;
   scope?: string;
   depth?: number;
   include?: string[];
   representation?: Representation;
+  format?:ObservationFormat;
 }
 export interface SnapshotChange { op: 'added' | 'removed' | 'changed'; id: string; element?: Element }
 export interface ObserveResult {
+  format?:'compact'|'lines';
+  defaults?:{enabled:true;value:''};
+  lines?:string[];
+  url?:string;
+  title?:string;
+  warnings?:{code:string;count:number}[];
   ok: true;
   session_id: string;
   revision: number;
@@ -28,7 +38,7 @@ export interface ObserveResult {
 
 const MAX_SESSIONS = 32;
 const MAX_REVISIONS = 8;
-const MAX_ELEMENTS = 1_000;
+const MAX_ELEMENTS = 5_000;
 const MAX_CURSORS = 128;
 const CURSOR_TTL_MS = 60_000;
 const MIN_BUDGET = 256;
@@ -36,7 +46,7 @@ const MAX_BUDGET = 8_000;
 const NAME_CAP = 48;
 const VALUE_CAP = 96;
 
-const FIELDS = ['id', 'role', 'name', 'value', 'enabled', 'checked', 'selected', 'options'] as const;
+const FIELDS = ['id', 'role', 'name', 'value', 'enabled', 'checked', 'selected', 'expanded', 'options'] as const;
 type Field = (typeof FIELDS)[number];
 const INCLUDE_KEYS = new Map(FIELDS.map((f) => [f.toLowerCase(), f]));
 const SCOPE_KEYS = new Map([
@@ -44,7 +54,7 @@ const SCOPE_KEYS = new Map([
   ['element_id', 'id'], ['elementid', 'id'],
 ].map(([k, v]) => [k, v as 'role' | 'name' | 'id']));
 
-interface Stored { revision: number; elements: Element[]; truncated: boolean; redactions:number; }
+interface Stored { revision: number; elements: Element[]; truncated: boolean; redactions:number; metadata:Pick<ObserveResult,'url'|'title'|'warnings'>; }
 interface Cursor {
   sessionId: string; revision: number; budget: number; since: number | null;
   optionsKey: string; offset: number; expires: number;
@@ -105,6 +115,22 @@ function project(element: Element, include: Field[] | null): Element {
   return out as unknown as Element;
 }
 
+function compactElement(element:Element):Element{
+  const out={...element} as Partial<Element>;
+  if(out.enabled===true)delete out.enabled;
+  if(out.value==='')delete out.value;
+  return out as Element;
+}
+
+// All page-controlled strings are JSON-escaped; a newline cannot forge a row.
+function row(change:SnapshotChange,delta:boolean):string{
+  const prefix=delta?({added:'+',removed:'-',changed:'~'} as const)[change.op]+' ':'';
+  if(!change.element)return prefix+JSON.stringify(change.id);
+  const e=compactElement(change.element),parts=[JSON.stringify(e.id??change.id),JSON.stringify(e.role??''),JSON.stringify(e.name??'')];
+  for(const [key,value]of Object.entries(e))if(!['id','role','name'].includes(key))parts.push(key+'='+JSON.stringify(value));
+  return prefix+parts.join(' ');
+}
+
 function cap(element: Element, nameCap: number, valueCap: number): Element {
   const out: Element = { ...element };
   if (typeof out.name === 'string' && out.name.length > nameCap) out.name = `${out.name.slice(0, nameCap)}...`;
@@ -129,7 +155,7 @@ export class SnapshotStore {
       const raw=snapshot.elements[i]!;
       return count+(e.name!==raw.name?1:0)+(e.value!==raw.value?1:0)+(e.options??[]).reduce((n,option,index)=>n+(option.label!==raw.options?.[index]?.label?1:0)+(option.value!==raw.options?.[index]?.value?1:0),0);
     },0);
-    const stored: Stored = { revision, elements, truncated: snapshot.truncated === true || snapshot.elements.length>MAX_ELEMENTS,redactions };
+    const stored: Stored = { revision, elements, truncated: snapshot.truncated === true || snapshot.elements.length>MAX_ELEMENTS,redactions,metadata:{...(snapshot.url?{url:redactString(snapshot.url).slice(0,512)}:{}),...(snapshot.title?{title:redactString(snapshot.title).slice(0,512)}:{}),...(snapshot.warnings?{warnings:snapshot.warnings.slice(0,4)}:{})} };
     let history = this.sessions.get(sessionId);
     if (!history) {
       if (this.sessions.size >= MAX_SESSIONS) {
@@ -167,6 +193,8 @@ export class SnapshotStore {
     if (options.depth !== undefined && (!Number.isInteger(options.depth) || options.depth < 1 || options.depth > 12)) deny('E_INVALID_ARGUMENT');
     const representation = options.representation;
     if (representation !== undefined && representation !== 'auto' && representation !== 'full' && representation !== 'delta') deny('E_INVALID_ARGUMENT');
+    const format=options.format??'json';
+    if(!['json','compact','lines'].includes(format))deny('E_INVALID_ARGUMENT');
     const scope = options.scope;
     const depth = options.depth;
     const key = this.optionsKey(options, include, scope);
@@ -195,15 +223,15 @@ export class SnapshotStore {
       items = this.items(current, base, include, scope, depth);
       const deltaItems = items;
       const fullItems = this.items(current, null, include, scope, depth);
-      const deltaBytes = this.payloadBytes(sessionId, revision, deltaItems, false, current.redactions, 'delta', false);
-      const fullBytes = this.payloadBytes(sessionId, revision, fullItems, true, current.redactions, 'full', base !== null);
+      const deltaBytes = this.payloadBytes(sessionId, revision, deltaItems, false, current.redactions, 'delta', false,format);
+      const fullBytes = this.payloadBytes(sessionId, revision, fullItems, true, current.redactions, 'full', base !== null,format);
       mode = base === null ? 'full' : (fullBytes < deltaBytes ? 'full' : 'delta');
       reset = mode === 'full' && base !== null;
       items = mode === 'full' ? fullItems : deltaItems;
     }
     if (items === null) items = this.items(current, mode === 'full' ? null : base, include, scope, depth);
     const advertised = representation === undefined ? null : mode;
-    return this.pack(sessionId, revision, items, offset, budget, mode === 'delta', current.truncated, key, since ?? null, current.redactions, advertised, reset);
+    return this.pack(sessionId, revision, items, offset, budget, mode === 'delta', current.truncated, key, since ?? null, current.redactions, advertised, reset, options.element_limit,current.metadata,format);
   }
 
   close(sessionId: string): void { this.dropSession(sessionId); }
@@ -235,34 +263,49 @@ export class SnapshotStore {
     return changes.map((c) => (c.element ? { ...c, element: project(c.element, include) } : c)).sort((a, b) => (changeKey(a) < changeKey(b) ? -1 : 1));
   }
 
-  private payloadBytes(sessionId: string, revision: number, items: SnapshotChange[], full: boolean, redactions: number, mode: 'full' | 'delta', reset: boolean): number {
+  private payloadBytes(sessionId: string, revision: number, items: SnapshotChange[], full: boolean, redactions: number, mode: 'full' | 'delta', reset: boolean,format:ObservationFormat='json'): number {
     const envelope: Record<string, unknown> = { ok: true, session_id: sessionId, revision, representation: mode, redactions, truncated: false, next_cursor: null };
     if (reset) envelope.reset = true;
-    envelope[full ? 'elements' : 'changes'] = full ? items.map((c) => c.element as Element) : items;
+    if(format!=='json'){envelope.format=format;envelope.defaults={enabled:true,value:''};}
+    const transformed=format==='compact'?items.map(c=>({...c,...(c.element?{element:compactElement(c.element)}:{})})):items;
+    envelope[format==='lines'?'lines':full?'elements':'changes']=format==='lines'?items.map(c=>row(c,!full)):full?transformed.map(c=>c.element):transformed;
     return Buffer.byteLength(JSON.stringify(envelope) ?? '', 'utf8');
   }
 
-  private pack(sessionId: string, revision: number, items: SnapshotChange[], offset: number, budget: number, delta: boolean, sourceTruncated: boolean, key: string, since: number | null,redactions:number,mode:'full'|'delta'|null=null,reset=false): ObserveResult {
+  private pack(sessionId: string, revision: number, items: SnapshotChange[], offset: number, budget: number, delta: boolean, sourceTruncated: boolean, key: string, since: number | null,redactions:number,mode:'full'|'delta'|null=null,reset=false,elementLimit=MAX_ELEMENTS,metadata:Stored['metadata']={},format:ObservationFormat='json'): ObserveResult {
     const limit = budget * 4;
+    if(budget<512)metadata={...metadata,...(metadata.url?{url:metadata.url.slice(0,128)}:{}),...(metadata.title?{title:metadata.title.slice(0,64)}:{})};
     const head = (redactions: number, truncated: boolean, cursor: string | null): ObserveResult => ({
-      ok: true, session_id: sessionId, revision,
+      ...metadata,ok: true, session_id: sessionId, revision,
+      ...(format!=='json'?{format,defaults:{enabled:true,value:''}}:{}),
       ...(mode ? { representation: mode, ...(reset ? { reset: true } : {}) } : {}),
-      ...(delta ? { changes: [] as SnapshotChange[] } : { elements: [] as Element[] }),
+      ...(format==='lines'?{lines:[]}:delta ? { changes: [] as SnapshotChange[] } : { elements: [] as Element[] }),
       redactions, truncated, next_cursor: cursor,
     } as unknown as ObserveResult);
     const size = (list: SnapshotChange[], redactions: number, cursor: string | null): number => {
       const base = head(redactions, false, cursor);
-      const payload = delta ? (list as unknown[]) : list.map((c) => c.element as Element);
-      return Buffer.byteLength(JSON.stringify({ ...base, [delta ? 'changes' : 'elements']: payload }) ?? '', 'utf8');
+      const transformed=format==='compact'?list.map(c=>({...c,...(c.element?{element:compactElement(c.element)}:{})})):list;
+      const payload=format==='lines'?list.map(c=>row(c,delta)):delta?transformed:transformed.map(c=>c.element);
+      return Buffer.byteLength(JSON.stringify({ ...base, [format==='lines'?'lines':delta?'changes':'elements']: payload }) ?? '', 'utf8');
     };
     const emit = (list: SnapshotChange[], redactions: number, truncated: boolean, cursor: string | null): ObserveResult => {
-      const payload = delta ? list : list.map((c) => c.element as Element);
-      return { ...head(redactions, truncated, cursor), [delta ? 'changes' : 'elements']: payload } as ObserveResult;
+      const transformed=format==='compact'?list.map(c=>({...c,...(c.element?{element:compactElement(c.element)}:{})})):list;
+      const payload=format==='lines'?list.map(c=>row(c,delta)):delta?transformed:transformed.map(c=>c.element);
+      return { ...head(redactions, truncated, cursor), [format==='lines'?'lines':delta?'changes':'elements']: payload } as ObserveResult;
     };
+    // Leave room for an actual item and its continuation, rather than returning
+    // an empty terminal page when multi-byte metadata fills a small budget.
+    const first=items[Math.min(Math.max(offset,0),items.length)];
+    while(size(first?[this.minimal(first)]:[],redactions,'x'.repeat(36))>limit){
+      if(metadata.title&&metadata.title.length>8)metadata={...metadata,title:metadata.title.slice(0,Math.floor(metadata.title.length/2))};
+      else if(metadata.url&&metadata.url.length>16)metadata={...metadata,url:metadata.url.slice(0,Math.floor(metadata.url.length/2))};
+      else if(metadata.warnings?.length)metadata={...metadata,warnings:metadata.warnings.slice(0,-1)};
+      else deny('E_RESOURCE_LIMIT');
+    }
     const chosen: SnapshotChange[] = [];
     let shortened=false;
     let i = Math.min(Math.max(offset, 0), items.length);
-    while (i < items.length) {
+    while (i < items.length && chosen.length < elementLimit) {
       if (size([...chosen, items[i]!], redactions, null) <= limit) { chosen.push(items[i]!); i += 1; continue; }
       // Move an otherwise complete element to the next page before discarding fields.
       const shrunk = size([items[i]!], redactions, 'x'.repeat(36)) > limit
@@ -284,7 +327,7 @@ export class SnapshotStore {
         cursor.offset = i + 1;
         if (size([candidate], redactions, token) <= limit) { chosen.push(candidate); shortened=true; progressed = true; break; }
       }
-      if (!progressed) { this.cursors.delete(token); return emit([], redactions, true, null); }
+      if (!progressed) { this.cursors.delete(token); deny('E_RESOURCE_LIMIT'); }
     }
     if(cursor.offset>=items.length){this.cursors.delete(token);return emit(chosen,redactions,sourceTruncated||shortened,null);}
     return emit(chosen, redactions, true, token);
@@ -306,7 +349,7 @@ export class SnapshotStore {
   }
 
   private optionsKey(options: ObserveOptions, include: Field[] | null, scope: string | undefined): string {
-    return JSON.stringify([scope ?? null, options.depth ?? null, include ?? null, options.representation ?? null]);
+    return JSON.stringify([scope ?? null, options.depth ?? null, include ?? null, options.representation ?? null,options.element_limit??null,options.format??'json']);
   }
 
   private issue(sessionId: string, revision: number, budget: number, since: number | null, key: string, offset: number, representation: 'full' | 'delta' | null = null, reset = false): string {

@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import {normalizePermissions, parsePermissionsEnv, effectivePermissions, describePermissionError, type EffectivePermissions, type ExtensionPermissions} from '../bundled-policy.js';
+import {normalizePermissions, parsePermissionsEnv, effectivePermissions, describePermissionError, normalizeRuntimeSettings, runtimeSettingsFromIdleMinutes, runtimeSettingsEnvJson as encodeRuntimeSettings, type EffectivePermissions, type ExtensionPermissions, type ExtensionRuntimeSettings, type OperationMode} from '../bundled-policy.js';
 
 export {parsePermissionsEnv};
 export type {ExtensionPermissions};
@@ -8,6 +8,10 @@ export interface Settings {
   enabled: boolean;
   syncClients: boolean;
   autoUpdate: boolean; checkForUpdates: boolean;
+  sessionIdleMinutes: number;
+  browserHeadless: boolean;
+  browserProxyServer: string;
+  operationMode: OperationMode;
   browserOrigins: string[];
   desktopAppId: string; desktopAppPath: string;
   allowAllOperations: boolean; allowPhysicalInput: boolean; allowUnredactedImages: boolean;
@@ -21,6 +25,10 @@ export function readSettings(): Settings {
     syncClients: c.get<boolean>('syncClients', false),
     autoUpdate: c.get<boolean>('autoUpdate', true),
     checkForUpdates: c.get<boolean>('checkForUpdates', true),
+    sessionIdleMinutes: c.get<number>('sessionIdleMinutes', 15),
+    browserHeadless: c.get<boolean>('browserHeadless', true),
+    browserProxyServer: c.get<string>('browserProxyServer', ''),
+    operationMode: c.get<OperationMode>('operationMode', 'read_only'),
     browserOrigins: c.get<string[]>('browserOrigins', []),
     desktopAppId: c.get<string>('desktopAppId', ''),
     desktopAppPath: c.get<string>('desktopAppPath', ''),
@@ -36,7 +44,7 @@ export function readSettings(): Settings {
 function grantInput(s: Settings): ExtensionPermissions {
   return {
     browserOrigins: s.browserOrigins, desktopAppId: s.desktopAppId, desktopAppPath: s.desktopAppPath,
-    allowAllOperations: s.allowAllOperations, allowPhysicalInput: s.allowPhysicalInput,
+    allowAllOperations: s.allowAllOperations, operationMode:s.operationMode, allowPhysicalInput: s.allowPhysicalInput,
     allowUnredactedImages: s.allowUnredactedImages, allowLoopback: s.allowLoopback,
     allowPrivateNetwork: s.allowPrivateNetwork,
   };
@@ -63,6 +71,11 @@ export function panelPermissions(s: Settings, helperPath?: string, platform: str
   return {requested: grantInput(s), effective};
 }
 export function permissionsEnvJson(s: Settings): string { return JSON.stringify(mcpPermissions(s)); }
+export function runtimeSettings(s: Settings): ExtensionRuntimeSettings {
+  return normalizeRuntimeSettings({sessionTtlMs:runtimeSettingsFromIdleMinutes(s.sessionIdleMinutes).sessionTtlMs,
+    browserHeadless:s.browserHeadless,browserProxyServer:s.browserProxyServer});
+}
+export function runtimeSettingsEnvJson(s: Settings): string { return encodeRuntimeSettings(runtimeSettings(s)); }
 
 export const log = {
   channel: undefined as vscode.OutputChannel | undefined,

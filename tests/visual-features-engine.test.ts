@@ -1,9 +1,11 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {createHash,randomBytes} from 'node:crypto';
+import {createServer} from 'node:http';
 import sharp from 'sharp';
 import {Engine} from '../src/core.js';
-import {parsePolicy} from '../src/policy.js';
+import {parsePolicy,assertUrlAllowed} from '../src/policy.js';
+import {BrowserAdapter} from '../src/browser.js';
 import type {Adapter,AdapterSession} from '../src/types.js';
 import {AdlError} from '../src/types.js';
 import type {CapturedImage} from '../src/visual-types.js';
@@ -11,6 +13,37 @@ import {visualFeatureEngine,pixel,dragPoints,swipePoints} from './fixtures/visua
 
 test('Engine gesture uses trusted mouse input and returns actual changed pixels',{timeout:15000},async()=>{
  const f=await visualFeatureEngine();try{const before=await f.engine.capture(f.session.session_id,{max_dimension:2048});const after=await f.engine.gesture(f.session.session_id,{frame_id:before.metadata.frame_id,expected_revision:before.metadata.revision,surface_id:'board',kind:'drag',points:dragPoints});assert.equal(after.metadata.gesture.released_input,true);assert.equal(after.metadata.gesture.kind,'drag');assert.equal(after.metadata.gesture.verified,'input_sequence_completed');assert.notEqual(after.metadata.frame_id,before.metadata.frame_id);const crop=await f.engine.capture(f.session.session_id,{frame_id:after.metadata.frame_id,region:{x:240,y:100,width:30,height:30}});assert.deepEqual(await pixel(crop.png,5,10),[255,0,0]);assert.ok((await f.engine.observe(f.session.session_id,{token_budget:8000})).elements?.some(e=>e.name==='Drag ended x=230 y=90 trusted=true pointer=mouse'));}finally{await f.close();}
+});
+test('browser gesture accepts a recent frame after five seconds but rejects expired and stale revisions',{timeout:15000},async()=>{
+ const realNow=Date.now;let offset=0;Date.now=()=>realNow()+offset;
+ let f:Awaited<ReturnType<typeof visualFeatureEngine>>|undefined;
+ try{
+  f=await visualFeatureEngine();
+  const frame=await f.engine.capture(f.session.session_id);
+  const plan={frame_id:frame.metadata.frame_id,expected_revision:frame.metadata.revision,surface_id:'board',kind:'drag' as const,points:dragPoints};
+  offset=31000;await assert.rejects(f.engine.gesture(f.session.session_id,plan),{code:'E_STALE_STATE'});
+  offset=6000;await assert.rejects(f.engine.gesture(f.session.session_id,{...plan,expected_revision:plan.expected_revision+1}),{code:'E_STALE_STATE'});
+  const result=await f.engine.gesture(f.session.session_id,plan);
+  assert.equal(result.metadata.gesture.released_input,true);
+ }finally{Date.now=realNow;await f?.close();}
+});
+test('retained browser frame rejects CSS-only surface movement without a semantic revision change',{timeout:15000},async()=>{
+ let move=false,notifyMoved!:()=>void;const moved=new Promise<void>(resolve=>{notifyMoved=resolve;});
+ const server=createServer((req,res)=>{
+  if(req.url==='/poll'){res.end(move?'move':'wait');return;}
+  if(req.url==='/moved'){notifyMoved();res.end('ok');return;}
+  res.setHeader('content-type','text/html');res.end('<style>#board{position:absolute;left:10px;top:10px;width:600px;height:250px;touch-action:none}</style><canvas id="board"></canvas><script>let done=false;setInterval(async()=>{if(!done&&(await (await fetch("/poll")).text())==="move"){done=true;document.querySelector("#board").style.left="11px";fetch("/moved")}},50)</script>');
+ });
+ await new Promise<void>(resolve=>server.listen(0,'127.0.0.1',resolve));
+ const origin=`http://127.0.0.1:${(server.address() as {port:number}).port}`;
+ const policy=parsePolicy({allowedOrigins:[origin],allowLoopback:true,browserTargets:[{id:'fixture',label:'Fixture',url:origin,classification:'PUBLIC',visual:{enabled:true},gestures:{enabled:true,surfaces:[{id:'board',selector:'#board',kinds:['drag']}]}}]});
+ const engine=new Engine(policy,{browser:new BrowserAdapter(policy,url=>assertUrlAllowed(url,policy))});
+ try{
+  const session=await engine.open((await engine.listTargets()).targets[0]!.target_id);
+  const frame=await engine.capture(session.session_id);move=true;await moved;
+  const observed=await engine.observe(session.session_id);assert.equal(observed.revision,frame.metadata.revision);
+  await assert.rejects(engine.gesture(session.session_id,{frame_id:frame.metadata.frame_id,expected_revision:frame.metadata.revision,surface_id:'board',kind:'drag',points:dragPoints}),{code:'E_STALE_STATE'});
+ }finally{await engine.shutdown();server.closeAllConnections();await new Promise<void>(resolve=>server.close(()=>resolve()));}
 });
 test('Engine gesture uses real trusted touch swipe rather than a mouse surrogate',{timeout:15000},async()=>{
  const f=await visualFeatureEngine();try{const before=await f.engine.capture(f.session.session_id);const after=await f.engine.gesture(f.session.session_id,{frame_id:before.metadata.frame_id,expected_revision:before.metadata.revision,surface_id:'board',kind:'swipe',points:swipePoints});assert.equal(after.metadata.gesture.released_input,true);assert.equal(after.metadata.gesture.kind,'swipe');assert.ok((await f.engine.observe(f.session.session_id,{token_budget:8000})).elements?.some(e=>e.name==='Swipe ended x=170 trusted=true touch=true'));const crop=await f.engine.capture(f.session.session_id,{frame_id:after.metadata.frame_id,region:{x:180,y:30,width:30,height:30}});assert.deepEqual(await pixel(crop.png,10,10),[255,0,0]);}finally{await f.close();}

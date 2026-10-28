@@ -2,7 +2,7 @@
   "name": "agentdesklink",
   "displayName": "AgentDeskLink",
   "description": "Local-first semantic browser and desktop control over MCP, with a per-workspace AgentDeskLink sidebar for VS Code.",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "publisher": "agentdesklink",
   "license": "MIT",
   "private": true,
@@ -126,6 +126,26 @@
           "scope": "window",
           "description": "信頼できるワークスペース設定: 明示的に許可する完全な http(s) オリジン（空 = 許可なし）/ Trusted per-workspace setting: exact http(s) origins explicitly granted; empty grants nothing."
         },
+        "agentdesklink.sessionIdleMinutes": {
+          "type": "number",
+          "default": 15,
+          "minimum": 1,
+          "maximum": 60,
+          "scope": "window",
+          "description": "セッションのアイドル期限（分、1〜60。既定 15 分）/ Idle timeout for sessions in minutes (1–60; default 15)."
+        },
+        "agentdesklink.browserHeadless": {
+          "type": "boolean",
+          "default": true,
+          "scope": "window",
+          "description": "ブラウザーをヘッドレスで起動 / Run the browser headless."
+        },
+        "agentdesklink.browserProxyServer": {
+          "type": "string",
+          "default": "",
+          "scope": "window",
+          "description": "公開プロキシ origin（http(s)、認証情報・パスなし）/ Public proxy origin (http(s), no credentials or path)."
+        },
         "agentdesklink.desktopAppId": {
           "type": "string",
           "default": "",
@@ -143,6 +163,17 @@
           "default": false,
           "scope": "window",
           "description": "すべての対応操作を明示的に許可（既定は拒否、許可元/アプリの許可は別途必要）/ Explicitly permit all supported operations (default deny; origin and app grants stay separate)."
+        },
+        "agentdesklink.operationMode": {
+          "type": "string",
+          "enum": [
+            "read_only",
+            "standard",
+            "ask"
+          ],
+          "default": "read_only",
+          "scope": "window",
+          "description": "操作の権限段階。既定は読み取り専用。all は従来互換のallowAllOperations設定でのみ有効です。 / Permission tier (read_only by default). Legacy allowAllOperations takes precedence as all."
         },
         "agentdesklink.allowPhysicalInput": {
           "type": "boolean",
@@ -205,9 +236,9 @@
     "check": "tsc --noEmit",
     "test": "npm run build && node scripts/run-tests.mjs",
     "test:unit": "npm run build:tsc && node --test --test-timeout=10000 dist/tests/policy.test.js dist/tests/snapshot.test.js dist/tests/core.test.js",
-    "test:extension": "npm run build && node --test --test-timeout=10000 --test-force-exit tests/extension/*.test.cjs",
+    "test:extension": "npm run build && node --test --test-concurrency=1 --test-timeout=10000 --test-force-exit tests/extension/*.test.cjs",
     "prepare:runtime": "node scripts/prepare-runtime.mjs",
-    "test:package": "node --test --test-timeout=10000 --test-force-exit tests/package-runtime.test.mjs tests/release-package.test.mjs tests/universal-*.test.mjs",
+    "test:package": "node --test --test-concurrency=1 --test-timeout=10000 --test-force-exit tests/package-runtime.test.mjs tests/release-package.test.mjs tests/universal-*.test.mjs",
     "verify:vsix": "node scripts/verify-vsix.mjs",
     "package:vsix": "npm run build && node scripts/package-vsix.mjs",
     "start": "node dist/src/server.js",

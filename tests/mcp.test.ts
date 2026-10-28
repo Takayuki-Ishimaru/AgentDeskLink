@@ -1,12 +1,33 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {mkdtemp,writeFile,rm,readFile,symlink} from 'node:fs/promises';
+import {mkdtemp,writeFile,rm,readFile,symlink,mkdir} from 'node:fs/promises';
+import {spawn} from 'node:child_process';
 import {tmpdir} from 'node:os';
 import {join,resolve} from 'node:path';
 import {createServer} from 'node:http';
 import {Client} from '@modelcontextprotocol/client';
 import {StdioClientTransport} from '@modelcontextprotocol/client/stdio';
 const payload=(result:unknown):any=>JSON.parse((result as {content:{text:string}[]}).content[0]!.text);
+
+test('stdio resolves and initializes auditPath relative to its config, and reports unusable paths at startup',async()=>{
+ const dir=await mkdtemp(join(tmpdir(),'adl-audit-startup-'));const client=new Client({name:'audit-startup',version:'1.0.0'},{versionNegotiation:{mode:'legacy'}});
+ const entry=resolve('dist/src/server.js');
+ try{
+  await mkdir(join(dir,'settings'));await mkdir(join(dir,'host'));
+  const config=join(dir,'settings','policy.json');await writeFile(config,JSON.stringify({auditPath:'../logs/audit.jsonl'}));
+  await client.connect(new StdioClientTransport({command:process.execPath,args:[entry,'--config',config],cwd:join(dir,'host'),stderr:'pipe'}));
+  assert.equal(payload(await client.callTool({name:'adl_targets',arguments:{}})).ok,true);
+  assert.equal(await readFile(join(dir,'logs','audit.jsonl'),'utf8'),'');
+  await client.close();
+  await writeFile(join(dir,'blocked'),'ordinary file');
+  await writeFile(config,JSON.stringify({auditPath:'../blocked/audit.jsonl'}));
+  const failure=await new Promise<{code:number|null;stderr:string;stdout:string}>((done,reject)=>{
+   const child=spawn(process.execPath,[entry,'--config',config],{cwd:join(dir,'host'),windowsHide:true,stdio:['ignore','pipe','pipe']});let stderr='',stdout='';
+   child.stderr.on('data',chunk=>{stderr+=chunk;});child.stdout.on('data',chunk=>{stdout+=chunk;});child.on('error',reject);child.on('close',code=>done({code,stderr,stdout}));
+  });
+  assert.equal(failure.code,1);assert.match(failure.stderr,/audit log initialization failed \([A-Z_]+\)/);assert.match(failure.stderr,/auditPath/);assert.equal(failure.stdout,'');
+ }finally{await client.close();await rm(dir,{recursive:true,force:true});}
+});
 const runClient=async(mode:'legacy'|'modern',config?:string)=>{
  const transport=new StdioClientTransport({command:process.execPath,args:['dist/src/server.js',...(config?['--config',config]:[])],cwd:process.cwd(),stderr:'pipe'});
  const client=new Client({name:`adl-${mode}-integration`,version:'1.0.0'},{versionNegotiation:{mode:mode==='legacy'?'legacy':{pin:'2026-07-28'}}});
@@ -14,11 +35,12 @@ const runClient=async(mode:'legacy'|'modern',config?:string)=>{
 };
 for(const mode of ['legacy','modern'] as const)test(`real stdio ${mode}: tool schema, closed policy and safe errors`,async()=>{
  const {client}=await runClient(mode);try{
- const tools=await client.listTools();assert.equal(tools.tools.length,16);assert.equal(new Set(tools.tools.map(t=>t.name)).size,16);
+ const tools=await client.listTools();assert.equal(tools.tools.length,13);assert.equal(new Set(tools.tools.map(t=>t.name)).size,13);
+ for(const name of ['adl_prepare_input','adl_commit_input','adl_applications','adl_app'])assert.ok(!tools.tools.some(t=>t.name===name));
  const targets=payload(await client.callTool({name:'adl_targets',arguments:{}}));assert.deepEqual(targets.targets,[]);
- const applications=payload(await client.callTool({name:'adl_applications',arguments:{}}));assert.deepEqual(applications.applications,[]);
- const deniedApp=payload(await client.callTool({name:'adl_app',arguments:{application_id:'com.other.app',action:'launch'}}));assert.equal(deniedApp.error.code,'E_POLICY_DENIED');
- for(const args of [{application_id:'com.other.app',action:'force'},{application_id:'com.other.app',action:'launch',path:'/bin/sh'},{application_id:'com.other.app',action:'quit',force:true}])assert.ok((await client.callTool({name:'adl_app',arguments:args})).isError);
+ assert.deepEqual(payload(await client.callTool({name:'adl_sessions',arguments:{}})).sessions,[]);
+ await assert.rejects(client.callTool({name:'adl_applications',arguments:{}}),/not found/);
+ await assert.rejects(client.callTool({name:'adl_app',arguments:{application_id:'com.other.app',action:'launch'}}),/not found/);
  const error=payload(await client.callTool({name:'adl_open',arguments:{target_id:'forged'}}));assert.equal(error.error.code,'E_TARGET_NOT_FOUND');
  const invalid=await client.callTool({name:'adl_act',arguments:{session_id:'s',action:'evaluate',javascript:'CANARY_JS'}});assert.ok(invalid.isError);
  }finally{await client.close();}

@@ -2,7 +2,7 @@
 
 [日本語](KNOWN_ISSUES.md) | **English**
 
-Target version: `0.1.4`
+Target version: `0.1.5`
 
 This beta is provided for a limited range of use. It is not guaranteed to work with every application or operating system configuration.
 
@@ -28,14 +28,23 @@ Ubuntu's user-namespace restrictions may require additional sandbox setup for au
 - Background semantic operation does not guarantee complete non-interference, including delayed actions by the application itself.
 - Select `interactive_desktop` mode to use physical input. It uses the same mouse and keyboard as the person, so do not use it while someone is working on the desktop.
 - Desktop swipes are implemented as scrolling; they do not provide real operating system touch points.
-- MCP enablement, permitted origins/apps, broad operations, physical input and unredacted images are separate workspace settings. Enabling MCP alone grants no targets or additional privileges. There is no dedicated approval UI for consequential actions. Review the scope you give the AI for actions such as submission or purchases. CLI restrictions follow the supplied policy.
+- MCP enablement, target grants, permission tiers, physical input and unredacted images are separate settings. One-shot approval covers inspected controls in the browser main document; native apps, iframe and Shadow DOM controls cannot be escalated. Existing `allowAllOperations: true` takes precedence over the tier. CLI restrictions follow the supplied policy.
 - If helper communication is cancelled or interrupted by a timeout, the session may become invalid. Restart the MCP server explicitly and start again from obtaining the target.
 
 - Emergency stop applies to extension-managed servers and cannot undo processing already dispatched to an application. Stop manually launched servers through their MCP host.
 
+## Browser approvals and manual interaction
+
+- A network permit covers one inspected URL-encoded form POST. Multipart, files and generic AJAX/DELETE remain unsupported. Page handlers that change the payload cause refusal.
+- One-shot approval is unavailable without a connection to VS Code, or when permitted native operations could operate the approval host itself.
+- Manual-login network permission applies to the current origin for at most 120 seconds. Website scripts may send, change or delete during that interval. Automation stays paused, but resume and expiry cannot roll back requests already dispatched.
+- Coordinate clicks require the latest retained image, unchanged target and geometry, and an image age below 30 seconds. Capture again if the page changes.
+
+See [operation settings and approvals](OPERATIONS.md).
+
 ## Images and privacy
 
-Extension browser capture is limited to permitted origins; native capture requires separate permission. For the CLI, allow capture in the policy. Browser masks cover controls, frames, detected sensitive labels and text patterns. `redacted: true` records masking, not complete secret detection; inspect `redaction.scope` and `redaction.methods` for its scope. Unknown secrets in images or text cannot be detected completely. Information returned over MCP is passed to the AI host, so check which targets you allow to be captured.
+Extension browser capture is limited to permitted origins; native capture requires separate permission. For the CLI, allow capture in the policy. Browser masks cover iframes, closed Shadow DOM, explicit protected regions, detected sensitive labels and secret text patterns. Ordinary inputs and checkboxes remain visible. `redacted: true` records masking, not complete secret detection; inspect `redaction.scope` and `redaction.methods` for its scope. Unknown secrets in images or text cannot be detected completely. Information returned over MCP is passed to the AI host, so check which targets you allow to be captured.
 
 Frame sequences can be captured, but audio, encoded video and automatic periodic capture are not supported.
 

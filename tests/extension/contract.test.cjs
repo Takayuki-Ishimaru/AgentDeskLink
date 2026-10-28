@@ -45,11 +45,17 @@ function harness(initial = {}, options = {}) {
   const extensionRoot = path.join(temp, 'extension');
   fs.mkdirSync(extensionRoot, { recursive: true });
   if (options.bundle !== false) makeBundle(extensionRoot, options);
-  const browserCache = path.join(temp, 'storage', 'browsers', `1.64.1-${process.platform}-${process.arch}`);
-  fs.mkdirSync(browserCache, {recursive:true});
-  fs.writeFileSync(path.join(browserCache, 'headless-shell'), 'browser');
-  fs.chmodSync(path.join(browserCache, 'headless-shell'), 0o755);
-  fs.writeFileSync(path.join(browserCache, 'ready.json'), JSON.stringify({schemaVersion:1,version:'1.64.1',target:`${process.platform}-${process.arch}`,executable:'headless-shell'}));
+  const targetName = `${process.platform}-${process.arch}`;
+  const browserSentinels = {};
+  for (const [mode, dir] of [['headless', `1.64.1-${targetName}`], ['headful', `1.64.1-${targetName}-headful`]]) {
+    const cache = path.join(temp, 'storage', 'browsers', dir);
+    fs.mkdirSync(cache, {recursive:true});
+    const sentinel = `${mode}-browser`;
+    fs.writeFileSync(path.join(cache, sentinel), 'browser');
+    fs.chmodSync(path.join(cache, sentinel), 0o755);
+    fs.writeFileSync(path.join(cache, 'ready.json'), JSON.stringify({schemaVersion:1,version:'1.64.1',target:targetName,executable:sentinel}));
+    browserSentinels[mode] = path.join(cache, sentinel);
+  }
   const uri = value => ({ fsPath: value, path: value, scheme: 'file', toString: () => `file://${value}` });
   const config = { enabled: false, nodePath: '', configPath: '', autoUpdate: true, checkForUpdates: true, updateManifestUrl: '', ...initial };
   const changes = new Emitter(), folders = new Emitter(), trust = new Emitter();
@@ -81,7 +87,7 @@ function harness(initial = {}, options = {}) {
     window: {
       registerWebviewViewProvider: (id, provider) => { views.set(id, provider); return { dispose() {} }; },
       createOutputChannel: () => ({ appendLine() {}, show() {}, dispose() {} }),
-      showErrorMessage: async text => { notifications.push(text); }, showWarningMessage: async text => { notifications.push(text); }, showInformationMessage: async text => { notifications.push(text); },
+      showErrorMessage: async text => { notifications.push(text); }, showWarningMessage: async (...args) => { notifications.push(args[0]); return options.confirmWarning; }, showInformationMessage: async text => { notifications.push(text); },
       showOpenDialog: async () => undefined, showTextDocument: async () => {},
       withProgress: async (_opts, fn) => fn({ report() {} }, { isCancellationRequested: false, onCancellationRequested: new Emitter().event })
     },
@@ -96,15 +102,24 @@ function harness(initial = {}, options = {}) {
     globalState: { get: (key, fallback) => state.get(key) ?? fallback, update: async (key, value) => { state.set(key, value); } },
     workspaceState: { get: (_key, fallback) => fallback, update: async () => {} } };
   const module = { exports: {} };
+  // Deterministic installed-browser probe: candidates outside the private storage dir never resolve,
+  // so the published executable always comes from the selected mode's cache on every test host.
+  const noInstalledBrowser = Object.assign(Object.create(fs.promises), {
+    realpath: async file => {
+      const resolved = path.resolve(String(file));
+      if (resolved !== path.resolve(temp) && !resolved.startsWith(path.resolve(temp) + path.sep)) throw new Error('no installed browser');
+      return fs.promises.realpath(file);
+    }
+  });
   vm.runInNewContext(fs.readFileSync(path.join(root, 'dist/extension/extension.cjs'), 'utf8'), {
-    module, exports: module.exports, require: name => name === 'vscode' ? vscode : name === 'node:fs' ? fs : require(name),
+    module, exports: module.exports, require: name => name === 'vscode' ? vscode : name === 'node:fs' ? fs : name === 'node:fs/promises' ? noInstalledBrowser : require(name),
     __dirname: path.join(root, 'dist/extension'), __filename: path.join(root, 'dist/extension/extension.cjs'),
     process, console, Buffer, URL, AbortController, AbortSignal, TextDecoder, TextEncoder, fetch: (...args) => options.fetch ? options.fetch(...args) : Promise.reject(new Error('unexpected network request')),
     setTimeout, clearTimeout, setInterval, clearInterval, queueMicrotask
   });
   const ready = Promise.resolve(module.exports.activate(context));
   cleanups.push(async () => { subscriptions.slice().reverse().forEach(x => x.dispose?.()); await module.exports.deactivate?.(); fs.rmSync(temp, { recursive: true, force: true }); });
-  return { ready, vscode, config, temp, extensionRoot, writes, commands, providers, executions, notifications, posts, changes,
+  return { ready, vscode, config, temp, extensionRoot, writes, commands, providers, executions, notifications, posts, changes, browserSentinels,
     deactivate: async () => { await module.exports.deactivate?.(); },
     async panel() {
       await ready;
@@ -132,6 +147,11 @@ test('manifest contributes the sidebar, workspace switch and application update 
     assert.equal(props[`agentdesklink.${key}`].default,false);assert.equal(props[`agentdesklink.${key}`].scope,'window');
   }
   assert.deepEqual(props['agentdesklink.browserOrigins'].default,[]);
+  assert.equal(props['agentdesklink.sessionIdleMinutes'].default,15);
+  assert.equal(props['agentdesklink.sessionIdleMinutes'].scope,'window');
+  assert.equal(props['agentdesklink.sessionIdleMinutes'].minimum,1);assert.equal(props['agentdesklink.sessionIdleMinutes'].maximum,60);
+  assert.equal(props['agentdesklink.browserHeadless'].default,true);assert.equal(props['agentdesklink.browserHeadless'].scope,'window');
+  assert.equal(props['agentdesklink.browserProxyServer'].default,'');assert.equal(props['agentdesklink.browserProxyServer'].scope,'window');
   for(const key of ['desktopAppId','desktopAppPath'])assert.equal(props[`agentdesklink.${key}`].default,'');
   for (const key of ['autoUpdate', 'checkForUpdates']) assert.equal(props[`agentdesklink.${key}`].scope, 'application');
   assert.equal(props['agentdesklink.updateManifestUrl'], undefined, 'the update source is fixed to GitHub');
@@ -152,10 +172,39 @@ test('enabled MCP uses bundled Node with default-deny permissions and no legacy 
   const p=h.providers.get('agentdesklink.mcp'),[definition]=await p.provideMcpServerDefinitions();
   assert.equal(definition.command,path.join(h.extensionRoot,'runtime',process.platform==='win32'?'node.exe':'node'));
   assert.deepEqual(Array.from(definition.args),[path.join(h.extensionRoot,'dist/src/server.js')]);
-  assert.equal(definition.env.ADL_ALLOW_ALL_OPERATIONS,undefined);assert.deepEqual(JSON.parse(definition.env.ADL_MCP_PERMISSIONS),{browserOrigins:[],desktopAppId:'',desktopAppPath:'',allowAllOperations:false,allowPhysicalInput:false,allowUnredactedImages:false,allowLoopback:false,allowPrivateNetwork:false});assert.ok(definition.env.ADL_OPERATION_CONTROL);assert.ok(definition.env.ADL_OPERATION_EPOCH);
+  assert.equal(definition.env.ADL_ALLOW_ALL_OPERATIONS,undefined);assert.deepEqual(JSON.parse(definition.env.ADL_MCP_PERMISSIONS),{browserOrigins:[],desktopAppId:'',desktopAppPath:'',allowAllOperations:false,operationMode:'read_only',allowPhysicalInput:false,allowUnredactedImages:false,allowLoopback:false,allowPrivateNetwork:false});assert.ok(definition.env.ADL_OPERATION_CONTROL);assert.ok(definition.env.ADL_OPERATION_EPOCH);
+  assert.match(definition.env.ADL_APPROVAL_URL,/^http:\/\/127\.0\.0\.1:\d+$/);assert.match(definition.env.ADL_APPROVAL_TOKEN,/^[A-Za-z0-9_-]{43}$/);assert.equal(definition.env.ADL_APPROVAL_EPOCH,definition.env.ADL_OPERATION_EPOCH);
   let refreshed=0;p.onDidChangeMcpServerDefinitions(()=>refreshed++);
   h.config.enabled=false;h.changes.fire({affectsConfiguration:name=>name.startsWith('agentdesklink')});
   assert.ok(refreshed>0);assert.equal((await p.provideMcpServerDefinitions()).length,0);
+});
+test('approval broker requires a host modal and consumes a one-shot decision atomically',async()=>{
+  const h=harness({enabled:true,operationMode:'ask',browserOrigins:['https://example.com']},{confirmWarning:'Approve once / 今回のみ許可'});await h.ready;
+  const [definition]=await h.providers.get('agentdesklink.mcp').provideMcpServerDefinitions();
+  const request_id=crypto.randomUUID(),server_id=crypto.randomUUID(),binding='b'.repeat(64),expires_at=Date.now()+60_000;
+  const post=await fetch(`${definition.env.ADL_APPROVAL_URL}/v1/requests`,{method:'POST',headers:{authorization:`Bearer ${definition.env.ADL_APPROVAL_TOKEN}`,'content-type':'application/json'},body:JSON.stringify({v:1,request_id,server_id,control_epoch:definition.env.ADL_APPROVAL_EPOCH,binding,expires_at,summary:{action:'fill',surface:'browser',target:'Example',origin:'https://example.com',risk:'consequential',value:{kind:'public',length:23,preview:'line one\nsecond\t"quote"'}}})});
+  assert.equal(post.status,201);assert.equal((await post.json()).status,'pending');
+  let reply;for(let i=0;i<20;i++){await new Promise(resolve=>setTimeout(resolve,5));const response=await fetch(`${definition.env.ADL_APPROVAL_URL}/v1/requests/${request_id}`,{headers:{authorization:`Bearer ${definition.env.ADL_APPROVAL_TOKEN}`}});reply=await response.json();if(reply.status!=='pending')break;}
+  assert.equal(reply.status,'approved');
+  assert.ok(h.notifications.some(message=>String(message).includes('"line one\\nsecond\\t\\"quote\\""')),'multiline preview is visibly escaped in the native modal');
+  const consumed=await fetch(`${definition.env.ADL_APPROVAL_URL}/v1/requests/${request_id}`,{method:'DELETE',headers:{authorization:`Bearer ${definition.env.ADL_APPROVAL_TOKEN}`}});
+  assert.equal((await consumed.json()).consumed_now,true);
+  const replay=await fetch(`${definition.env.ADL_APPROVAL_URL}/v1/requests/${request_id}`,{method:'DELETE',headers:{authorization:`Bearer ${definition.env.ADL_APPROVAL_TOKEN}`}});
+  assert.equal((await replay.json()).consumed_now,false);
+  assert.ok(h.notifications.some(message=>String(message).includes('asks to approve this browser action once')));
+});
+test('Ask broker is withheld when physical native control targets the VS Code host',async()=>{
+  const h=harness({enabled:true,operationMode:'ask',browserOrigins:['https://example.com'],desktopAppId:'host-app',desktopAppPath:process.execPath,allowPhysicalInput:true,allowUnredactedImages:true});
+  const panel=await h.panel();const [definition]=await h.providers.get('agentdesklink.mcp').provideMcpServerDefinitions();
+  assert.equal(definition.env.ADL_APPROVAL_URL,undefined,'the one-shot capability is not given to a host-controlling native target');
+  assert.match(h.posts.at(-1).status.mcp,/native target can control the VS Code host/);
+  assert.ok(h.posts.at(-1).permissions.effective.reasons.some(reason=>reason.includes('click its approval dialog')));
+  assert.ok(panel.view.webview.html.includes('operation-mode'));
+  const remote=harness({enabled:true,operationMode:'ask',browserOrigins:['https://example.com'],desktopAppId:'remote-app',desktopAppPath:path.join(h.temp,'remote-app'),allowPhysicalInput:true,allowUnredactedImages:true});
+  remote.vscode.env.remoteName='ssh-remote+example';await remote.ready;
+  const [remoteDefinition]=await remote.providers.get('agentdesklink.mcp').provideMcpServerDefinitions();
+  assert.equal(remoteDefinition.env.ADL_APPROVAL_URL,undefined,'remote target identity is treated as unknown');
+  const remotePanel=await remote.panel();assert.match(remote.posts.at(-1).status.mcp,/remote extension host cannot safely identify/);
 });
 test('stop command and sidebar revoke definitions and explicit resume creates a fresh generation',async()=>{
   const h=harness({enabled:true}),panel=await h.panel(),p=h.providers.get('agentdesklink.mcp');
@@ -200,6 +249,51 @@ test('panel saves workspace and user scopes, validates messages and provides CSP
   const count = h.writes.length;
   for (const value of [null, [], { type: 'setEnabled', enabled: 'false' }, { type: 'setAutoUpdate', enabled: 1 }, { type: 'unknown' }]) await panel.send(value);
   assert.equal(h.writes.length, count);
+});
+test('panel saves normalized browser origins through workspace permission validation', async () => {
+  const h=harness({browserOrigins:[]}),panel=await h.panel();
+  await panel.send({type:'setBrowserOrigins',origins:['https://Example.com/','https://example.com']});
+  const write=h.writes.find(x=>x.key==='browserOrigins');
+  assert.deepEqual(Array.from(write.value),['https://example.com']);assert.equal(write.target,2);
+  assert.deepEqual(Array.from(h.posts.at(-1).settings.browserOrigins),['https://example.com']);
+  const count=h.writes.length;
+  await panel.send({type:'setBrowserOrigins',origins:['https://example.com/path']});
+  assert.equal(h.writes.length,count,'invalid origin is rejected before persistence');
+  assert.match(h.posts.at(-1).status.originsError,/browserOrigins|Browser origins/);
+});
+test('panel saves the bounded session idle timeout as a workspace runtime setting', async () => {
+  const h=harness({sessionIdleMinutes:15}),panel=await h.panel();
+  await panel.send({type:'setSessionIdleMinutes',minutes:30});
+  const write=h.writes.find(x=>x.key==='sessionIdleMinutes');
+  assert.equal(write.value,30);assert.equal(write.target,2);
+  assert.equal(h.posts.at(-1).settings.sessionIdleMinutes,30);
+  const count=h.writes.length;
+  await panel.send({type:'setSessionIdleMinutes',minutes:60.5});
+  assert.equal(h.writes.length,count,'fractional minutes are rejected before persistence');
+  assert.match(h.posts.at(-1).status.runtimeError,/1〜60|whole number/);
+});
+test('panel validates and normalizes headless/proxy runtime settings without exposing proxy credentials', async () => {
+  const h=harness({browserHeadless:true,browserProxyServer:''}),panel=await h.panel();
+  await panel.send({type:'setBrowserHeadless',enabled:false});
+  assert.ok(h.writes.some(x=>x.key==='browserHeadless'&&x.value===false&&x.target===2));
+  await panel.send({type:'setBrowserProxyServer',proxy:'https://Proxy.Example:8443/'});
+  assert.ok(h.writes.some(x=>x.key==='browserProxyServer'&&x.value==='https://proxy.example:8443'&&x.target===2));
+  const count=h.writes.length;
+  await panel.send({type:'setBrowserProxyServer',proxy:'http://user:secret@proxy.example:8080'});
+  assert.equal(h.writes.length,count,'credential-bearing proxy URLs are rejected');
+  assert.doesNotMatch(JSON.stringify(h.posts.at(-1)),/secret/,'proxy credentials are never posted to the webview');
+  assert.match(h.posts.at(-1).status.runtimeError,/Invalid runtime setting/);
+});
+test('permission tier can move directly from legacy all to standard and confirms all in the native host',async()=>{
+  const h=harness({allowAllOperations:true,operationMode:'read_only'}),panel=await h.panel();
+  await panel.send({type:'setOperationMode',mode:'standard'});
+  assert.ok(h.writes.some(x=>x.key==='allowAllOperations'&&x.value===false&&x.target===2));
+  assert.ok(h.writes.some(x=>x.key==='operationMode'&&x.value==='standard'&&x.target===2));
+  assert.equal(h.posts.at(-1).permissions.effective.operationMode,'standard');
+  const all=harness({allowAllOperations:false,operationMode:'standard'},{confirmWarning:'すべて許可 / Allow all'}),allPanel=await all.panel();
+  await allPanel.send({type:'setOperationMode',mode:'all'});
+  assert.ok(all.writes.some(x=>x.key==='allowAllOperations'&&x.value===true&&x.target===2));
+  assert.ok(!all.writes.some(x=>x.key==='operationMode'&&x.value==='all'));
 });
 test('untrusted or empty panel refuses workspace writes and saving failure is surfaced', async () => {
   for (const opts of [{ trusted: false }, { empty: true }]) {
@@ -528,4 +622,19 @@ for(const mode of ['concurrent','disabled','disposed'])test(`cancelled update re
   if(mode==='disposed')await h.deactivate();
   await Promise.all([first,...retries]);
   assert.equal(requests,mode==='concurrent'?2:1);assert.equal(installs(h),0);
+});
+test('the browserHeadless setting selects the browser cache published to the MCP server', async () => {
+  const h = harness({ enabled: true, browserHeadless: false, sessionIdleMinutes: 7 }); await h.ready;
+  const [headful] = await h.providers.get('agentdesklink.mcp').provideMcpServerDefinitions();
+  assert.ok(headful, 'a headful window still publishes the server');
+  assert.equal(fs.realpathSync(headful.env.ADL_BROWSER_EXECUTABLE), fs.realpathSync(h.browserSentinels.headful));
+  assert.notEqual(fs.realpathSync(headful.env.ADL_BROWSER_EXECUTABLE), fs.realpathSync(h.browserSentinels.headless));
+  assert.match(headful.env.PLAYWRIGHT_BROWSERS_PATH, /-headful$/);
+  const headfulRuntime = JSON.parse(headful.env.ADL_MCP_RUNTIME_SETTINGS);
+  assert.equal(headfulRuntime.browserHeadless, false);
+  assert.equal(headfulRuntime.sessionTtlMs, 420000, 'the same runtime read carries the other runtime setting');
+  const d = harness({ enabled: true, sessionIdleMinutes: 7 }); await d.ready;
+  const [headless] = await d.providers.get('agentdesklink.mcp').provideMcpServerDefinitions();
+  assert.equal(fs.realpathSync(headless.env.ADL_BROWSER_EXECUTABLE), fs.realpathSync(d.browserSentinels.headless));
+  assert.equal(JSON.parse(headless.env.ADL_MCP_RUNTIME_SETTINGS).browserHeadless, true);
 });

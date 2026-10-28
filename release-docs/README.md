@@ -6,7 +6,7 @@
   <img src="../media/readme-hero-v2.png" alt="AgentDeskLink — Browser + Desktop, over MCP" width="1200">
 </p>
 
-対象バージョン: `0.1.4`
+対象バージョン: `0.1.5`
 
 **ブラウザも、デスクトップも。使い慣れた AI エージェントから。**
 
@@ -19,9 +19,10 @@ AgentDeskLink は、AI エージェントとローカルのブラウザ・デス
 | [リリースノート](RELEASE_NOTES_ja.md) | このバージョンの機能と変更点 |
 | [インストールとはじめ方](INSTALL.md) | VSIX の導入、初期設定、停止方法 |
 | [対応環境と既知の制限](KNOWN_ISSUES.md) | 対応する OS と利用上の制限 |
+| [操作設定と承認](OPERATIONS.md) | 権限段階・個別承認・手動ログイン・MCP の使い方 |
 | [更新の設定](UPDATES.md) | GitHub 固定の更新元とファイルの整合性確認 |
 
-このバージョンはベータ版です。共通パッケージ `agentdesklink-0.1.4.vsix` を利用し、対応する OS・CPU と制限を確認してください。
+このバージョンはベータ版です。共通パッケージ `agentdesklink-0.1.5.vsix` を利用し、対応する OS・CPU と制限を確認してください。
 
 ## ライセンス
 

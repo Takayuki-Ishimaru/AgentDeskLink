@@ -8,6 +8,7 @@ export interface BrowserRuntime {executablePath:string; browsersPath:string; sou
 interface CommandOptions {cwd:string;env:NodeJS.ProcessEnv;signal?:AbortSignal;timeoutMs:number}
 export interface BrowserOptions {
   extensionRoot:string;nodePath:string;storageDir:string;playwrightVersion:string;
+  headless?:boolean;
   platform?:NodeJS.Platform;arch?:string;env?:NodeJS.ProcessEnv;signal?:AbortSignal;
   probePaths?:string[];lockTimeoutMs?:number;commandTimeoutMs?:number;
   runCommand?:(args:string[],options:CommandOptions)=>Promise<{stdout:string;stderr:string}>;
@@ -46,6 +47,12 @@ export function runBrowserCommand(args:string[],options:CommandOptions):Promise<
     child.once('error',error=>{clean();reject(error);});
     child.once('close',async(code,signal)=>{clean();await killing;if(reason)reject(reason);else if(code===0)resolve({stdout,stderr});else reject(new Error(`Browser setup command failed (${code??signal}): ${stderr.slice(-2000)}`));});
   });
+}
+
+// Headless keeps the pre-existing directory and metadata layout so caches written by earlier
+// versions stay valid; headful needs the full Chromium build and so gets its own cache and lock.
+function cacheDirectory(storageDir:string,version:string,target:string,headless:boolean):string{
+  return path.join(storageDir,'browsers',headless?`${version}-${target}`:`${version}-${target}-headful`);
 }
 
 function safeRelative(value:unknown):value is string {
@@ -98,7 +105,8 @@ async function provision(options:BrowserOptions,signal:AbortSignal):Promise<Brow
   const platform=options.platform??process.platform,arch=options.arch??process.arch,version=options.playwrightVersion;
   if(!['darwin','win32','linux'].includes(platform)||!['arm64','x64'].includes(arch)||!/^\d+\.\d+\.\d+$/.test(version))throw new Error('Unsupported browser setup target/version');
   if(!path.isAbsolute(options.storageDir)||!path.isAbsolute(options.nodePath)||!path.isAbsolute(options.extensionRoot))throw new Error('Browser setup requires absolute installation paths');
-  const target=`${platform}-${arch}`,cache=path.join(options.storageDir,'browsers',`${version}-${target}`);
+  const target=`${platform}-${arch}`,headless=options.headless!==false;
+  const cache=cacheDirectory(options.storageDir,version,target,headless);
   const env={...process.env,...options.env};
   for(const candidate of options.probePaths??chromeCandidates(platform,env,os.homedir())){
     signal.throwIfAborted();const chrome=await executable(candidate);
@@ -115,16 +123,16 @@ async function provision(options:BrowserOptions,signal:AbortSignal):Promise<Brow
     delete childEnv.NODE_OPTIONS;delete childEnv.NODE_PATH;
     const command=options.runCommand??runBrowserCommand;
     const commandOptions={cwd:options.extensionRoot,env:childEnv,signal,timeoutMs:options.commandTimeoutMs??300000};
-    await command([options.nodePath,path.join(options.extensionRoot,'node_modules/playwright/cli.js'),'install','chromium','--only-shell'],commandOptions);
+    await command([options.nodePath,path.join(options.extensionRoot,'node_modules/playwright/cli.js'),'install','chromium',headless?'--only-shell':'--no-shell'],commandOptions);
     signal.throwIfAborted();
     const core=path.join(options.extensionRoot,'node_modules/playwright-core/lib/coreBundle.js');
     const pkg=path.join(options.extensionRoot,'node_modules/playwright-core/package.json');
-    const query=`const {registry}=require(${JSON.stringify(core)}).registry;process.stdout.write(JSON.stringify({headlessShell:registry.findExecutable('chromium-headless-shell').executablePath(),playwrightVersion:require(${JSON.stringify(pkg)}).version}));`;
+    const query=`const {registry}=require(${JSON.stringify(core)}).registry;process.stdout.write(JSON.stringify({executable:registry.findExecutable(${JSON.stringify(headless?'chromium-headless-shell':'chromium')}).executablePath(),playwrightVersion:require(${JSON.stringify(pkg)}).version}));`;
     const answer=await command([options.nodePath,'-e',query],commandOptions);
-    const found=JSON.parse(answer.stdout) as {headlessShell?:unknown;playwrightVersion?:unknown};
-    if(found.playwrightVersion!==version||typeof found.headlessShell!=='string')throw new Error('Browser installation version/path mismatch');
-    const rel=path.relative(stage,found.headlessShell).split(path.sep).join('/');
-    if(!safeRelative(rel)||!await within(stage,found.headlessShell)||!await executable(found.headlessShell,true))throw new Error('Browser executable is missing or escapes its cache');
+    const found=JSON.parse(answer.stdout) as {executable?:unknown;playwrightVersion?:unknown};
+    if(found.playwrightVersion!==version||typeof found.executable!=='string')throw new Error('Browser installation version/path mismatch');
+    const rel=path.relative(stage,found.executable).split(path.sep).join('/');
+    if(!safeRelative(rel)||!await within(stage,found.executable)||!await executable(found.executable,true))throw new Error('Browser executable is missing or escapes its cache');
     await fs.rm(path.join(stage,'.links'),{recursive:true,force:true});
     await fs.writeFile(path.join(stage,'ready.json'),JSON.stringify({schemaVersion:1,version,target,executable:rel}),{mode:0o600});
     signal.throwIfAborted();
@@ -145,7 +153,7 @@ interface Flight {promise:Promise<BrowserRuntime>;controller:AbortController;use
 const flights=new Map<string,Flight>();
 export function prepareBrowser(options:BrowserOptions):Promise<BrowserRuntime>{
   if(options.signal?.aborted)return Promise.reject(options.signal.reason??new Error('Browser setup cancelled'));
-  const key=JSON.stringify([options.extensionRoot,options.nodePath,options.storageDir,options.playwrightVersion,options.platform??process.platform,options.arch??process.arch,options.probePaths??null,options.env??null]);
+  const key=JSON.stringify([options.extensionRoot,options.nodePath,options.storageDir,options.playwrightVersion,options.headless!==false,options.platform??process.platform,options.arch??process.arch,options.probePaths??null,options.env??null]);
   let entry=flights.get(key);
   // A flight whose controller was aborted by its last leaving subscriber is dead: never hand it
   // to a fresh caller, which would inherit a cancellation it never asked for. The outgoing

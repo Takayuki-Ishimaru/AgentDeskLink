@@ -33,11 +33,11 @@ test('missing target, malformed index, traversal names and escaping runtime dire
   try{fs.symlinkSync(path.join(f.root,'outside'),path.join(f.rt,'linux-x64'),'junction');}catch(e){if(e.code==='EPERM'&&process.platform==='win32'){t.skip('Windows symlink privilege unavailable');return;}throw e;}
   await assert.rejects(resolveRuntime(opts),/escape|outside|ランタイム外/i);
 });
-test('universal update asset is preferred on supported hosts and legacy target assets remain compatible',async()=>{
+test('smaller native update assets are preferred with a universal fallback',async()=>{
   const {findGitHubUpdate}=await import('../../dist/src/extension/update-source.js');const base='https://github.com/Takayuki-Ishimaru/AgentDeskLink';const sha='a'.repeat(64);
   const asset=name=>({name,state:'uploaded',digest:'sha256:'+sha,browser_download_url:base+'/releases/download/v0.1.3/'+name});
   const release={tag_name:'v0.1.3',draft:false,prerelease:true,assets:[asset('agentdesklink-darwin-arm64-0.1.3.vsix'),asset('agentdesklink-0.1.3.vsix')]};
-  for(const target of targets){const [p,a]=target.split('-');assert.equal(findGitHubUpdate([release],p,a).url,base+'/releases/download/v0.1.3/agentdesklink-0.1.3.vsix');}
+  for(const target of targets){const [p,a]=target.split('-');assert.equal(findGitHubUpdate([release],p,a).url,base+'/releases/download/v0.1.3/'+(target==='darwin-arm64'?'agentdesklink-darwin-arm64-0.1.3.vsix':'agentdesklink-0.1.3.vsix'));}
   assert.equal(findGitHubUpdate([{...release,assets:[asset('agentdesklink-0.1.3.vsix')]}],'linux','arm64'),undefined);
   assert.equal(findGitHubUpdate([{...release,assets:[asset('agentdesklink-darwin-arm64-0.1.3.vsix')]}],'darwin','arm64').sha256,sha);
   assert.equal(findGitHubUpdate([{...release,assets:[{...asset('agentdesklink-0.1.3.vsix'),digest:'bad'}]}],'linux','x64'),undefined);

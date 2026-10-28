@@ -1,5 +1,6 @@
 import {parsePolicy} from './policy.js';
 import {AdlError,type PolicyConfig} from './types.js';
+import {dirname,resolve} from 'node:path';
 
 function object(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -7,27 +8,32 @@ function object(value: unknown): value is Record<string, unknown> {
 
 // The host supplies an installed helper; the policy still supplies every permission.
 // Standalone launches retain the existing requirement for an explicit helperPath.
-export function parseStartupPolicy(input: unknown, helperPath?: string, platform: string = process.platform): PolicyConfig {
+export function parseStartupPolicy(input: unknown, helperPath?: string, platform: string = process.platform, configPath?: string): PolicyConfig {
   const key = platform === 'darwin' ? 'macos' : platform === 'win32' ? 'windows' : undefined;
+  let source=input;
   if (helperPath && key && object(input) && object(input[key]) && !Object.hasOwn(input[key], 'helperPath')) {
-    return parsePolicy({...input, [key]: {...input[key], helperPath}});
+    source={...input, [key]: {...input[key], helperPath}};
   }
-  return parsePolicy(input);
+  const policy=parsePolicy(source);
+  if(configPath&&policy.auditPath)policy.auditPath=resolve(dirname(resolve(configPath)),policy.auditPath);
+  return policy;
 }
 
 // Extension-managed grants. Every field defaults to deny; enabling MCP grants nothing.
+export type OperationMode = 'read_only' | 'standard' | 'ask';
 export interface ExtensionPermissions {
   browserOrigins: string[];
   desktopAppId: string;
   desktopAppPath: string;
   allowAllOperations: boolean;
+  operationMode: OperationMode;
   allowPhysicalInput: boolean;
   allowUnredactedImages: boolean;
   allowLoopback: boolean;
   allowPrivateNetwork: boolean;
 }
 
-const GRANT_KEYS = ['browserOrigins', 'desktopAppId', 'desktopAppPath', 'allowAllOperations', 'allowPhysicalInput',
+const GRANT_KEYS = ['browserOrigins', 'desktopAppId', 'desktopAppPath', 'allowAllOperations', 'operationMode', 'allowPhysicalInput',
   'allowUnredactedImages', 'allowLoopback', 'allowPrivateNetwork'] as const;
 
 const MAX_ORIGINS = 64;
@@ -87,6 +93,8 @@ export function normalizePermissions(value: unknown): ExtensionPermissions {
   }
   const appId = text('desktopAppId', 128);
   const appPath = text('desktopAppPath', 4096);
+  const rawMode=p.operationMode??'read_only';
+  if(!['read_only','standard','ask'].includes(String(rawMode)))invalidGrant('operationMode','read_only, standard, or ask');
   if (appPath !== '' && !isAbsolutePath(appPath)) invalidGrant('desktopAppPath', 'an absolute application path / アプリの絶対パス');
   if (appId !== '' && !isAbsolutePath(appPath)) invalidGrant('desktopAppPath', 'an absolute path paired with desktopAppId / desktopAppIdに対応するアプリの絶対パス');
   return {
@@ -95,6 +103,7 @@ export function normalizePermissions(value: unknown): ExtensionPermissions {
     desktopAppId: appId === '*' ? '' : appId,
     desktopAppPath: appPath,
     allowAllOperations: flag('allowAllOperations'),
+    operationMode: rawMode as ExtensionPermissions['operationMode'],
     allowPhysicalInput: flag('allowPhysicalInput'),
     allowUnredactedImages: flag('allowUnredactedImages'),
     allowLoopback: flag('allowLoopback'),
@@ -102,7 +111,7 @@ export function normalizePermissions(value: unknown): ExtensionPermissions {
   };
 }
 
-const DENY_ALL: ExtensionPermissions = {browserOrigins: [], desktopAppId: '', desktopAppPath: '', allowAllOperations: false,
+const DENY_ALL: ExtensionPermissions = {browserOrigins: [], desktopAppId: '', desktopAppPath: '', allowAllOperations: false,operationMode:'read_only',
   allowPhysicalInput: false, allowUnredactedImages: false, allowLoopback: false, allowPrivateNetwork: false};
 
 // Decodes the MCP environment. Missing, oversized or malformed input denies everything.
@@ -114,10 +123,50 @@ export function parsePermissionsEnv(value: string | undefined): ExtensionPermiss
   try { return normalizePermissions(decoded); } catch { return {...DENY_ALL,browserOrigins:[]}; }
 }
 
+// Operational settings are passed separately from permission grants so adding
+// headful/proxy options never changes the permission schema or widens access.
+export interface ExtensionRuntimeSettings { sessionTtlMs: number; browserHeadless: boolean; browserProxyServer: string }
+const DEFAULT_RUNTIME_SETTINGS: ExtensionRuntimeSettings = { sessionTtlMs: 900_000, browserHeadless: true, browserProxyServer: '' };
+export function normalizeRuntimeSettings(value: unknown): ExtensionRuntimeSettings {
+  if (!object(value) || Object.keys(value).some(key => !['sessionTtlMs', 'browserHeadless', 'browserProxyServer'].includes(key))) throw new AdlError('E_INVALID_ARGUMENT');
+  const sessionTtlMs = value.sessionTtlMs ?? DEFAULT_RUNTIME_SETTINGS.sessionTtlMs;
+  if (typeof sessionTtlMs !== 'number' || !Number.isSafeInteger(sessionTtlMs) || sessionTtlMs < 1_000 || sessionTtlMs > 3_600_000) {
+    throw new AdlError('E_INVALID_ARGUMENT');
+  }
+  const browserHeadless=value.browserHeadless??DEFAULT_RUNTIME_SETTINGS.browserHeadless;
+  if(typeof browserHeadless!=='boolean')throw new AdlError('E_INVALID_ARGUMENT');
+  const rawProxy=value.browserProxyServer??DEFAULT_RUNTIME_SETTINGS.browserProxyServer;
+  if(typeof rawProxy!=='string'||rawProxy.length>2_048||rawProxy.includes('\0'))throw new AdlError('E_INVALID_ARGUMENT');
+  let browserProxyServer='';
+  if(rawProxy!==''){
+    let proxy:URL;try{proxy=new URL(rawProxy);}catch{throw new AdlError('E_INVALID_ARGUMENT');}
+    if(!['http:','https:'].includes(proxy.protocol)||!proxy.hostname||proxy.username||proxy.password||proxy.pathname!=='/'||proxy.search||proxy.hash||/[?#]/.test(rawProxy))throw new AdlError('E_INVALID_ARGUMENT');
+    browserProxyServer=proxy.origin;
+  }
+  return { sessionTtlMs, browserHeadless, browserProxyServer };
+}
+export function runtimeSettingsFromIdleMinutes(minutes: unknown): ExtensionRuntimeSettings {
+  if (typeof minutes !== 'number' || !Number.isSafeInteger(minutes) || minutes < 1 || minutes > 60) throw new AdlError('E_INVALID_ARGUMENT');
+  return normalizeRuntimeSettings({ sessionTtlMs: minutes * 60_000 });
+}
+export function parseRuntimeSettingsEnv(value: string | undefined): ExtensionRuntimeSettings {
+  if (value === undefined || value === '') return { ...DEFAULT_RUNTIME_SETTINGS };
+  if (Buffer.byteLength(value, 'utf8') > 4_096) throw new AdlError('E_RESOURCE_LIMIT');
+  let decoded: unknown;
+  try { decoded = JSON.parse(value); } catch { throw new AdlError('E_INVALID_ARGUMENT'); }
+  return normalizeRuntimeSettings(decoded);
+}
+export function applyRuntimeSettings(policy: PolicyConfig, settings: unknown): PolicyConfig {
+  return { ...policy, ...normalizeRuntimeSettings(settings) };
+}
+export function runtimeSettingsEnvJson(settings: unknown): string {
+  return JSON.stringify(normalizeRuntimeSettings(settings));
+}
+
 // Only extension-managed launches opt into this profile. Standalone CLI policy stays explicit.
 // No grants means default deny. restrictTargets keeps origin and application checks in force even
 // when allowAllOperations is granted, so operations never widen the target or network surface.
-export function extensionPolicy(helperPath?: string, platform: string = process.platform, permissions?: unknown): PolicyConfig {
+export function extensionPolicy(helperPath?: string, platform: string = process.platform, permissions?: unknown, runtimeSettings?: unknown): PolicyConfig {
   const grants = normalizePermissions(permissions ?? {});
   const hasApp = grants.desktopAppId !== '' && grants.desktopAppPath !== '' && isAbsolutePath(helperPath ?? '');
   // Physical input needs a valid application plus the desktop visual opt-in, which is only
@@ -136,17 +185,19 @@ export function extensionPolicy(helperPath?: string, platform: string = process.
     visual: {enabled: true, maskSelectors: []},
     gestures: {enabled: true, surfaces: [{id: 'page', selector: 'body', kinds: ['drag' as const, 'swipe' as const]}]},
   }));
-  return parsePolicy({
+  const policy=parsePolicy({
     restrictTargets: true,
     allowAllOperations: grants.allowAllOperations,
+    operationMode: grants.operationMode,
     allowedOrigins: grants.browserOrigins,
     allowLoopback: grants.allowLoopback,
     allowPrivateNetwork: grants.allowPrivateNetwork,
     browserTargets: targets,
     ...(desktop && platform === 'darwin' ? {macos: desktop} : desktop && platform === 'win32' ? {windows: desktop} : {}),
   });
+  return runtimeSettings===undefined?policy:applyRuntimeSettings(policy,runtimeSettings);
 }
-export interface EffectivePermissions extends Omit<ExtensionPermissions, 'desktopAppPath'> { reasons: string[] }
+export interface EffectivePermissions extends Omit<ExtensionPermissions, 'desktopAppPath'|'operationMode'> { operationMode:OperationMode|'all'; reasons: string[] }
 
 // Derive these values from the same policy used by the server.
 export function effectivePermissions(permissions: unknown, helperPath?: string, platform: string = process.platform): EffectivePermissions {
@@ -165,6 +216,7 @@ export function effectivePermissions(permissions: unknown, helperPath?: string, 
   return {
     browserOrigins: policy.allowedOrigins ?? [], desktopAppId: native?.appId ?? '',
     allowAllOperations: policy.allowAllOperations === true,
+    operationMode:policy.allowAllOperations===true?'all':policy.operationMode??grants.operationMode,
     allowPhysicalInput: native?.interactive?.enabled === true,
     allowUnredactedImages: native?.visual?.enabled === true,
     allowLoopback: policy.allowLoopback === true, allowPrivateNetwork: policy.allowPrivateNetwork === true,

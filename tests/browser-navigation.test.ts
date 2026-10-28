@@ -113,7 +113,7 @@ test('cross-origin link click denies the next observation and closes the session
   } finally {await f.close();}
 });
 
-test('cancellation during a navigating click closes the session permanently', {timeout: 30000}, async () => {
+test('cancellation before a navigating click dispatch preserves the session', {timeout: 30000}, async () => {
   const f = await fixture();
   try {
     const s = await f.adapter.open(f.target, 'strict_isolated', sig());
@@ -121,8 +121,9 @@ test('cancellation during a navigating click closes the session permanently', {t
     const c = new AbortController();
     const p = s.act({action: 'click', element_id: byName(a, 'Next').id}, c.signal);
     c.abort();
-    await assert.rejects(p);
-    await assert.rejects(s.snapshot(), {code: 'E_TARGET_NOT_FOUND'});
+    await assert.rejects(p,(error:AdlError)=>error.code==='E_CANCELLED'&&!error.mayHaveExecuted);
+    assert.ok((await s.snapshot()).elements.some(e=>e.name==='Next'));
+    assert.equal(f.nextRequests(),0);
     await s.close();
   } finally {await f.close();}
 });

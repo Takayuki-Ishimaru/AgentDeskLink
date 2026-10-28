@@ -48,12 +48,44 @@ test('TOML retains datetime types, quoted tables, arrays and multiline string va
  const value=parse(fs.readFileSync(c.configPath,'utf8'));assert.deepEqual(value.stamp,parse(original).stamp);assert.equal(value.note,'hello\nworld');assert.deepEqual(value['quoted.table'].items,[1,2]);assert.equal(value.mcp_servers.other.command,'keep');
  assert.equal(f.configureClient(c,registration,false).status,'disabled');assert.equal(parse(fs.readFileSync(c.configPath,'utf8')).mcp_servers.agentdesklink,undefined);
 });
+test('Codex edits only its TOML table, preserves CRLF and quoted/special keys, and backs up each change',async()=>{
+ const f=await setup();
+ const reg={command:'/old',args:['old']};
+ const original='# keep heading\r\nroot = "keep # [text]"\r\nnote = """line one\r\nescaped \\""" marker\r\n[mcp_servers.agentdesklink]\r\nline three"""\r\n["quoted.table"]\r\n"key.with.dot" = "keep"\r\n[mcp_servers]\r\n"other.server" = { command = "leave", args = ["x"] }\r\n[mcp_servers."agentdesklink"]\r\ncommand = "/old" # managed command\r\nargs = ["old"]\r\ndisabled = true\r\n[mcp_servers."agentdesklink".policy]\r\nmode = "keep?"\r\n[[models]]\r\nid = "first"\r\n[[models]]\r\nid = "second"\r\n[other]\r\n# untouched comment\r\nvalue = 3\r\n';
+ const c=f.put('codex',original);
+ assert.equal(f.configureClient(c,reg,true).status,'enabled');
+ let updated=fs.readFileSync(c.configPath,'utf8');const {parse}=await import('smol-toml');
+ const expectedEnabled=parse(original);expectedEnabled.mcp_servers.agentdesklink.disabled=false;
+ assert.deepEqual(parse(updated),expectedEnabled,'enabling changes only the managed table values');
+ assert.equal(parse(updated).root,'keep # [text]');assert.match(parse(updated).note,/\[mcp_servers\.agentdesklink\]/);assert.equal(parse(updated)['quoted.table']['key.with.dot'],'keep');
+ assert.deepEqual(parse(updated).models.map(row=>row.id),['first','second']);
+ assert.equal(parse(updated).mcp_servers['other.server'].command,'leave');assert.equal(parse(updated).other.value,3);
+ assert.deepEqual(parse(updated).mcp_servers.agentdesklink.args,reg.args);assert.equal(parse(updated).mcp_servers.agentdesklink.policy.mode,'keep?');
+ assert.ok(updated.includes('# keep heading\r\n'));assert.ok(updated.includes('# untouched comment\r\n'));assert.ok(!updated.includes('\n') || updated.replace(/\r\n/g,'').indexOf('\n')===-1,'line endings remain CRLF');
+ let backups=fs.readdirSync(path.dirname(c.configPath)).filter(name=>name.startsWith('config.toml.agentdesklink.bak-'));
+ assert.equal(backups.length,1);assert.equal(fs.readFileSync(path.join(path.dirname(c.configPath),backups[0]),'utf8'),original);
+ assert.equal(f.configureClient(c,reg,false).status,'disabled');updated=fs.readFileSync(c.configPath,'utf8');
+ const expectedDisabled=parse(original);delete expectedDisabled.mcp_servers.agentdesklink;
+ assert.deepEqual(parse(updated),expectedDisabled,'disabling removes only the managed table');
+ assert.equal(parse(updated).mcp_servers.agentdesklink,undefined);assert.equal(parse(updated).mcp_servers['other.server'].command,'leave');assert.deepEqual(parse(updated).models.map(row=>row.id),['first','second']);
+ assert.ok(updated.includes('# untouched comment\r\n'));backups=fs.readdirSync(path.dirname(c.configPath)).filter(name=>name.startsWith('config.toml.agentdesklink.bak-'));
+ assert.equal(backups.length,2);assert.ok(backups.some(name=>fs.readFileSync(path.join(path.dirname(c.configPath),name),'utf8').includes('[mcp_servers."agentdesklink"]')));
+});
 test('foreign names, malformed JSON, duplicate server names, symlinks and held locks preserve bytes',async()=>{
  const f=await setup();for(const body of ['{"mcpServers":{"agentdesklink":{"command":"foreign"}}}','{"mcpServers":[]}','[1]','{bad','{"mcpServers":{},"mcpServers":{}}','{"mcpServers":{"agentdesklink":{},"agentdesklink":{}}}']){
   const c=f.put('cursor',body);assert.ok(['conflict','error'].includes(f.configureClient(c,registration,true).status));assert.equal(fs.readFileSync(c.configPath,'utf8'),body);
  }
  const c=f.put('cursor','{}');const lock=c.configPath+'.agentdesklink.lock';fs.writeFileSync(lock,'held');const start=Date.now();assert.equal(f.configureClient(c,registration,true).status,'error');assert.ok(Date.now()-start<250,'lock refusal must not block the extension host');assert.equal(fs.readFileSync(c.configPath,'utf8'),'{}');
  fs.unlinkSync(lock);fs.unlinkSync(c.configPath);const target=path.join(f.home,'target.json');fs.writeFileSync(target,'{}');fs.symlinkSync(target,c.configPath);assert.equal(f.configureClient(c,registration,true).status,'error');assert.equal(fs.readFileSync(target,'utf8'),'{}');
+});
+
+test('Codex config stays intact if creating its backup fails',async()=>{
+ const f=await setup();const original='[mcp_servers.other]\r\ncommand="keep"\r\n';const c=f.put('codex',original);
+ const copy=fs.copyFileSync;const {syncBuiltinESMExports}=require('node:module');
+ fs.copyFileSync=function(){throw new Error('injected backup failure');};syncBuiltinESMExports();
+ try {const result=f.configureClient(c,registration,true);assert.equal(result.status,'error');assert.equal(fs.readFileSync(c.configPath,'utf8'),original);}
+ finally {fs.copyFileSync=copy;syncBuiltinESMExports();}
+ assert.equal(fs.readdirSync(path.dirname(c.configPath)).some(name=>name.startsWith('config.toml.agentdesklink.bak-')),false);
 });
 
 test('bulk enable restores an owned server disabled inside a client without discarding tool policy',async()=>{

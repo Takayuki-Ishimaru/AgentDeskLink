@@ -3,6 +3,7 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { randomUUID } from 'node:crypto';
 import * as jsonc from 'jsonc-parser';
 import { parse as parseToml, stringify as stringifyToml } from 'smol-toml';
 
@@ -345,25 +346,113 @@ function editJson(text: string, mapName: string, value: unknown): string {
   return jsonc.applyEdits(text, jsonc.modify(text, [mapName, AGENT_NAME], value, MODIFY_OPTIONS));
 }
 
-// Mutates the parsed TOML tree in place: a JSON roundtrip would turn TomlDate
-// and other typed values into plain strings.
+// Splice only the managed table block so comments, formatting, datetime types,
+// and every other user's TOML text remain untouched.
 function editToml(loaded: Loaded, mapName: string, value: unknown): string {
-  let map = loaded.root[mapName];
-  if (map === undefined) {
-    if (value === undefined) return loaded.text;
-    map = {};
-    loaded.root[mapName] = map;
+  const eol = loaded.text.includes('\r\n') ? '\r\n' : '\n';
+  const sections = tomlSections(loaded.text, mapName, AGENT_NAME);
+  if (sections.error) throw new Error(sections.error);
+  const map = loaded.root[mapName] as Record<string, unknown> | undefined;
+  const existing = map?.[AGENT_NAME];
+  if (existing !== undefined && sections.ranges.length === 0) {
+    // Inline tables and dotted assignments cannot be safely removed with a
+    // section splice. Leave them byte-for-byte intact rather than reserializing
+    // user configuration and losing comments or formatting.
+    throw new Error('refusing: AgentDeskLink TOML entry is not a table section');
   }
-  if (map === null || typeof map !== 'object' || Array.isArray(map)) return loaded.text;
-  const target = map as Record<string, unknown>;
-  if (value === undefined) delete target[AGENT_NAME];
-  else target[AGENT_NAME] = value;
-  return stringifyToml(loaded.root);
+  let text = loaded.text;
+  for (const range of [...sections.ranges].reverse()) text = text.slice(0, range.start) + text.slice(range.end);
+  if (value === undefined) return text;
+
+  const encoded = stringifyToml({ [mapName]: { [AGENT_NAME]: value } }).replace(/\n/g, eol);
+  const block = encoded.endsWith(eol) ? encoded : encoded + eol;
+  const separator = text.length === 0 || text.endsWith('\n') ? '' : eol;
+  return text + separator + block;
+}
+
+interface TomlRange { start: number; end: number }
+
+// Find table headers without mistaking header-looking lines inside TOML
+// multiline strings for real sections. smol-toml decodes quoted/dotted keys.
+function tomlSections(text: string, mapName: string, entryName: string): { ranges: TomlRange[]; error?: string } {
+  const lines: { start: number; end: number; body: string }[] = [];
+  for (let start = 0; start < text.length;) {
+    const nl = text.indexOf('\n', start);
+    const end = nl < 0 ? text.length : nl + 1;
+    lines.push({ start, end, body: text.slice(start, nl < 0 ? end : nl).replace(/\r$/, '') });
+    start = end;
+  }
+  let multiline: '"""' | "'''" | null = null;
+  const headers: { start: number; path: string[] }[] = [];
+  for (const line of lines) {
+    const trimmed = line.body.trimStart();
+    if (!multiline && (trimmed.startsWith('['))) {
+      const header = tomlHeader(trimmed);
+      if (header) {
+        try {
+          const table = parseToml(`${header.raw}\n`) as Record<string, unknown>;
+          const decoded: string[] = [];
+          let value: unknown = table;
+          while (value && typeof value === 'object' && !Array.isArray(value)) {
+            const keys = Object.keys(value as Record<string, unknown>);
+            if (keys.length !== 1) break;
+            const key = keys[0]!; decoded.push(key); value = (value as Record<string, unknown>)[key];
+          }
+          headers.push({ start: line.start, path: decoded });
+        } catch { /* valid config was already parsed; ignore non-header lines */ }
+      }
+    }
+    // Track multiline strings and ignore comments. TOML strings cannot span
+    // physical lines except via the triple-quote forms.
+    let quote: '"' | "'" | null = null;
+    for (let i = 0; i < line.body.length; i++) {
+      const c = line.body[i]!;
+      if (multiline) {
+        if (line.body.startsWith(multiline, i)) {
+          let slashes = 0;
+          for (let n = i - 1; n >= 0 && line.body[n] === '\\'; n--) slashes++;
+          if (multiline === "'''" || slashes % 2 === 0) multiline = null;
+          i += 2;
+        }
+        continue;
+      }
+      if (quote === '"') {
+        if (c === '\\') { i++; continue; }
+        if (c === '"') quote = null;
+        continue;
+      }
+      if (quote === "'") { if (c === "'") quote = null; continue; }
+      if (c === '#') break;
+      if ((c === '"' || c === "'") && line.body.startsWith(c.repeat(3), i)) {
+        multiline = c.repeat(3) as '"""' | "'''"; i += 2; continue;
+      }
+      if (c === '"' || c === "'") quote = c;
+    }
+  }
+  const matched = headers.map((header, index) => ({ header, end: headers[index + 1]?.start ?? text.length }))
+    .filter(({ header }) => header.path[0] === mapName && header.path[1] === entryName);
+  return { ranges: matched.map(({ header, end }) => ({ start: header.start, end })) };
+}
+
+function tomlHeader(line: string): { raw: string } | null {
+  if (!line.startsWith('[')) return null;
+  const arrayTable = line.startsWith('[[');
+  const closing = arrayTable ? ']]' : ']';
+  let quote: '"' | "'" | null = null;
+  let escaped = false;
+  for (let i = arrayTable ? 2 : 1; i < line.length; i++) {
+    const c = line[i]!;
+    if (quote === '"') { if (escaped) escaped = false; else if (c === '\\') escaped = true; else if (c === '"') quote = null; continue; }
+    if (quote === "'") { if (c === "'") quote = null; continue; }
+    if (c === '"' || c === "'") { quote = c; continue; }
+    if (line.startsWith(closing, i)) return /^\s*(?:#.*)?$/.test(line.slice(i + closing.length)) ? { raw: line.slice(0, i + closing.length) } : null;
+  }
+  return null;
 }
 
 // Exclusive lockfile, refused immediately when held (never blocks the host),
 // then a byte-for-byte recheck of the original and a revalidated atomic rename.
-function writeConfig(configPath: string, text: string, mode: number, originalText: string | null): string | null {
+function writeConfig(configPath: string, text: string, mode: number, originalText: string | null, backup = false): string | null {
   const target = path.resolve(configPath);
   const dir = path.dirname(target);
   try { fs.mkdirSync(dir, { recursive: true, mode: 0o700 }); } catch { return 'cannot create the config directory' }
@@ -383,6 +472,20 @@ function writeConfig(configPath: string, text: string, mode: number, originalTex
     let current: string | null;
     try { current = fs.readFileSync(target, 'utf8'); } catch { current = null; }
     if (current !== originalText) return 'refusing: config changed since it was read';
+    if (backup && originalText !== null) {
+      const backupPath = `${target}.agentdesklink.bak-${Date.now()}-${randomUUID()}`;
+      try {
+        fs.copyFileSync(target, backupPath, fs.constants.COPYFILE_EXCL);
+        fs.chmodSync(backupPath, mode);
+        if (fs.readFileSync(backupPath, 'utf8') !== originalText) {
+          fs.rmSync(backupPath, { force: true });
+          return 'refusing: config changed while creating backup';
+        }
+      } catch {
+        try { fs.rmSync(backupPath, { force: true }); } catch { /* ignore cleanup */ }
+        return 'cannot create a backup of the config file';
+      }
+    }
     const fd = fs.openSync(tmpPath, 'wx', 0o600);
     try { fs.writeFileSync(fd, text, 'utf8'); } finally { fs.closeSync(fd); }
     try { fs.chmodSync(tmpPath, mode); } catch { /* keep owner-only default */ }
@@ -457,7 +560,7 @@ export function configureClient(client: ClientInfo, registration: Registration, 
   if (text === loaded.text) {
     return done(t, configPath, enabled ? 'enabled' : 'disabled', 'config already in the requested state');
   }
-  const err = writeConfig(configPath, text, loaded.mode, loaded.existed ? loaded.text : null);
+  const err = writeConfig(configPath, text, loaded.mode, loaded.existed ? loaded.text : null, t.format === 'toml');
   if (err) return fail(t, configPath, err);
   return done(t, configPath, enabled ? 'enabled' : 'disabled',
     enabled ? `enabled AgentDeskLink MCP entry in ${configPath}` : `removed AgentDeskLink MCP entry from ${configPath}`);

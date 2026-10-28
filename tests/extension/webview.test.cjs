@@ -28,12 +28,39 @@ function panel() {
 test('permission summary separates target, physical and image grants and displays values as text',()=>{
   const p=panel();
   p.state({permissions:{browserOrigins:[],desktopAppId:'',allowAllOperations:false,allowPhysicalInput:false,allowUnredactedImages:false,allowLoopback:false,allowPrivateNetwork:false}});
-  assert.equal(p.get('permissions').children.length,7);assert.match(p.get('permissions').textContent,/なし \/ none/);assert.match(p.get('permissions-hint').textContent,/grants nothing/);
+  assert.equal(p.get('permissions').children.length,8);assert.match(p.get('permissions').textContent,/なし \/ none/);assert.match(p.get('permissions-hint').textContent,/grants nothing/);
   const value='<img src=x onerror=alert(1)>';
   p.state({permissions:{browserOrigins:[value],desktopAppId:'test.app',allowAllOperations:true,allowPhysicalInput:false,allowUnredactedImages:true,allowLoopback:false,allowPrivateNetwork:false}});
   const rows=p.get('permissions').children;
   assert.equal(rows[0].children[1].textContent,value);assert.equal(rows[0].children[1].innerHTML,undefined);
   assert.match(rows[3].children[1].textContent,/off/);assert.match(rows[4].children[1].textContent,/on/);
+});
+
+test('browser origins can be added and removed using text-only rows',async()=>{
+  const p=panel();p.state({trusted:true,hasFolder:true,settings:{browserOrigins:['https://example.com']}});
+  const list=p.get('origins-list');assert.equal(list.children.length,1);
+  assert.equal(list.children[0].children[0].textContent,'https://example.com');
+  assert.equal(list.children[0].children[0].innerHTML,undefined);
+  await list.children[0].children[1].trigger('click');
+  assert.equal(p.messages.at(-1).type,'setBrowserOrigins');assert.deepEqual(Array.from(p.messages.at(-1).origins),[]);
+  p.get('origin-input').value='https://second.example';await p.get('origin-add').trigger('click');
+  assert.equal(p.messages.at(-1).type,'setBrowserOrigins');assert.deepEqual(Array.from(p.messages.at(-1).origins),['https://example.com','https://second.example']);
+});
+
+test('session idle timeout control sends whole minutes and stays locked without trust',async()=>{
+  const p=panel();p.state({trusted:true,hasFolder:true,settings:{sessionIdleMinutes:15}});
+  const input=p.get('session-idle-minutes');assert.equal(input.value,'15');input.value='30';await input.trigger('change');
+  assert.equal(p.messages.at(-1).type,'setSessionIdleMinutes');assert.equal(p.messages.at(-1).minutes,30);
+  p.state({trusted:false,hasFolder:true,settings:{sessionIdleMinutes:15}});assert.equal(input.disabled,true);
+});
+
+test('headless and public proxy controls keep their runtime values in the webview only',async()=>{
+  const p=panel();p.state({trusted:true,hasFolder:true,settings:{browserHeadless:true,browserProxyServer:''}});
+  const headless=p.get('browser-headless');headless.checked=false;await headless.trigger('change');
+  assert.equal(p.messages.at(-1).type,'setBrowserHeadless');assert.equal(p.messages.at(-1).enabled,false);
+  const proxy=p.get('browser-proxy-server');proxy.value='https://proxy.example:8443';await proxy.trigger('change');
+  assert.equal(p.messages.at(-1).type,'setBrowserProxyServer');assert.equal(p.messages.at(-1).proxy,'https://proxy.example:8443');
+  p.state({trusted:false,hasFolder:true,settings:{browserHeadless:true,browserProxyServer:''}});assert.equal(headless.disabled,true);assert.equal(proxy.disabled,true);
 });
 
 test('webview synchronizes saved toggles and locks only workspace settings without trust', async () => {

@@ -7,11 +7,12 @@ import { assembleUniversalVsix, UNIVERSAL_TARGETS } from './universal-vsix.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const pkg = JSON.parse(await readFile(path.join(root, 'package.json'), 'utf8'));
-let component = false, directory, help = false;
+let component = false, universal=false, directory, help = false;
 const args = process.argv.slice(2);
 for (let i = 0; i < args.length; i++) {
   const arg = args[i];
   if (arg === '--component') component = true;
+  else if(arg==='--universal')universal=true;
   else if (arg === '--components') {
     directory = args[++i];
     if (!directory || directory.startsWith('--')) throw new Error('--components requires a directory');
@@ -21,10 +22,10 @@ for (let i = 0; i < args.length; i++) {
   } else if (arg === '--help' || arg === '-h') help = true;
   else throw new Error(`Unknown argument: ${arg}`);
 }
-if (component && directory) throw new Error('--component and --components cannot be combined');
+if (component && (directory||universal)) throw new Error('--component and --universal/--components cannot be combined');
 if (help) {
-  console.log('Usage: npm run package:vsix -- [--components DIR]\nCreates one OS-common VSIX from macOS arm64, Windows x64 and Linux x64 components.\nBuild one native intermediate with npm run package:component.');
-} else if (component) {
+  console.log('Usage: npm run package:vsix -- [--universal [--components DIR]]\nBy default creates a smaller VSIX for the current OS/architecture.\n--universal assembles all three OS components; --component remains a compatible alias for the default.');
+} else if (component||!universal&&!directory) {
   const target = `${process.platform}-${process.arch}`;
   await mkdir(path.join(root, 'artifacts'), { recursive: true });
   await prepareRuntime({ root, target });
