@@ -1,0 +1,98 @@
+# AgentDeskLink 0.1.5（ベータ版）
+
+**日本語** | [English](https://github.com/Takayuki-Ishimaru/AgentDeskLink/blob/v0.1.5/release-docs/RELEASE_NOTES_en.md)
+
+AI エージェントから、MCP を通じてローカルのブラウザとデスクトップを操作するベータ版です。利用前に[対応環境と既知の制限](https://github.com/Takayuki-Ishimaru/AgentDeskLink/blob/v0.1.5/release-docs/KNOWN_ISSUES.md)を確認してください。
+
+## 0.1.4 からの主な変更
+
+- **操作の権限段階**を追加しました。読み取り専用（既定）、通常のブラウザ入力・クリックを許す標準、検査可能な重要操作を一度ずつ確認する都度承認から選べます。許可する origin・アプリ、物理入力、無加工のネイティブ画像は引き続き別々に設定します。
+- **ブラウザの個別承認**に対応しました。VS Code の確認画面で対象と操作内容を確認し、承認または拒否できます。承認は対象・入力値・フォーム内容・観測状態に結び付き、変更・失効・緊急停止後の再利用を拒否します。秘密値は確認画面へ渡しません。AI が自分の要求を承認することはできません。
+- 設定パネルから、**ブラウザの許可元、可視／ヘッドレス起動、アイドル期限、プロキシ**を設定できるようにしました。アイドル期限は 1〜60 分、既定は 15 分です。
+- 可視ブラウザで人間に操作を引き継ぐ **`adl_handoff`** を追加しました。都度承認では、現在の origin のサイト処理・フォーム通信を最大 120 秒許す専用確認を経て自動操作を停止し、手動ログイン後に再開できます。
+- 観測応答に **`compact` / `lines` 形式**、操作に **`press` / `back` / `hover` と保持画像からの座標クリック**を追加しました。`adl_sessions` でセッションと期限、`adl_approvals` で承認要求の状態を確認できます。
+- ブラウザ画像で通常の入力欄や checkbox を確認しやすくしました。明示保護領域・既知の秘密形式・iframe・閉じた Shadow DOM のマスクは維持します。座標クリックは最新画像・同じ対象と位置・30 秒以内という条件で検査します。
+- AI クライアントの設定検出を改善しました。環境変数で指定した Codex・Claude Code・Cline の保存先と Cline の新旧保存先に対応します。Codex TOML は管理対象以外のコメントと書式を保持し、変更前の設定をバックアップします。
+- ブラウザの通信制御、プロキシ経由の接続先検査、キャンセル後の状態整理、観測の応答サイズ処理を改善しました。更新機能は、同じリリースに対応 OS・CPU 別の VSIX がある場合はそれを優先し、共通 VSIX も引き続き利用します。
+
+## 導入と更新
+
+VS Code 1.101 以上で、共通パッケージ `agentdesklink-0.1.5.vsix` を「拡張機能: VSIXからのインストール」で開きます。macOS / Apple silicon、Windows x64、Linux x64 で同じ VSIX を利用できます。Node.js と画像処理ライブラリ、macOS/Windows 用 helper を同梱します。インストール後はウィンドウを再読み込みしてください。
+
+0.1.3・0.1.4 からは更新確認・自動更新を利用できます。手動の場合は VSIX と `SHA256SUMS` を取得し、ハッシュを確認してからインストールしてください。0.1.2 以前からは手動インストールが必要です。
+
+**既存の `agentdesklink.allowAllOperations: true` は更新後も優先されます。** 段階的な権限へ切り替えるには、設定パネルで読み取り専用・標準・都度承認を選び直してください。MCP の有効化だけでは対象へのアクセス権限を追加しません。
+
+他の AI クライアントは **AIクライアント → すべて有効** で登録します。選んだワークスペースの権限が共有され、他のプロジェクトからもその範囲を利用できます。更新・権限変更・VS Code の再起動後は、必要に応じて再接続してください。既存の別サーバーや同名の手動登録は保持します。
+
+[インストール手順](https://github.com/Takayuki-Ishimaru/AgentDeskLink/blob/v0.1.5/release-docs/INSTALL.md)・[操作設定と承認](https://github.com/Takayuki-Ishimaru/AgentDeskLink/blob/v0.1.5/release-docs/OPERATIONS.md)・[更新ガイド](https://github.com/Takayuki-Ishimaru/AgentDeskLink/blob/v0.1.5/release-docs/UPDATES.md)を参照してください。
+
+## 利用上の注意
+
+- 個別承認はブラウザの main document にある検査可能な操作が対象です。ネイティブアプリ・iframe・Shadow DOM 内の重要操作への昇格は未対応です。通信の許可は検査済み URL encoded フォーム POST 1 回に限られ、multipart・ファイル・一般的な AJAX/DELETE は対象外です。
+- VS Code に接続できない場合や、許可したネイティブ操作で確認画面自体を操作できる構成では、個別承認を利用できません。
+- 手動引き継ぎの通信許可中は、人間のクリック前にもサイトが送信・変更・削除を行えます。再開・期限終了・緊急停止は、すでに送信した処理を取り消せません。
+- 物理入力と無加工のネイティブ画像は既定で無効です。`interactive_desktop` は実際のマウス・キーボードを使うため、人間の操作と並行して利用しないでください。
+- 画像やテキスト内の未知の秘密情報を完全に検出する保証はありません。取得した情報は接続先の AI ホストへ渡ります。
+- macOS のデスクトップ操作にはアクセシビリティ権限、画像取得には画面収録権限が必要です。Windows の helper は未署名、macOS の helper は ad-hoc 署名です。
+- Linux はブラウザ操作のみです。Ubuntu 24.04 x64 で、Chrome / Chromium に必要な共有ライブラリと OS sandbox が動作する環境が必要です。
+- 拡張機能を削除する前に **すべて無効** で外部クライアントの管理対象登録を解除してください。
+
+## ライセンス
+
+AgentDeskLink は [MIT License](https://github.com/Takayuki-Ishimaru/AgentDeskLink/blob/v0.1.5/LICENSE) で提供します。同梱する第三者ソフトウェアには、それぞれのライセンスが適用されます。
+
+## 配布ファイル / Downloads
+
+- macOS / Apple silicon・Windows x64・Linux x64 共通 / Common VSIX: `agentdesklink-0.1.5.vsix`
+- 日英ドキュメント / Japanese and English guides: `AgentDeskLink-0.1.5-docs.zip`
+- SHA-256: `SHA256SUMS`
+
+Linux は Ubuntu 24.04 x64 のブラウザ操作に対応します。デスクトップ操作には対応していません。
+Linux supports browser operations on Ubuntu 24.04 x64. Desktop control is unavailable on Linux.
+
+---
+
+# AgentDeskLink 0.1.5 (beta)
+
+[日本語](https://github.com/Takayuki-Ishimaru/AgentDeskLink/blob/v0.1.5/release-docs/RELEASE_NOTES_ja.md) | **English**
+
+This beta lets AI agents operate the local browser and desktop over MCP. Read the [supported environments and known limitations](https://github.com/Takayuki-Ishimaru/AgentDeskLink/blob/v0.1.5/release-docs/KNOWN_ISSUES_en.md) before use.
+
+## Changes since 0.1.4
+
+- Added **operation permission tiers**: Read only (default), Standard for ordinary browser inputs and clicks, and Ask each time for inspected consequential operations. Origins/apps, physical input and unredacted native images remain separate grants.
+- Added **one-shot browser approvals** through a VS Code dialog. Review the target and action, then approve or deny. Approval binds the target, exact input, form contents and observed state. Changes, expiry and emergency stop prevent reuse. Secret values are not sent to the dialog, and the AI cannot approve its own request.
+- Added panel settings for **browser origins, visible/headless launch, idle timeout and proxy**. Idle timeout is 1–60 minutes, with a default of 15.
+- Added **`adl_handoff`** to pause automation for manual interaction in a visible browser. Ask each time uses a separate confirmation allowing website scripts and forms on the current origin to send requests for up to 120 seconds, so you can sign in manually and resume.
+- Added **`compact` / `lines` observation formats**, **`press` / `back` / `hover` actions and coordinate clicks from retained images**. Use `adl_sessions` for sessions and deadlines, and `adl_approvals` for approval request status.
+- Browser captures now show ordinary inputs and checkboxes while retaining masks for explicit protected regions, known secret patterns, iframes and closed Shadow DOM. Coordinate clicks require the latest image, unchanged target and geometry, and an image age below 30 seconds.
+- Improved AI-client configuration discovery, including environment-selected locations for Codex, Claude Code and Cline, plus modern and legacy Cline paths. Codex TOML keeps comments and formatting outside the managed section and creates a backup before changes.
+- Improved browser network controls, target checks through proxies, cancellation cleanup and observation response sizing. The updater prefers a matching platform-specific VSIX when available in the same release and continues to support the common VSIX.
+
+## Installation and updates
+
+Use VS Code 1.101 or newer and select “Extensions: Install from VSIX...” to install `agentdesklink-0.1.5.vsix`. The same VSIX supports macOS / Apple silicon, Windows x64 and Linux x64. It bundles Node.js and image-processing libraries plus macOS/Windows helpers. Reload the window after installation.
+
+The updaters in 0.1.3 and 0.1.4 support this release. For manual installation, download the VSIX and `SHA256SUMS`, verify the hash and install. Updating from 0.1.2 or earlier requires manual installation.
+
+**An existing `agentdesklink.allowAllOperations: true` still takes precedence after updating.** To use a permission tier, select Read only, Standard or Ask each time in the panel. Enabling MCP alone grants no target access.
+
+Register other AI clients with **AI Clients → Enable all**. They share the selected workspace's permissions, including from other projects in those clients. Reconnect when needed after updating, changing permissions or restarting VS Code. Other servers and manual entries with the same name are preserved.
+
+See the [installation guide](https://github.com/Takayuki-Ishimaru/AgentDeskLink/blob/v0.1.5/release-docs/INSTALL_en.md), [operation settings and approvals](https://github.com/Takayuki-Ishimaru/AgentDeskLink/blob/v0.1.5/release-docs/OPERATIONS.md) and [update guide](https://github.com/Takayuki-Ishimaru/AgentDeskLink/blob/v0.1.5/release-docs/UPDATES_en.md).
+
+## Usage notes
+
+- One-shot approval covers inspected controls in the browser main document. Native apps, iframe and Shadow DOM controls cannot be escalated. Network permits cover one inspected URL-encoded form POST; multipart, files and generic AJAX/DELETE remain unsupported.
+- Approval is unavailable without a connection to VS Code, or when permitted native operations could operate the approval host itself.
+- During a manual handoff network grant, website scripts may send, change or delete before a human click. Resume, expiry and emergency stop cannot undo requests already dispatched.
+- Physical input and unredacted native images default to off. `interactive_desktop` uses the real mouse and keyboard; do not use it while someone is interacting with the desktop.
+- Unknown secrets in images or text cannot be detected completely. Captured information is passed to the connected AI host.
+- macOS desktop control requires Accessibility permission; capture requires Screen Recording. The Windows helper is unsigned and the macOS helper is ad-hoc signed.
+- Linux supports browser operations only. Ubuntu 24.04 x64 requires the shared libraries needed by Chrome / Chromium and a working OS sandbox.
+- Use **Disable all** to remove managed external-client registrations before uninstalling the extension.
+
+## License
+
+AgentDeskLink is available under the [MIT License](https://github.com/Takayuki-Ishimaru/AgentDeskLink/blob/v0.1.5/LICENSE). Bundled third-party software remains subject to its respective licenses.
