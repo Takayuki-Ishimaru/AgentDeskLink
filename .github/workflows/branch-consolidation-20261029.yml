@@ -1,0 +1,28 @@
+name: Consolidate GitHub branches
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/branch-consolidation-20261029.yml]
+permissions: {}
+concurrency:
+  group: branch-consolidation-20261029
+  cancel-in-progress: false
+jobs:
+  cleanup:
+    if: github.repository == 'Takayuki-Ishimaru/AgentDeskLink' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify branch cleanup guards
+        working-directory: .github/scripts
+        run: python3 -m unittest -v test_cleanup.py
+      - name: Await integration CI and clean integrated refs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 .github/scripts/cleanup.py

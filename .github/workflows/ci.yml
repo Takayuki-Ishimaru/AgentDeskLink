@@ -1,5 +1,8 @@
 name: Beta validation
-on: [push, pull_request, workflow_dispatch]
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
 permissions:
   contents: read
 concurrency:
@@ -56,6 +59,9 @@ jobs:
       # Chromium requires a runner that supports its OS sandbox.
       - run: npm run package:component
       - run: npm run verify:vsix
+      - name: Publisher tests
+        working-directory: .release
+        run: python3 -m unittest -v test_publisher.py test_hardening.py
   vsix-components:
     strategy:
       fail-fast: false
