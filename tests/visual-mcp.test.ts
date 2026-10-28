@@ -14,7 +14,7 @@ for(const mode of ['legacy','modern'] as const)test(`stdio ${mode} transmits PNG
  const config=join(dir,'policy.json');await writeFile(config,JSON.stringify({allowedOrigins:[origin],allowLoopback:true,auditPath:audit,browserTargets:[{id:'fixture',label:'Visual fixture',url:origin,classification:'PUBLIC',visual:{enabled:true}}]}));
  const client=new Client({name:'visual-integration',version:'1.0.0'},{versionNegotiation:{mode:mode==='legacy'?'legacy':{pin:'2026-07-28'}}});
  try{
-  await client.connect(new StdioClientTransport({command:process.execPath,args:['dist/src/server.js','--config',config],cwd:process.cwd(),stderr:'pipe'}));
+  await client.connect(new StdioClientTransport({command:process.execPath,args:['dist/src/server.js','--config',config],cwd:process.cwd(),stderr:'pipe',env:{CHROME_DEVEL_SANDBOX:process.env.CHROME_DEVEL_SANDBOX??''}}));
   const call=async(name:string,args:Record<string,unknown>={})=>client.callTool({name,arguments:args});
   const text=(r:any)=>JSON.parse(r.content[0].text);
   const targets=text(await call('adl_targets'));const session=text(await call('adl_open',{target_id:targets.targets[0].target_id}));
