@@ -54,8 +54,7 @@ class PublicationGuards(Fixture):
     def test_gh_upload_uses_tag_and_never_clobbers(self):
         plan=self.plan();api=p.GhApi(p.REPO);path=Path(plan['assets'][p.VSIX_NAME]['path']);calls=[]
         def get(route):
-            if route.startswith('releases/tags/'):return {'id':1,'draft':True}
-            return {'assets':[{'name':path.name}]}
+            return {'id':1,'draft':True,'assets':[{'name':path.name}]}
         api.get=get
         def run(args,**kwargs):
             calls.append((args,kwargs))
@@ -86,5 +85,13 @@ class PublicationGuards(Fixture):
     def test_timeout_cannot_publish(self):
         with patch.dict(os.environ,{'GH_TOKEN':'test'}),patch('publisher.subprocess.run',side_effect=subprocess.TimeoutExpired(['gh'],1)):
             with self.assertRaises(ValueError):p.GhApi(p.REPO).post('releases',{})
+    def test_draft_hidden_from_tag_route_resumes_by_id(self):
+        plan=self.plan();api=API();self.seed(plan,api);get=api.get
+        def hidden(route):
+            if route=='releases/tags/'+p.TAG:return None
+            return get(route)
+        api.get=hidden;p.publish(plan,api)
+        self.assertFalse(api.release['draft'])
+        self.assertFalse(any(e[0]=='post' and e[1]=='releases' for e in api.events))
 
 if __name__=='__main__':unittest.main()

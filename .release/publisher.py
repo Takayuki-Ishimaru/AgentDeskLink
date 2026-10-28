@@ -338,6 +338,11 @@ def publish(plan: dict, api) -> dict:
         if target.get("type") != "commit" or target.get("sha") != source_sha:
             _fail(f"tag {TAG} exists on an unrelated commit")
     release = api.get(f"releases/tags/{TAG}")
+    if release is None:
+        drafts = [r for r in (api.get("releases?per_page=100") or []) if r.get("tag_name") == TAG]
+        if len(drafts) > 1:
+            _fail("multiple releases exist for the approved tag")
+        release = drafts[0] if drafts else None
     if release is not None:
         # validates tag/body/prerelease and every asset before any mutation,
         # so an unrelated or changed release is never touched
@@ -356,7 +361,7 @@ def publish(plan: dict, api) -> dict:
         )
     release_id = release["id"]
     for name in ASSET_NAMES:
-        current = api.get(f"releases/tags/{TAG}")
+        current = api.get(f"releases/{release_id}")
         _verify_release(current, plan)
         if current.get("draft") is not True:
             _fail("release was published concurrently; refusing further uploads")
@@ -371,14 +376,14 @@ def publish(plan: dict, api) -> dict:
         if not to_upload:
             break
         api.upload(release_id, plan["assets"][to_upload[0]]["path"])
-    final = api.get(f"releases/tags/{TAG}")
+    final = api.get(f"releases/{release_id}")
     _verify_release(final, plan, complete=True)
     for asset in final.get("assets", []):
         if asset.get("state") != "uploaded":
             _fail(f"asset {asset.get('name')!r} not fully uploaded; leaving draft")
     if final.get("draft") is True:
         api.patch(f"releases/{release_id}", {"draft": False, "prerelease": True, "make_latest": "false"})
-    final = api.get(f"releases/tags/{TAG}")
+    final = api.get(f"releases/{release_id}")
     _verify_release(final, plan, complete=True)
     if final.get("draft") is not False:
         _fail("GitHub did not confirm publication")
@@ -440,7 +445,7 @@ class GhApi:
         return self._api("PATCH", route, json_body)
 
     def upload(self, release_id, path):
-        current = self.get(f"releases/tags/{TAG}")
+        current = self.get(f"releases/{release_id}")
         if not current or current.get("id") != release_id or current.get("draft") is not True:
             _fail("upload target is not the expected draft release")
         previous_timeout = self.timeout
