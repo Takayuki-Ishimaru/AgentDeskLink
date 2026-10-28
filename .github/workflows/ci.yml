@@ -1,5 +1,9 @@
 name: Beta validation
-on: [push, pull_request, workflow_dispatch]
+on:
+  push:
+    branches-ignore: [codex/publish-v0.1.5-20261029]
+  pull_request:
+  workflow_dispatch:
 permissions:
   contents: read
 concurrency:
