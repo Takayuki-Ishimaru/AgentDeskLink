@@ -1,0 +1,18 @@
+{
+  "repository": "Takayuki-Ishimaru/AgentDeskLink",
+  "branches": {
+    "codex/publish-v0.1.5-20261029": "9c681ac910e57c104f83c88705bb5c1b465fcddb",
+    "codex/release-v0.1.4-20261026": "2a84ef049e0a1a79139f3e21d407b79d0e030093",
+    "codex/release-v0.1.5-20261029": "bd2e360b2286e31c8569ad677331bb2fe37f6606",
+    "codex/universal-vsix-v0.1.3-20261026": "b9112cf73191416ccc9e0ea09f0fd665ddc683e3",
+    "codex/windows-preflight-v0.1.3-20261026": "29cad82f8a277f078756725a510ac5e80bb25a02"
+  },
+  "tags": {
+    "v0.1.1": "7e45333d59a0dbfccef962afee2889835be776c5",
+    "v0.1.2": "aa0fb317e26d8469a92c7b8195e80252fb3d905f",
+    "v0.1.3": "f6205b72fc0a1ca712c77135eaa42a24db2fabd9",
+    "v0.1.4": "5c8f2fab265a8397e7d511c3615109b8fcac6f32",
+    "v0.1.5": "bd2e360b2286e31c8569ad677331bb2fe37f6606"
+  },
+  "recovery_bundle_sha256": "aac193b442c89aa5dd1221eb05a6048a11248d1a20b2fb6208ec7459f027e372"
+}
