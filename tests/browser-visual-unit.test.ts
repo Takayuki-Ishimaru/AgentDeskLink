@@ -4,19 +4,24 @@ import {errors,type Page} from 'playwright';
 import {captureBrowserImage} from '../src/browser-visual.js';
 const allowed={enabled:true,maskSelectors:['#private']};
 function mock(extra:Record<string,unknown>={}){
- const state={shots:0,geometry:{width:8,height:6,scroll_x:0,scroll_y:10,device_scale_factor:1},options:undefined as any};
- const page={url:()=> 'https://example.com/demo',evaluate:async()=>({...state.geometry}),locator:(selector:string)=>({selector}),screenshot:async(options:unknown)=>{state.shots++;state.options=options;return Buffer.from('PNG');},...extra} as unknown as Page;
+ const state={shots:0,geometry:{width:8,height:6,scroll_x:0,scroll_y:10,device_scale_factor:1},options:undefined as any,dom:'unchanged',scriptDisabled:false};
+ const cdp={send:async(method:string,args:any)=>{if(method==='Emulation.setScriptExecutionDisabled'){state.scriptDisabled=args.value;return {};}if(method==='DOM.getDocument')return {root:{nodeId:1}};if(method==='Page.getFrameTree')return {frameTree:{frame:{id:'main'}}};if(method==='Page.createIsolatedWorld')return {executionContextId:1};if(method==='Runtime.evaluate')return {result:{value:state.dom}};throw new Error('unexpected method');},detach:async()=>{}};
+ const page={url:()=> 'https://example.com/demo',context:()=>({newCDPSession:async()=>cdp,close:async()=>{}}),evaluate:async()=>({...state.geometry}),locator:(selector:string)=>({selector}),screenshot:async(options:unknown)=>{state.shots++;state.options=options;return Buffer.from('PNG');},...extra} as unknown as Page;
  return {page,state};
 }
 test('browser visual capture requires trusted opt-in and exact current origin',async()=>{
  for(const policy of [undefined,{enabled:false,maskSelectors:[]}]){const {page,state}=mock();await assert.rejects(captureBrowserImage(page,'https://example.com',policy,new AbortController().signal),{code:'E_PRIVACY_BLOCKED'});assert.equal(state.shots,0);}
  const {page,state}=mock({url:()=> 'https://other.example/'});await assert.rejects(captureBrowserImage(page,'https://example.com',allowed,new AbortController().signal),{code:'E_POLICY_DENIED'});assert.equal(state.shots,0);
 });
-test('browser capture preserves rendered PNG and colors, masks controls/frames, leaves animations running',async()=>{
+test('browser capture preserves rendered PNG and masks protected controls and frames',async()=>{
  const {page,state}=mock();const image=await captureBrowserImage(page,'https://example.com',allowed,new AbortController().signal);
  assert.equal(image.png.toString(),'PNG');assert.equal(image.coordinate_space,'viewport_css_pixels');assert.equal(image.viewport.scroll_y,10);assert.equal(image.redacted,true);assert.ok(Number.isFinite(Date.parse(image.captured_at)));
- assert.equal(state.options.type,'png');assert.equal(state.options.scale,'css');assert.equal(state.options.fullPage,false);assert.notEqual(state.options.animations,'disabled');assert.equal(state.options.caret,'initial');
- const masks=state.options.mask.map((x:any)=>x.selector).join(',');for(const selector of ['input','textarea','select','contenteditable','iframe','data-adl-sensitive','#private'])assert.ok(masks.includes(selector),selector);
+ assert.equal(state.options.type,'png');assert.equal(state.options.scale,'css');assert.equal(state.options.fullPage,false);assert.equal(state.options.animations,'disabled');assert.equal(state.options.caret,'initial');assert.equal(state.scriptDisabled,false);
+ const masks=state.options.mask.map((x:any)=>x.selector);for(const selector of ['input[type="password" i]','iframe','[data-adl-sensitive]','#private'])assert.ok(masks.includes(selector),selector);assert.ok(!masks.includes('input'));
+});
+test('capture fails closed if DOM changes and restores script execution',async()=>{
+ const f=mock();(f.page as any).screenshot=async()=>{f.state.dom='changed';return Buffer.from('PNG');};
+ await assert.rejects(captureBrowserImage(f.page,'https://example.com',allowed,new AbortController().signal),{code:'E_PRIVACY_BLOCKED'});assert.equal(f.state.scriptDisabled,false);
 });
 test('capture rejects navigation or geometry changes while screenshot is pending',async()=>{
  let changed=false;const {page}=mock({url:()=>changed?'https://other.example/':'https://example.com/',screenshot:async()=>{changed=true;return Buffer.from('PNG');}});

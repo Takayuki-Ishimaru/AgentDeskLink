@@ -37,3 +37,8 @@ for(const marker of ['SECRET','UNKNOWN'])test(`gesture rejects inherited ${marke
  const f=await fixture('<canvas id="art"></canvas>',`document.body.setAttribute('data-adl-classification','${marker}');`);
  try{await assert.rejects(runBrowserGesture(f.page,f.request(),f.policy,f.reference,f.signal,()=>{}),{code:'E_POLICY_DENIED'});assert.equal((await f.counts()).presses,0);}finally{await f.close();}
 });
+
+for(const marker of ['SECRET','UNKNOWN'])test(`broad gesture still rejects inherited ${marker} classification`,{timeout:10000},async()=>{
+ const f=await fixture('<canvas id="art"></canvas>',`document.body.setAttribute('data-adl-classification','${marker}');`);
+ try{await assert.rejects(runBrowserGesture(f.page,f.request(),f.policy,f.reference,f.signal,()=>{},true),{code:'E_POLICY_DENIED'});assert.equal((await f.counts()).presses,0);}finally{await f.close();}
+});

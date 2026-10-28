@@ -12,8 +12,10 @@ AgentDeskLink is an MCP server that connects AI agents to your local browser and
 
 [Get started](release-docs/INSTALL_en.md) · [What you can do](#what-you-can-do) · [Supported environments](#supported-environments) · [Release guide](release-docs/README_en.md) · [MIT License](LICENSE)
 
-> **0.1.4 / Beta**  
+> **0.1.5 / Beta**  
 > This beta is intended for a limited range of use. Before installing, review [supported environments and known limitations](release-docs/KNOWN_ISSUES_en.md).
+
+This version adds permission tiers and one-shot browser approvals. See [what changed](release-docs/RELEASE_NOTES_en.md) and the [operation settings and approval guide](release-docs/OPERATIONS.md).
 
 ## What you can do
 
@@ -28,7 +30,7 @@ Drag inside the browser, touch swipes and timestamped continuous frame capture a
 
 ## Get started in VS Code
 
-1. Download the common `agentdesklink-0.1.4.vsix` package, then install it with "Extensions: Install from VSIX".
+1. Download the common `agentdesklink-0.1.5.vsix` package, then install it with "Extensions: Install from VSIX".
 2. Open a folder and trust the workspace.
 3. Open **AgentDeskLink** in the activity bar.
 4. Choose **Open Settings** and configure the allowed browser origins or desktop app and the operation permissions you need.
@@ -65,9 +67,15 @@ Which actions are available depends on your OS, app and display setup. See [supp
 - **Keep it apart from your everyday browser.** No human profile or sign-in state is shared.
 - **Physical input uses a dedicated mode.** `interactive_desktop` uses your real mouse and keyboard, so do not run it alongside your own input.
 
-There is no dedicated approval UI for consequential actions. Review the targets and actions you give the AI. Unknown secrets in images or text cannot be detected completely. Use Emergency Stop in the settings panel or Command Palette to stop extension-managed operations, and Resume Operations to resume. Processing already dispatched to an application cannot be undone.
+Choose **Read only / Standard / Ask**. Standard permits ordinary browser inputs and clicks. Ask can request one-shot approval for inspected consequential operations through a native VS Code dialog. Each approval binds the target, exact input and form contents; changes, expiry and emergency stop invalidate it. Native apps and consequential operations inside iframes or Shadow DOM do not support this approval flow. The legacy explicit all-operations setting takes precedence when enabled.
 
-Browser regions marked `data-adl-sensitive` or `data-adl-classification="SECRET"` / `"UNKNOWN"` protect their descendants as well. A child marked `PUBLIC` cannot remove that protection. Semantic observations redact protected content; ordinary control allowlists cannot authorize actions within these regions. Browser captures and retained crops mask them. These explicit markers complement automatic detection.
+Unknown secrets in images or text cannot be detected completely. Use Emergency Stop in the settings panel or Command Palette to stop extension-managed operations, and Resume Operations to resume. Processing already dispatched to an application cannot be undone.
+
+The panel also configures a visible browser, idle timeout and an HTTP(S) proxy without authentication. Use `adl_handoff` for a manual login in the visible browser. Ask mode requires a separate approval allowing same-origin website scripts and forms to send requests for at most 120 seconds while automation is paused. Website scripts may send, change or delete before a human click during this interval. Resume and observe again after the manual step. Resume and expiry cannot undo requests already dispatched.
+
+`adl_observe` supports `format: "compact"` to omit declared defaults and `"lines"` for escaped rows. JSON remains the default; diffs, scope and cursors work in all formats. Coordinate clicks use `adl_act` with `point: {frame_id,x,y}` in source CSS pixels from the latest retained capture. Capture again when geometry or the target changes.
+
+Browser regions marked `data-adl-sensitive` or `data-adl-classification="SECRET"` / `"UNKNOWN"` protect their descendants as well. Neither a child marked `PUBLIC` nor `allowAllOperations` removes that protection. Semantic observations redact protected content, and actions within these regions are denied. Browser captures and retained crops mask them. These explicit markers complement automatic detection.
 
 If a select candidate list exceeds the observation budget, the control retains its name and current state and reports `options_truncated: true`. Reobserve with `scope: "id:<element_id>"` and a larger `token_budget` to retrieve candidates, or omit `options` from `include`. At most 100 candidates are collected; reaching that source limit or clipping candidate text also sets this flag. Check it even when the last cursor page has `truncated: false`.
 
@@ -105,6 +113,10 @@ Start the server from your MCP host, pointing it at the demo policy. Replace the
 ```
 
 The server connects over stdio. Using the desktop from source also requires building and configuring the OS helper.
+
+Relative CLI `auditPath` values resolve from the policy JSON's directory. An unwritable log stops startup with a cause code on stderr before the MCP connection starts.
+
+See [operation settings and approvals](release-docs/OPERATIONS.md) for the settings and supported scope.
 
 ### Example configurations
 

@@ -3,17 +3,17 @@ import type {GesturePolicy,GesturePlan,GestureReference,GestureExecution} from '
 import type {InteractivePolicy,PrepareInput,PreparedInput,InputExecution,ExpectedTarget} from './physical-input-types.js';
 export type Mode = 'strict_isolated' | 'background_semantic' | 'interactive_desktop';
 export type Classification = 'PUBLIC' | 'INTERNAL' | 'SECRET' | 'UNKNOWN';
-export type ActionName = 'click' | 'fill' | 'select' | 'check' | 'scroll' | 'navigate' | 'read_state' | 'wait_for';
+export type ActionName = 'click' | 'fill' | 'select' | 'check' | 'scroll' | 'navigate' | 'read_state' | 'wait_for' | 'press' | 'back' | 'hover';
 export interface Element {
   id: string; role: string; name: string; value?: string; enabled: boolean;
-  checked?: boolean; selected?: boolean; sensitive?: boolean;
+  checked?: boolean; selected?: boolean; expanded?: boolean; sensitive?: boolean; protected?: boolean;
   /** Internal DOM depth, projected out of public responses. */
   depth?: number;
   options?: {label:string;value:string;disabled:boolean;selected:boolean}[];
   /** Candidates were omitted by the source or response budget; reobserve this id with a larger budget. */
   options_truncated?: boolean;
 }
-export interface RawSnapshot { elements: Element[]; fingerprint: string; truncated: boolean; }
+export interface RawSnapshot { elements: Element[]; fingerprint: string; truncated: boolean; url?:string; title?:string; warnings?:{code:string;count:number}[]; }
 export interface TargetWindow {
   bounds: { x: number; y: number; width: number; height: number; coordinate_space: 'desktop_points_top_left' | 'desktop_physical_pixels' };
   display_ids: string[]; minimized: boolean;
@@ -42,6 +42,9 @@ export interface DesktopConfig {
 export interface PolicyConfig {
   allowAllOperations?:boolean;
   restrictTargets?:boolean;
+  browserHeadless?:boolean;
+  browserProxyServer?:string;
+  operationMode?:'read_only'|'standard'|'ask';
   allowedOrigins: string[];
   browserTargets: BrowserTargetConfig[];
   allowLoopback: boolean;
@@ -61,16 +64,24 @@ export interface Action {
   checked?: boolean; direction?: 'up' | 'down'; timeout_ms?: number;
   role?: string; name?: string;
   expected_target?:ExpectedTarget;
+  point?:{frame_id:string;x:number;y:number};
 }
 export interface Condition { role?: string; name?: string; element_id?: string; state?: 'visible' | 'hidden' | 'enabled'; }
+export interface ActionAuthorization{normalOperations?:boolean;approvalProof?:string;approved?:boolean;expires_at?:number;pointReference?:GestureReference}
 export interface AdapterSession {
   capabilities?: string[];
+  /** Reports the actual mutation dispatch boundary through act's callback. */
+  tracksDispatch?: boolean;
+  handoff?(paused:boolean,signal:AbortSignal,expiresAt?:number):Promise<void>;
+  resolvePoint?(point:{x:number;y:number},reference:GestureReference,signal:AbortSignal):Promise<string|undefined>;
+  clickPoint?(point:{x:number;y:number},reference:GestureReference,signal:AbortSignal,onDispatch:()=>void):Promise<void>;
   capture?(signal: AbortSignal): Promise<CapturedImage>;
   gesture?(plan:GesturePlan,reference:GestureReference,signal:AbortSignal):Promise<GestureExecution>;
   prepareInput?(request:PrepareInput,reference:GestureReference,signal:AbortSignal):Promise<PreparedInput>;
   commitInput?(confirmation_id:string,value:string|undefined,signal:AbortSignal):Promise<InputExecution>;
   snapshot(signal?: AbortSignal): Promise<RawSnapshot>;
-  act(action: Action, signal: AbortSignal): Promise<void>;
+  prepareAction?(action:Action,signal:AbortSignal):Promise<{proof:string;risk:'ordinary'|'consequential'|'credential';role:string;name:string;origin:string;details?:string[]}>;
+  act(action: Action, signal: AbortSignal, onDispatch?:()=>void, authorization?:ActionAuthorization): Promise<void>;
   close(): Promise<void>;
 }
 export interface Adapter {
@@ -87,9 +98,9 @@ export const ERROR_MESSAGES = {
   E_STALE_STATE: 'The target changed; observe it again before acting.',
   E_TARGET_NOT_FOUND: 'Target or handle is unavailable or expired.',
   E_UNSUPPORTED_ACTION: 'This action is unsupported.',
-  E_APPROVAL_REQUIRED: 'This operation requires independent approval and is disabled in this beta.',
+  E_APPROVAL_REQUIRED: 'This operation requires independent approval.',
   E_PRIVACY_BLOCKED: 'The requested data cannot be safely disclosed.',
-  E_TIMEOUT: 'Operation timed out; the affected session was closed.',
+  E_TIMEOUT: 'Operation timed out.',
   E_PARTIAL_EXECUTION: 'Execution stopped after partial completion.',
   E_CANCELLED: 'Operation cancelled.',
   E_INVALID_ARGUMENT: 'Invalid request.',
@@ -98,9 +109,17 @@ export const ERROR_MESSAGES = {
   E_BACKEND_UNAVAILABLE: 'The backend could not start. Verify its installation and OS sandbox support.'
 } as const;
 export type ErrorCode = keyof typeof ERROR_MESSAGES;
+export type ErrorReason = 'occluded' | 'not_visible' | 'operation_not_granted' | 'consequential_operation';
+const ERROR_REASON_MESSAGES:Record<ErrorReason,string>={
+  occluded:'The target is covered by another element. Remove the obstruction and observe again.',
+  not_visible:'The target is not visible at the intended input point. Observe again before acting.',
+  operation_not_granted:'No trusted operation grant matches this control. Review the policy controls or workspace operation permissions.',
+  consequential_operation:'This consequential operation requires an explicit operation grant.',
+};
 export class AdlError extends Error {
   mayHaveExecuted = false;
-  constructor(public readonly code: ErrorCode) { super(ERROR_MESSAGES[code]); this.name = 'AdlError'; }
+  requestId?:string;
+  constructor(public readonly code: ErrorCode,public readonly reason?:ErrorReason) { super(ERROR_MESSAGES[code]); this.name = 'AdlError'; }
 }
 /** Native helper error; mayHaveExecuted is the helper's own verdict and must survive to safeError. */
 export class NativeError extends AdlError {
@@ -108,5 +127,7 @@ export class NativeError extends AdlError {
 }
 export function safeError(error: unknown) {
   const code = error instanceof AdlError ? error.code : 'E_INTERNAL';
-  return { code, retryable: code === 'E_STALE_STATE', safe_message: ERROR_MESSAGES[code], ...(error instanceof AdlError&&error.mayHaveExecuted?{may_have_executed:true}:{}) };
+  const reason=error instanceof AdlError?error.reason:undefined;
+  const mayHaveExecuted=error instanceof AdlError&&error.mayHaveExecuted;
+  return { code, retryable: (code === 'E_STALE_STATE'||code==='E_APPROVAL_REQUIRED'&&!!(error as AdlError).requestId) && !mayHaveExecuted, safe_message:mayHaveExecuted?'The operation may have executed. Verify the result before retrying; previous session handles may be unavailable.':reason?ERROR_REASON_MESSAGES[reason]:ERROR_MESSAGES[code],...(reason?{reason}:{}),...(error instanceof AdlError&&error.requestId?{request_id:error.requestId}:{}),...(reason==='operation_not_granted'?{policy_setting:'browserTargets[].controls',workspace_setting:'agentdesklink.allowAllOperations'}:{}), ...(mayHaveExecuted?{may_have_executed:true}:{}) };
 }

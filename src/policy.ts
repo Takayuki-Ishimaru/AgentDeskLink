@@ -3,18 +3,18 @@ import ipaddr from 'ipaddr.js';
 import {isIP} from 'node:net';
 import { z } from 'zod';
 import { AdlError, type Action, type ActionName, type Element, type PolicyConfig } from './types.js';
-import {isSensitiveLabel, TEXT_REDACTION_RULES} from './privacy.js';
+import {isSensitiveLabel, TEXT_REDACTION_RULES,BROWSER_PRIVACY_RULES} from './privacy.js';
 
 const MAX_BATCH_STEPS = 20;
 const MAX_TEXT = 512;
 const REDACTED = '[redacted]';
-const SUPPORTED_ACTIONS: ActionName[] = ['click', 'fill', 'select', 'check', 'scroll', 'navigate', 'read_state', 'wait_for'];
+const SUPPORTED_ACTIONS: ActionName[] = ['click', 'fill', 'select', 'check', 'scroll', 'navigate', 'read_state', 'wait_for', 'press', 'back', 'hover'];
 const CONSEQUENTIAL = /(?:delete|remove|upload|send|submit|purchase|checkout|pay|payment|login|log\s*in|sign\s*in|sign\s*up|register|withdraw|transfer)/i;
 
 const origin = z.string().refine(isExactOrigin, 'allowedOrigins entries must be exact http(s) origins without path, query, fragment or credentials');
 const targetUrl = z.string().refine(isHttpUrl, 'browserTargets url must be a full http(s) URL');
 const classification = z.enum(['PUBLIC', 'INTERNAL', 'SECRET', 'UNKNOWN']);
-const actionName = z.enum(['click', 'fill', 'select', 'check', 'scroll', 'navigate', 'read_state', 'wait_for']);
+const actionName = z.enum(['click', 'fill', 'select', 'check', 'scroll', 'navigate', 'read_state', 'wait_for', 'press', 'back', 'hover']);
 
 const absolutePath = z.string().min(1).max(4_096).refine(v => (v.startsWith('/') || /^[a-zA-Z]:[\\/]/.test(v) || /^\\\\[^\\]+\\[^\\]+/.test(v)) && !v.includes('\0'), 'path must be absolute');
 const interactiveConfig=z.object({
@@ -36,6 +36,9 @@ const desktopConfig = z.object({
 const policySchema = z.object({
   allowAllOperations:z.boolean().optional(),
   restrictTargets:z.boolean().optional(),
+  browserHeadless:z.boolean().default(true),
+  browserProxyServer:z.string().max(2048).refine(v=>v===''||!/[?#]/.test(v)&&isExactOrigin(v)).default(''),
+  operationMode:z.enum(['read_only','standard','ask']).optional(),
   allowedOrigins: z.array(origin).max(64).default([]),
   browserTargets: z.array(z.object({
     id: z.string().min(1).max(128),
@@ -49,7 +52,7 @@ const policySchema = z.object({
     gestures:z.object({enabled:z.boolean(),surfaces:z.array(z.object({id:z.string().min(1).max(100),selector:z.string().min(1).max(512),kinds:z.array(z.enum(['drag','swipe'])).min(1).max(2)}).strict()).min(1).max(32)}).strict().optional(),
     controls: z.array(z.object({
       selector: z.string().min(1).max(512),
-      actions: z.array(actionName).min(1).max(8),
+      actions: z.array(actionName).min(1).max(11),
     }).strict()).max(64).optional(),
   }).strict()).max(64).default([]),
   allowLoopback: z.boolean().default(false),
@@ -179,7 +182,7 @@ export async function assertUrlAllowed(url: string, policy: PolicyConfig, resolv
   await resolveAllowedAddresses(url, policy, resolver);
 }
 
-const SAFE_ROLES=new Set(['alert','button','checkbox','combobox','dialog','generic','heading','img','link','list','listbox','listitem','menu','menuitem','option','progressbar','radio','region','searchbox','slider','spinbutton','status','switch','tab','table','tabpanel','text','textbox','toolbar','tree','treeitem','window']);
+const SAFE_ROLES=new Set(['alert','article','blockquote','button','caption','cell','checkbox','code','columnheader','combobox','dialog','figure','generic','grid','gridcell','heading','img','link','list','listbox','listitem','menu','menuitem','navigation','option','paragraph','progressbar','radio','region','row','rowgroup','rowheader','searchbox','slider','spinbutton','status','switch','tab','table','tablist','tabpanel','text','textbox','time','toolbar','tree','treeitem','window']);
 
 export function redactString(text: string): string {
   let out = typeof text === 'string' ? text.slice(0, MAX_TEXT) : '';
@@ -190,7 +193,8 @@ export function redactString(text: string): string {
 export function redactElement(element: Element): Omit<Element, 'sensitive'> {
   const { sensitive, ...safe } = element;
   safe.role=SAFE_ROLES.has(safe.role)?safe.role:'generic';
-  const secret = sensitive === true || isSensitiveLabel(safe.name, safe.id);
+  const isText=BROWSER_PRIVACY_RULES.textRoles.some(role=>role===safe.role);
+  const secret = sensitive === true || isSensitiveLabel(safe.id) || !isText&&isSensitiveLabel(safe.name);
   if (secret) {
     if (safe.name) safe.name = REDACTED;
     if (safe.value !== undefined) safe.value = REDACTED;
@@ -215,13 +219,16 @@ export function authorizeAction(action: Action, element?: Element, allowAllOpera
     if (typeof action.url !== 'string' || action.url.length === 0) throw new AdlError('E_INVALID_ARGUMENT');
     return;
   }
+  if(action.action==='back')return;
+  if(action.action==='press'&&!['Enter','Escape','Tab','ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Home','End','PageUp','PageDown','Space'].includes(action.value??''))throw new AdlError('E_INVALID_ARGUMENT');
   if (!element) throw new AdlError('E_TARGET_NOT_FOUND');
+  if(element.protected===true)throw new AdlError('E_PRIVACY_BLOCKED');
   if(allowAllOperations){if(element.enabled===false)throw new AdlError('E_POLICY_DENIED');return;}
   if (element.sensitive === true) throw new AdlError('E_PRIVACY_BLOCKED');
   if (element.enabled === false) throw new AdlError('E_POLICY_DENIED');
   if (isSensitiveLabel(element.name, element.id)) throw new AdlError('E_PRIVACY_BLOCKED');
   if (typeof element.value === 'string' && isSensitiveLabel(element.value)) throw new AdlError('E_PRIVACY_BLOCKED');
-  if (CONSEQUENTIAL.test(element.name ?? '') || CONSEQUENTIAL.test(element.role ?? '')) throw new AdlError('E_APPROVAL_REQUIRED');
+  if (action.action!=='scroll'&&(CONSEQUENTIAL.test(element.name ?? '') || CONSEQUENTIAL.test(element.role ?? ''))) throw new AdlError('E_APPROVAL_REQUIRED','consequential_operation');
   if (typeof action.value === 'string') {
     assertNoRedacted(action.value);
     if (redactString(action.value) !== action.value) throw new AdlError('E_PRIVACY_BLOCKED');

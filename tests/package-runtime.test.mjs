@@ -241,8 +241,13 @@ test('pre-abort, in-flight cancellation and deadline clean up only their staging
   await assert.rejects(prepareRuntime({...f.options,signal:pre.signal}),/aborted/);
   assert.equal(f.requests.length,0);
   const abort=new AbortController();
-  const pending=prepareRuntime({...f.options,signal:abort.signal});
-  setTimeout(()=>abort.abort(new Error('cancelled')),40);
+  const pending=prepareRuntime({...f.options,signal:abort.signal,fetchImpl:(...args)=>{
+    const work=f.options.fetchImpl(...args);
+    // Cancel after the slow fetch has installed its listener, not while disk
+    // setup might still be running on a busy Windows host.
+    setImmediate(()=>abort.abort(new Error('cancelled')));
+    return work;
+  }});
   await assert.rejects(pending,/cancelled/);
   await assert.rejects(prepareRuntime({...f.options,downloadTimeoutMs:30}),/timed out/);
   assert.deepEqual(leftovers(f.root),[]);

@@ -2,12 +2,12 @@
 
 [日本語](INSTALL.md) | **English**
 
-Target version: `0.1.4` (beta)
+Target version: `0.1.5` (beta)
 
 ## Requirements
 
 - VS Code 1.101 or newer.
-- The common `agentdesklink-0.1.4.vsix` package. Check the [supported environments and known limitations](KNOWN_ISSUES_en.md).
+- The common `agentdesklink-0.1.5.vsix` package. Check the [supported environments and known limitations](KNOWN_ISSUES_en.md).
 - A network connection for the first Chromium download if Chrome is not installed.
 
 One VSIX bundles Node.js and image-processing libraries for macOS / Apple silicon, Windows x64 and Linux x64. It also includes the macOS and Windows desktop helpers. It selects the matching runtime at startup, so no separate build is needed.
@@ -16,7 +16,7 @@ The distribution file is shared across these operating systems. This common VSIX
 
 ## Installation
 
-1. Download `agentdesklink-0.1.4.vsix` and `SHA256SUMS` from the release page.
+1. Download `agentdesklink-0.1.5.vsix` and `SHA256SUMS` from the release page.
 2. Compute the SHA-256 using the [update guide](UPDATES_en.md) and confirm it matches the list.
 3. In the VS Code Command Palette, choose “Extensions: Install from VSIX...” and select the VSIX.
 4. Open the folder you want to use, review its contents and trust the workspace.
@@ -29,26 +29,46 @@ The distribution file is shared across these operating systems. This common VSIX
 
 The **AI clients** section detects standard installations of Claude Code, Claude Desktop, Codex, Cursor, Windsurf, Devin, Gemini CLI, Cline and Roo Code. **Enable all** registers AgentDeskLink with detected clients and enables the VS Code provider. Claude Code uses its own MCP settings, so the VS Code provider alone does not make tools available there. Reconnect or start a new conversation after registration.
 
-**Detect again** finds newly installed clients. With `agentdesklink.syncClients` enabled, registrations also synchronize on startup and permission changes. Each client displays its registration, detection, conflict or error status. Other servers are preserved, and manual entries named `agentdesklink` are never overwritten or removed. Codex TOML is reformatted while preserving its configuration values.
+**Detect again** finds newly installed clients. With `agentdesklink.syncClients` enabled, registrations also synchronize on startup and permission changes. Each client displays its registration, detection, conflict or error status. Other servers are preserved, and manual entries named `agentdesklink` are never overwritten or removed. Codex TOML updates the managed section while preserving comments and formatting elsewhere. Before changes, a backup is saved beside the file as `.agentdesklink.bak-…`. Backups also contain configuration data; handle them accordingly.
 
-External clients share the permissions of the workspace where **Enable all** was last clicked. Opening another workspace does not take ownership. **Disable all** removes managed registrations and stops existing external connections. Permission changes and emergency stop also revoke old connections; reconnect when required. Registrations remain after VS Code exits. User-level registration makes that workspace's granted scope available from other projects in the client. Nonstandard locations and unsupported AI clients require manual setup.
+External clients share the permissions of the workspace where **Enable all** was last clicked. Opening another workspace does not take ownership. **Disable all** removes managed registrations and stops existing external connections. Permission changes and emergency stop also revoke old connections; reconnect when required. Registrations remain after VS Code exits. User-level registration makes that workspace's granted scope available from other projects in the client. Locations selected by `CODEX_HOME`, `CLAUDE_CONFIG_DIR` and `CLINE_MCP_SETTINGS_PATH`, plus modern and legacy Cline locations, are supported when visible to the extension. Other locations and unsupported clients require manual setup.
 
 ## Initial settings and scope
 
 The following are workspace settings for the VS Code extension.
 
-MCP is disabled by default for every workspace. Enabling it grants no target access. Configure browser origins and the desktop app in AgentDeskLink settings, then enable broad operations, physical input and unredacted native images separately when needed. No policy JSON is required. There is no dedicated approval UI for consequential actions such as submission or purchases. Review the actions and targets you give the AI before enabling MCP.
+MCP is disabled by default for every workspace. Enabling it grants no target access. Set browser origins and the operation permission tier in the panel. Read only is the default. Configure the desktop app, physical input and unredacted native images separately, enabling only the scope you need. No policy JSON is required.
 
 | Setting | What to configure |
 | --- | --- |
 | `agentdesklink.browserOrigins` | Exact allowed `http(s)` origins, such as `https://example.com`, without paths or wildcards |
 | `agentdesklink.desktopAppId` / `agentdesklink.desktopAppPath` | The ID and absolute executable path of one allowed app |
-| `agentdesklink.allowAllOperations` | Allows supported operations on permitted targets. Target access is a separate grant. Defaults to off |
+| `agentdesklink.operationMode` | `read_only` (default), `standard` or `ask`, matching Read only, Standard and Ask each time in the panel |
+| `agentdesklink.allowAllOperations` | Legacy all-operations grant. Defaults to off and takes precedence over the tier when enabled. Selecting Allow all in the panel requires confirmation |
+| `agentdesklink.browserHeadless` | Defaults to `true`. Set false for a visible browser and manual login |
+| `agentdesklink.sessionIdleMinutes` | Idle session timeout, 1–60 minutes; defaults to 15 |
+| `agentdesklink.browserProxyServer` | HTTP(S) proxy origin without credentials, path or query; defaults to empty |
 | `agentdesklink.allowUnredactedImages` | Allows unredacted native images. Defaults to off |
 | `agentdesklink.allowPhysicalInput` | Allows physical input. Also requires a configured app and `allowUnredactedImages`. Defaults to off |
 | `agentdesklink.allowLoopback` / `agentdesklink.allowPrivateNetwork` | Allows loopback/private-network connections. Defaults to off |
 
 Check “Current permissions” in the panel to see the effective grants. Observation alone does not require broad operation permissions or physical input.
+
+### Permission tiers and one-shot approvals
+
+- **Read only**: observe, navigate and scroll.
+- **Standard**: ordinary browser inputs and clicks; consequential actions such as submission or credential entry are denied.
+- **Ask each time**: standard actions plus inspected consequential actions approved once in a VS Code dialog. Review the target and contents, then approve or deny. The AI cannot decide the approval. After approval, it retries the same operation.
+
+Approvals cover the browser main document. Escalation is unavailable for native apps, iframe and Shadow DOM controls, generic AJAX/DELETE or file uploads. Changed contents, expiry and emergency stop invalidate approvals. Unavailable approval dialogs do not authorize consequential operations. Secret values are not sent to the dialog.
+
+An existing `allowAllOperations: true` still takes precedence after updating. To use a permission tier, select Read only, Standard or Ask each time in the panel. Reconnect external clients after changing settings when needed.
+
+### Manual login in a visible browser
+
+Turn off `browserHeadless` and pause automation with `adl_handoff` and `pause`. Ask each time requires a separate dialog allowing website scripts and forms on the current origin to send requests for up to 120 seconds. The site may send, change or delete before a human click during this interval. After manual interaction, use `resume` and observe again. Resume and expiry cannot undo requests already sent. Read only and Standard cannot obtain this network grant.
+
+See [operation settings and approvals](OPERATIONS.md) for details.
 
 The extension uses its bundled Node.js and helper without manual path settings. Chrome runs with a dedicated profile and does not share your usual sign-in state. If Chrome is unavailable, a dedicated Chromium is downloaded and reused.
 

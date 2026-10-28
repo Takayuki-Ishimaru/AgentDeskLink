@@ -10,6 +10,7 @@ const EPSILON=0.51;
 
 interface Viewport {width:number;height:number;scroll_x:number;scroll_y:number;device_scale_factor:number}
 interface Box {x:number;y:number;width:number;height:number}
+export type GestureGeometry = Record<string,Box>;
 interface ProbeArg {privacyRules:typeof BROWSER_PRIVACY_RULES;allowAllOperations?:boolean;origin:string;viewport:Viewport;selector:string;points:{x:number;y:number}[]}
 interface Probe {ok:boolean;reason:string;origin:string;viewport:Viewport;box:Box;touch_action:string}
 
@@ -20,6 +21,25 @@ function unsupported():never{throw new AdlError('E_UNSUPPORTED_ACTION');}
 function cancelled():never{throw new AdlError('E_CANCELLED');}
 function isNum(v:unknown):v is number{return typeof v==='number'&&Number.isFinite(v);}
 function rethrow(e:unknown):never{if(e instanceof AdlError)throw e;throw new AdlError('E_INTERNAL');}
+
+// Private capture evidence: never trust a missing, ambiguous or unmeasurable
+// selector as proof that a retained image still describes the surface.
+export async function captureGestureGeometry(page:Page,policy:GesturePolicy,signal:AbortSignal):Promise<GestureGeometry>{
+  const result:GestureGeometry=Object.create(null) as GestureGeometry;
+  if(!policy.enabled)return result;
+  if(!Array.isArray(policy.surfaces)||policy.surfaces.length>32)denied();
+  for(const surface of policy.surfaces){
+    if(signal.aborted)cancelled();
+    try{
+      const locator=page.locator(surface.selector);
+      if(await locator.count()!==1)continue;
+      const box=await locator.boundingBox({timeout:1000});
+      if(box&&[box.x,box.y,box.width,box.height].every(Number.isFinite)&&box.width>0&&box.height>0)result[surface.id]={...box};
+    }catch{if(signal.aborted)cancelled();}
+  }
+  if(signal.aborted)cancelled();
+  return result;
+}
 
 function validate(plan:GesturePlan,policy:GesturePolicy,reference:GestureReference):{selector:string;kind:GestureKind;viewport:Viewport}{
   if(policy===null||typeof policy!=='object')invalid();
@@ -94,11 +114,12 @@ function probeSurface(el:Element,arg:ProbeArg):Probe{
     if(!top){reason='outside';break;}
     const inside=top===el||el.contains(top)||(typeof top.closest==='function'&&top.closest(arg.selector)===el);
     if(!inside){reason='occluded';break;}
-    for(let j=0;!arg.allowAllOperations&&j<stack.length;j++){
+    for(let j=0;j<stack.length;j++){
       const node=stack[j]!;
       let region:Element|null=node,regionDepth=0;
-      while(region&&regionDepth++<arg.privacyRules.ancestorCap){if(region.matches(arg.privacyRules.regionSelector)){reason='blocked_target';break;}region=region.parentElement;}
+      while(region&&regionDepth++<arg.privacyRules.ancestorCap){if(region.matches(arg.privacyRules.regionSelector)){reason='blocked_target';break;}region=region.parentElement??(region.getRootNode() as ShadowRoot).host??null;}
       if(region){reason='blocked_target';break;}
+      if(arg.allowAllOperations)continue;
 
       if(typeof node.closest==='function'&&node.closest('input,textarea,select,button,a[href],iframe,frame,[contenteditable],[data-adl-sensitive],[role="button"],[role="link"],[role="textbox"],[role="searchbox"],[role="combobox"],[role="checkbox"],[role="radio"],[role="switch"],[role="menuitem"],[role="option"],[role="tab"]')){reason='blocked_target';break;}
       // A trusted drawing surface can contain custom widgets without native tags.
@@ -139,7 +160,7 @@ function verifyProbe(probe:Probe,arg:ProbeArg,kind:GestureKind):void{
   if(!arg.allowAllOperations&&kind==='swipe'&&probe.touch_action.trim().toLowerCase()!=='none')unsupported();
 }
 
-export async function runBrowserGesture(page:Page,plan:GesturePlan,policy:GesturePolicy,reference:GestureReference,signal:AbortSignal,assertCurrent:()=>void,allowAllOperations=false):Promise<GestureExecution>{
+export async function runBrowserGesture(page:Page,plan:GesturePlan,policy:GesturePolicy,reference:GestureReference,signal:AbortSignal,assertCurrent:()=>void,allowAllOperations=false,capturedGeometry?:GestureGeometry):Promise<GestureExecution>{
   const {selector,kind,viewport}=validate(plan,policy,reference);
   if(typeof assertCurrent!=='function'||typeof page?.url!=='function')invalid();
   const check=()=>{if(signal.aborted)cancelled();assertCurrent();};
@@ -159,6 +180,7 @@ export async function runBrowserGesture(page:Page,plan:GesturePlan,policy:Gestur
     // Keep resources even if cancellation/document invalidation follows creation.
     check();handle=await locator.elementHandle();check();if(!handle)denied();
     const initial=await guard(signal,check,()=>handle!.evaluate(probeSurface,arg));verifyProbe(initial,arg,kind);
+    if(capturedGeometry){const captured=capturedGeometry[plan.surface_id];if(!captured||captured.x!==initial.box.x||captured.y!==initial.box.y||captured.width!==initial.box.width||captured.height!==initial.box.height)stale();}
     const recheck=async()=>{
       const live=await guard(signal,check,()=>handle!.evaluate(probeSurface,arg));verifyProbe(live,arg,kind);
       if(live.box.x!==initial.box.x||live.box.y!==initial.box.y||live.box.width!==initial.box.width||live.box.height!==initial.box.height)stale();

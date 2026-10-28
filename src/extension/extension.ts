@@ -2,16 +2,52 @@ import * as vscode from 'vscode';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { createHash } from 'node:crypto';
-import { readSettings, log, panelPermissions, permissionError, permissionsEnvJson } from './shared.js';
+import { readSettings, log, panelPermissions, permissionError, permissionsEnvJson, runtimeSettingsEnvJson } from './shared.js';
+import type {OperationMode} from '../bundled-policy.js';
 import { SettingsPanelProvider, PanelHooks } from './panel.js';
 import { UpdateChecker } from './updates.js';
 import { resolveRuntime } from './runtime.js';
 import { prepareBrowser } from './browser-setup.js';
 import { AiClientManager } from './client-manager.js';
 import { initializeOperationState,readOperationState,writeOperationState } from '../operation-control.js';
+import {ApprovalBroker} from './approval-broker.js';
 
 function folders(): readonly vscode.WorkspaceFolder[] {
   return vscode.workspace.workspaceFolders ?? [];
+}
+
+const KNOWN_VSCODE_APP_IDS=new Set(['com.microsoft.vscode','com.microsoft.vscodeinsiders','com.microsoft.vscodeexploration','com.visualstudio.code.oss','com.todesktop.230313mzl4w4u92','com.exafunction.windsurf']);
+function canonicalPath(value:string):string{
+  const resolved=path.resolve(value);
+  try{return fs.realpathSync.native(resolved);}catch{return resolved;}
+}
+function appBundle(pathname:string):string|undefined{
+  const normalized=path.resolve(pathname);const parts=normalized.split(path.sep);let current=path.parse(normalized).root;
+  for(const part of parts.filter(Boolean)){current=path.join(current,part);if(part.toLowerCase().endsWith('.app'))return canonicalPath(current);}
+  return undefined;
+}
+/** Ask approvals must never be actionable by a native target that can click the host modal. */
+function askHostTargetConflict(settings:ReturnType<typeof readSettings>):string|undefined{
+  if(settings.allowAllOperations||settings.operationMode!=='ask'||!settings.allowPhysicalInput||!settings.allowUnredactedImages||!settings.desktopAppId||!settings.desktopAppPath)return undefined;
+  const appId=settings.desktopAppId.trim().toLowerCase();
+  const remote=typeof vscode.env.remoteName==='string'&&vscode.env.remoteName.length>0;
+  if(remote)return 'Ask approvals are disabled because this remote extension host cannot safely identify the native target. / リモート拡張ホストではネイティブ対象を安全に識別できないため、都度承認を無効にしています。';
+  const hostIds=new Set(KNOWN_VSCODE_APP_IDS);
+  const hostName=String(vscode.env.appName??'').toLowerCase();
+  if(/visual studio code|vscodium|cursor|windsurf/.test(hostName)){
+    if(/visual studio code/.test(hostName)){hostIds.add('com.microsoft.vscode');hostIds.add('com.microsoft.vscodeinsiders');hostIds.add('com.microsoft.vscodeexploration');}
+    if(/vscodium/.test(hostName))hostIds.add('com.visualstudio.code.oss');
+    if(/cursor/.test(hostName))hostIds.add('com.todesktop.230313mzl4w4u92');
+    if(/windsurf/.test(hostName))hostIds.add('com.exafunction.windsurf');
+  }
+  const exec=canonicalPath(process.execPath),target=canonicalPath(settings.desktopAppPath);
+  const sameExec=exec===target;
+  const hostBundle=appBundle(exec),targetBundle=appBundle(target);
+  const sameBundle=!!hostBundle&&hostBundle===targetBundle;
+  const hostExe=path.basename(exec).toLowerCase();
+  const sameId=hostIds.has(appId)||appId===hostExe||appId===path.basename(settings.desktopAppPath).toLowerCase()&&/^(code|code-insiders|codium|cursor|windsurf)(\.exe)?$/.test(hostExe);
+  if(sameExec||sameBundle||sameId)return 'Ask approvals are disabled because the native target can control the VS Code host and click its approval dialog. Remove the host app target or disable physical input. / ネイティブ対象がVS Codeホストを操作し承認ダイアログを押せるため、都度承認を無効にしています。ホストアプリの許可を削除するか物理入力を無効にしてください。';
+  return undefined;
 }
 
 class McpProvider {
@@ -25,7 +61,7 @@ class McpProvider {
   private pendingSetups = 0;
   get preparing(): boolean { return this.pendingSetups > 0; }
   private setupController = new AbortController();
-  constructor(private readonly serverPath: string, private readonly extVersion: string, private readonly extensionRoot: string, private readonly storageDir: string, private readonly controlPath:string) {}
+  constructor(private readonly serverPath: string, private readonly extVersion: string, private readonly extensionRoot: string, private readonly storageDir: string, private readonly controlPath:string, private readonly approvalBroker:Promise<ApprovalBroker>, private readonly approvalEnabled:()=>boolean) {}
   refresh() { if (!this.disposed) { this.setupController.abort(); this.setupController=new AbortController(); this.seq++; this.lastError = null; this.helper = undefined; this.emitter.fire(); } }
   dispose() { this.disposed = true; this.setupController.abort(); this.emitter.dispose(); }
 
@@ -41,6 +77,9 @@ class McpProvider {
     initializeOperationState(this.controlPath);
     const control=readOperationState(this.controlPath);
     if(!control||control.stopped)return deny('緊急停止中です。操作を再開するまで MCP は停止します。');
+    let runtimeEnv:string;
+    try { runtimeEnv=runtimeSettingsEnvJson(settings); }
+    catch { return deny('セッションまたはブラウザー運用設定が無効です。 / Runtime settings are invalid.'); }
     const current = () => {
       const now = readSettings();
       const controlNow=readOperationState(this.controlPath);
@@ -55,7 +94,7 @@ class McpProvider {
       runtime = await resolveRuntime({ extensionRoot: this.extensionRoot });
       if (!current()) return [];
       browser = await prepareBrowser({extensionRoot:this.extensionRoot,nodePath:runtime.nodePath,storageDir:this.storageDir,
-        playwrightVersion:runtime.manifest.playwrightVersion,signal:this.setupController.signal});
+        playwrightVersion:runtime.manifest.playwrightVersion,headless:settings.browserHeadless,signal:this.setupController.signal});
     } catch (err) {
       return current() ? deny(err instanceof Error ? err.message : String(err)) : [];
     } finally { this.pendingSetups--; }
@@ -63,7 +102,9 @@ class McpProvider {
     const args = [this.serverPath];
     const cwd = wsFolders[0]!.uri;
     const command = runtime.nodePath;
-    const env = {...runtime.env,PLAYWRIGHT_BROWSERS_PATH:browser.browsersPath,ADL_BROWSER_EXECUTABLE:browser.executablePath,ADL_MCP_PERMISSIONS:permissionsEnvJson(settings),ADL_OPERATION_CONTROL:this.controlPath,ADL_OPERATION_EPOCH:control.epoch};
+    const approvalEnv=this.approvalEnabled()?await (await this.approvalBroker).env(control.epoch):{};
+    if (!current()) return [];
+    const env = {...runtime.env,PLAYWRIGHT_BROWSERS_PATH:browser.browsersPath,ADL_BROWSER_EXECUTABLE:browser.executablePath,ADL_MCP_PERMISSIONS:permissionsEnvJson(settings),ADL_MCP_RUNTIME_SETTINGS:runtimeEnv,ADL_OPERATION_CONTROL:this.controlPath,ADL_OPERATION_EPOCH:control.epoch,...approvalEnv};
     const fingerprint = createHash('sha256').update(JSON.stringify([command, env, args, cwd.toString(), this.seq])).digest('hex').slice(0, 16);
     const version = `${this.extVersion}+${fingerprint}`;
     this.lastError = null;
@@ -75,6 +116,7 @@ class McpProvider {
 }
 
 let deactivateHook: (() => void) | undefined;
+let liveApprovalBroker:ApprovalBroker|undefined;
 
 export function activate(context: vscode.ExtensionContext): void {
   const root = context.extensionUri?.fsPath ?? path.resolve(__dirname, '..', '..');
@@ -83,13 +125,19 @@ export function activate(context: vscode.ExtensionContext): void {
   const controlPath=path.join(context.globalStorageUri.fsPath,'operations.json');
   const externalControlPath=path.join(context.globalStorageUri.fsPath,'ai-clients-control.json');
   initializeOperationState(controlPath);
-  const provider = new McpProvider(path.join(root, 'dist', 'src', 'server.js'), extVersion, root, context.globalStorageUri.fsPath,controlPath);
+  let owner = folders().map(f => f.uri.toString()).join('\n');
+  const approvalBroker=ApprovalBroker.create(()=>{
+    const settings=readSettings();const control=readOperationState(controlPath);
+    return !askHostTargetConflict(settings) && vscode.workspace.isTrusted && folders().length>0 && folders().map(f=>f.uri.toString()).join('\n')===owner &&
+      settings.enabled && !permissionError(settings) && control?.stopped===false && readOperationState(externalControlPath)?.stopped!==true;
+  },()=>owner,()=>panelPermissions(readSettings()).effective.browserOrigins);
+  void approvalBroker.then(broker=>{liveApprovalBroker=broker;context.subscriptions.push(broker);});
+  const provider = new McpProvider(path.join(root, 'dist', 'src', 'server.js'), extVersion, root, context.globalStorageUri.fsPath,controlPath,approvalBroker,()=>!askHostTargetConflict(readSettings()));
   const updater = new UpdateChecker(extVersion, () => { void panel?.refresh(); });
   let panel: SettingsPanelProvider | undefined;
   let bulkChanging = false;
   let bulkIntent = 0;
   let bulkSaves = Promise.resolve();
-  let owner = folders().map(f => f.uri.toString()).join('\n');
   const clients = new AiClientManager({
     storageDir: context.globalStorageUri.fsPath,
     get owner() { return owner; },
@@ -108,10 +156,18 @@ export function activate(context: vscode.ExtensionContext): void {
   });
   const syncClients = () => clients.sync(readSettings().enabled && readOperationState(externalControlPath)?.stopped !== true);
   let lastControl=JSON.stringify(readOperationState(controlPath));
+  const revokePolicy=()=>{
+    const previous=readOperationState(controlPath);
+    const next=writeOperationState(controlPath,previous?.stopped??false);
+    lastControl=JSON.stringify(next);
+    liveApprovalBroker?.revoke(next.epoch);
+    clients.revoke(true);
+    provider.refresh();
+  };
   const controlChanged=()=>{
     const current=JSON.stringify(readOperationState(controlPath));
     if(current===lastControl)return;
-    lastControl=current;provider.refresh();void panel?.refresh();
+    lastControl=current;liveApprovalBroker?.revoke(readOperationState(controlPath)?.epoch);provider.refresh();void panel?.refresh();
     if (readSettings().syncClients) void syncClients();
   };
 
@@ -121,17 +177,20 @@ export function activate(context: vscode.ExtensionContext): void {
     openWorkspaceSettings: () => { void vscode.commands.executeCommand('workbench.action.openSettings', 'agentdesklink'); },
     emergencyStop: async () => {
       writeOperationState(controlPath,true);
+      liveApprovalBroker?.revoke(readOperationState(controlPath)?.epoch);
       controlChanged();
       log.line('Emergency stop requested: all extension-managed servers revoked.');
     },
     resumeOperations: async () => {
       writeOperationState(controlPath,false);
+      liveApprovalBroker?.revoke(readOperationState(controlPath)?.epoch);
       controlChanged();
     },
     operationsStopped: () => readOperationState(controlPath)?.stopped!==false,
     mcpStatus: () => {
       if(readOperationState(controlPath)?.stopped!==false)return '緊急停止中です。再開するまで新しい操作も実行されません。';
       const s = readSettings();
+      if(askHostTargetConflict(s))return askHostTargetConflict(s)!;
       if (!s.enabled) return 'MCP は無効です。';
       if (!vscode.workspace.isTrusted) return 'ワークスペースを信頼すると MCP を利用できます。';
       if (folders().length === 0) return 'フォルダーを開くと MCP を利用できます。';
@@ -140,8 +199,8 @@ export function activate(context: vscode.ExtensionContext): void {
       if (provider.lastError) return '設定を確認してください。MCP は提供されていません。';
       return 'VS Code に MCP を提供中です。起動は MCP 管理画面で確認できます。';
     },
-    mcpError: () => permissionError(readSettings()) ?? provider.lastError,
-    permissions: () => panelPermissions(readSettings(), provider.helperPath),
+    mcpError: () => askHostTargetConflict(readSettings()) ?? permissionError(readSettings()) ?? provider.lastError,
+    permissions: () => {const summary=panelPermissions(readSettings(),provider.helperPath);const reason=askHostTargetConflict(readSettings());if(reason)summary.effective.reasons.push(reason);return summary;},
     updateStatus: () => updater.status(),
     version: () => extVersion,
     refreshMcp: async () => { await provider.provideMcpServerDefinitions(); },
@@ -152,6 +211,7 @@ export function activate(context: vscode.ExtensionContext): void {
       if (enabled && readOperationState(controlPath)?.stopped !== false) throw new Error('操作を再開してから有効にしてください。');
       const intent = ++bulkIntent;
       writeOperationState(externalControlPath, !enabled);
+      liveApprovalBroker?.revoke();
       // Revoke before awaiting settings persistence, including when saving fails.
       clients.revoke(true);
       const persisted = bulkSaves.then(async () => {
@@ -170,6 +230,26 @@ export function activate(context: vscode.ExtensionContext): void {
       provider.refresh();
       await clients.sync(enabled, true);
     },
+    setOperationMode: async (mode:OperationMode|'all') => {
+      if(!vscode.workspace.isTrusted||!folders().length)throw new Error('信頼できるワークスペースが必要です / A trusted workspace is required.');
+      if(mode==='all'){
+        const confirmed=await vscode.window.showWarningMessage('すべての操作を許可します。ページやデスクトップの操作はこのワークスペースの全許可範囲で実行できます。 / Allow all operations within this workspace’s configured origin and application grants?',{modal:true},'すべて許可 / Allow all');
+        if(confirmed!=='すべて許可 / Allow all')return;
+      }
+      writeOperationState(externalControlPath,true);
+      await revokePolicy();bulkChanging=true;
+      try{
+        const configuration=vscode.workspace.getConfiguration('agentdesklink');
+        if(mode==='all')await configuration.update('allowAllOperations',true,vscode.ConfigurationTarget.Workspace);
+        else{
+          await configuration.update('allowAllOperations',false,vscode.ConfigurationTarget.Workspace);
+          await configuration.update('operationMode',mode,vscode.ConfigurationTarget.Workspace);
+        }
+      }finally{
+        bulkChanging=false;writeOperationState(externalControlPath,false);provider.refresh();
+        if(readSettings().syncClients)await clients.sync(true,true);
+      }
+    },
   };
 
   panel = new SettingsPanelProvider(context.extensionUri, hooks);
@@ -184,11 +264,12 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(vscode.workspace.onDidChangeConfiguration((e) => {
     if (!e.affectsConfiguration('agentdesklink')) return;
     if (['autoUpdate', 'checkForUpdates'].some(k => e.affectsConfiguration(`agentdesklink.${k}`))) updater.cancel();
-    if (['enabled', 'browserOrigins', 'desktopAppId', 'desktopAppPath', 'allowAllOperations', 'allowPhysicalInput',
+    if (['enabled', 'sessionIdleMinutes', 'browserHeadless', 'browserProxyServer', 'operationMode', 'browserOrigins', 'desktopAppId', 'desktopAppPath', 'allowAllOperations',
+      'allowPhysicalInput',
       'allowUnredactedImages', 'allowLoopback', 'allowPrivateNetwork'].some(k => e.affectsConfiguration(`agentdesklink.${k}`))) {
-      provider.refresh();
+      void revokePolicy();
     }
-    if (!bulkChanging && ['enabled', 'syncClients', 'browserOrigins', 'desktopAppId', 'desktopAppPath', 'allowAllOperations',
+    if (!bulkChanging && ['enabled', 'syncClients', 'sessionIdleMinutes', 'browserHeadless', 'browserProxyServer', 'operationMode', 'browserOrigins', 'desktopAppId', 'desktopAppPath', 'allowAllOperations',
       'allowPhysicalInput', 'allowUnredactedImages', 'allowLoopback', 'allowPrivateNetwork'].some(k => e.affectsConfiguration(`agentdesklink.${k}`))) {
       if (readSettings().syncClients) void syncClients();
       else if (clients.owner() === owner) void clients.sync(false);
@@ -196,8 +277,8 @@ export function activate(context: vscode.ExtensionContext): void {
     void panel?.refresh();
   }));
   context.subscriptions.push(
-    vscode.workspace.onDidChangeWorkspaceFolders(() => { clients.revoke(); owner = folders().map(f => f.uri.toString()).join('\n'); clients.detect(); provider.refresh(); void panel?.refresh(); }),
-    vscode.workspace.onDidGrantWorkspaceTrust(() => { provider.refresh(); if (readSettings().syncClients) void syncClients(); void panel?.refresh(); }),
+    vscode.workspace.onDidChangeWorkspaceFolders(() => { clients.revoke(); owner = folders().map(f => f.uri.toString()).join('\n'); void revokePolicy(); clients.detect(); void panel?.refresh(); }),
+    vscode.workspace.onDidGrantWorkspaceTrust(() => { void revokePolicy(); if (readSettings().syncClients) void syncClients(); void panel?.refresh(); }),
   );
 
   context.subscriptions.push(
@@ -220,7 +301,7 @@ export function activate(context: vscode.ExtensionContext): void {
   void panel.refresh();
   if (readSettings().syncClients) void syncClients();
   else if (clients.owner() === owner) void clients.sync(false);
-  deactivateHook = () => { updater.dispose(); provider.dispose(); controlWatcher.dispose(); clients.dispose(); };
+  deactivateHook = () => { updater.dispose(); provider.dispose(); controlWatcher.dispose(); clients.dispose(); liveApprovalBroker?.dispose(); liveApprovalBroker=undefined; void approvalBroker.then(broker=>broker.dispose()); };
 }
 
 export function deactivate(): void {

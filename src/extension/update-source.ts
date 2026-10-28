@@ -19,7 +19,7 @@ function tagVersion(tag: unknown): string | undefined {
 /** Universal VSIX names are valid for exactly the three bundled universal targets. */
 const UNIVERSAL_TARGETS = new Set(['darwin-arm64', 'win32-x64', 'linux-x64']);
 
-/** Newest published release with an exact VSIX for platform-arch; universal assets win over legacy target assets. Throws on a non-array API response. */
+/** Prefer the smaller exact-platform asset; retain universal release compatibility. */
 export function findGitHubUpdate(data: unknown, platform: string, arch: string): GitHubUpdate | undefined {
   if (!Array.isArray(data)) throw new Error('GitHub リリース情報の形式が不正です。');
   const target = `${platform}-${arch}`;
@@ -30,10 +30,8 @@ export function findGitHubUpdate(data: unknown, platform: string, arch: string):
     if (release.draft !== false) continue;
     const version = tagVersion(release.tag_name);
     if (!version || !Array.isArray(release.assets)) continue;
-    // Common universal name first so it is preferred over the legacy target-specific name on the same release.
-    const candidates: string[] = [];
+    const candidates: string[] = [`agentdesklink-${target}-${version}.vsix`];
     if (UNIVERSAL_TARGETS.has(target)) candidates.push(`agentdesklink-${version}.vsix`);
-    candidates.push(`agentdesklink-${target}-${version}.vsix`);
     for (const name of candidates) {
       for (const asset of release.assets as unknown[]) {
         if (typeof asset !== 'object' || asset === null || Array.isArray(asset)) continue;

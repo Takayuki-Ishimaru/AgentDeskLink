@@ -1,5 +1,5 @@
 import type {ElementHandle, Page} from 'playwright';
-import {AdlError, type Action, type ErrorCode} from './types.js';
+import {AdlError, type Action, type ErrorCode,type ErrorReason} from './types.js';
 import {SECRET_LABEL_PATTERN, BROWSER_PRIVACY_RULES} from './privacy.js';
 
 export interface PreflightResult {
@@ -9,15 +9,15 @@ export interface PreflightResult {
 }
 
 interface Probe {
-  ok: boolean; code?: ErrorCode;
+  ok: boolean; code?: ErrorCode;reason?:ErrorReason;
   role?: string; name?: string; enabled?: boolean;
   unique?: boolean; visible?: boolean; inViewport?: boolean; hit?: boolean;
 }
 
 interface ProbeArgs {
   secretLabelPattern:string; privacyRules:typeof BROWSER_PRIVACY_RULES;
-  allowAllOperations?:boolean;selector: string; action: 'click' | 'fill';
-  expectRole?: string; expectName?: string; requireHit: boolean;
+  allowAllOperations?:boolean;selector: string; action: 'click' | 'fill' | 'press' | 'hover';
+  expectRole?: string; expectName?: string; requireHit: boolean; key?:string;
 }
 
 function guard(signal: AbortSignal, assertCurrent: () => void): void {
@@ -27,14 +27,14 @@ function guard(signal: AbortSignal, assertCurrent: () => void): void {
 
 // Serialized by Playwright (String(fn)) and executed in the page: must not close over module scope.
 function probe(el: Element, a: ProbeArgs): Probe {
-  const deny = (code: ErrorCode): Probe => ({ok: false, code});
+  const deny = (code: ErrorCode,reason?:ErrorReason): Probe => ({ok: false, code,...(reason?{reason}:{})});
   try {
     const CONSEQUENTIAL = /(delete|remove|upload|send|submit|purchase|checkout|pay|payment|login|log in|sign in|sign up|register|withdraw|transfer)/i;
     const sensitiveLabel=(text:string)=>new RegExp(a.secretLabelPattern,'iu').test(text.normalize('NFKC').replace(/([A-Z])([A-Z][a-z])/g,'$1 $2').replace(/([a-z0-9])([A-Z])/g,'$1 $2').replace(/([A-Za-z])([0-9])/g,'$1 $2').replace(/([0-9])([A-Za-z])/g,'$1 $2'));
     if (!el || typeof el !== 'object' || el.isConnected !== true) return deny('E_STALE_STATE');
     const doc = el.ownerDocument ?? document;
     let list: NodeListOf<Element>;
-    try { list = doc.querySelectorAll(a.selector); } catch { return deny('E_STALE_STATE'); }
+    try { list = (el.getRootNode() as Document|ShadowRoot).querySelectorAll(a.selector); } catch { return deny('E_STALE_STATE'); }
     if (list.length !== 1 || list[0] !== el) return deny('E_STALE_STATE');
     const e = el as HTMLElement;
     const named = e as unknown as {type?: unknown; readOnly?: unknown; disabled?: unknown; labels?: ArrayLike<Element>; placeholder?: unknown; isContentEditable?: unknown};
@@ -48,7 +48,8 @@ function probe(el: Element, a: ProbeArgs): Probe {
       }
       return text.trim();
     };
-    const isText = /^(P|SPAN|LEGEND|H[1-6]|TD|LI)$/.test(tag) && !!directText(e);
+    const clickable=e.hasAttribute('onclick')||e.tabIndex>=0&&getComputedStyle(e).cursor==='pointer';
+    const isText = /^(DIV|P|SPAN|LEGEND|H[1-6]|TD|TH|LI|DT|DD|BLOCKQUOTE|CODE|PRE|TIME|CAPTION|FIGCAPTION|SUMMARY|STRONG|EM|B|I|SMALL|MARK|Q|SAMP|KBD|CITE|ABBR|ADDRESS|ARTICLE|SECTION|MAIN|HEADER|FOOTER|ASIDE|OUTPUT)$/.test(tag) && !!directText(e);
     const roleAttr = e.getAttribute('role');
     if ((roleAttr?.length ?? 0) > 100 || e.id.length > 512) return deny('E_RESOURCE_LIMIT');
     let role = roleAttr || '';
@@ -58,12 +59,12 @@ function probe(el: Element, a: ProbeArgs): Probe {
       else if (tag === 'INPUT') role = type === 'checkbox' ? 'checkbox' : type === 'radio' ? 'radio' : type === 'submit' ? 'button' : type === 'file' ? 'file' : 'textbox';
       else if (tag === 'TEXTAREA') role = 'textbox';
       else if (tag === 'SELECT') role = 'combobox';
-      else role = /^H[1-6]$/.test(tag) ? 'heading' : isText ? 'text' : 'generic';
+      else role = tag==='IMG'?'img':tag==='TH'?'columnheader':/^H[1-6]$/.test(tag) ? 'heading' : clickable ? 'button' : tag==='BLOCKQUOTE'?'blockquote':tag==='CODE'||tag==='PRE'?'code':tag==='TIME'?'time':tag==='CAPTION'||tag==='FIGCAPTION'?'caption':isText ? 'text' : 'generic';
     }
     const label = (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') ? named.labels?.[0] : undefined;
     const inSensitiveRegion=(element:Element):boolean=>{
       let node:Element|null=element,depth=0;
-      while(node&&depth++<a.privacyRules.ancestorCap){if(node.matches(a.privacyRules.regionSelector))return true;node=node.parentElement;}
+      while(node&&depth++<a.privacyRules.ancestorCap){if(node.matches(a.privacyRules.regionSelector))return true;node=node.parentElement??(node.getRootNode() as ShadowRoot).host??null;}
       return node!==null;
     };
     const descendantText=(el:Element,includeHidden=false):string=>{
@@ -80,10 +81,10 @@ function probe(el: Element, a: ProbeArgs): Probe {
     const refs=e.getAttribute('aria-labelledby')||'';
     if(refs.length>4096)return deny('E_RESOURCE_LIMIT');
     const ids=refs.trim()?refs.trim().split(/\s+/):[];
-    const referenceText=ids.length>16?'x'.repeat(512):ids.map(id=>{const item=doc.getElementById(id);return item?descendantText(item,true):'';}).join(' ').slice(0,512).trim();
+    const referenceText=ids.length>16?'x'.repeat(512):ids.map(id=>{const item=(e.getRootNode() as Document|ShadowRoot).getElementById(id);return item?descendantText(item,true):'';}).join(' ').slice(0,512).trim();
     const labelText=label?descendantText(label):'';
     const rawName = referenceText || e.getAttribute('aria-label') || labelText
-      || (role === 'button' || role === 'link' || role === 'status' || role === 'alert' || isText ? descendantText(e) : '')
+      || (isText&&!['BUTTON','A','INPUT','TEXTAREA','SELECT'].includes(tag)&&!clickable&&!roleAttr?directText(e):descendantText(e)) || e.getAttribute('alt')
       || e.getAttribute('placeholder') || e.getAttribute('title') || e.id || '';
     const nameAttr = e.getAttribute('name') || '';
     if (rawName.length > 4096 || nameAttr.length > 512) return deny('E_RESOURCE_LIMIT');
@@ -108,7 +109,7 @@ function probe(el: Element, a: ProbeArgs): Probe {
     let hit = false;
     if (inViewport) {
       // Only the topmost element at the center counts: an underlying target beneath a foreign overlay is stale.
-      const deep = doc as Document & {elementsFromPoint?: (x: number, y: number) => Element[] | null};
+      const deep = el.getRootNode() as Document & {elementsFromPoint?: (x: number, y: number) => Element[] | null};
       let stack: Element[] | null = null;
       try { stack = typeof deep.elementsFromPoint === 'function' ? deep.elementsFromPoint(cx, cy) : null; } catch { stack = null; }
       if (!stack || stack.length === 0) { const one = doc.elementFromPoint(cx, cy); stack = one ? [one] : []; }
@@ -129,32 +130,35 @@ function probe(el: Element, a: ProbeArgs): Probe {
     const consequential = CONSEQUENTIAL.test(haystack);
     if (a.expectRole !== undefined && role !== a.expectRole) return deny('E_STALE_STATE');
     if (a.expectName !== undefined && name !== a.expectName) return deny('E_STALE_STATE');
+    if(inSensitiveRegion(e))return deny('E_PRIVACY_BLOCKED');
     if (!a.allowAllOperations&&sensitive) return deny('E_PRIVACY_BLOCKED');
-    if (!a.allowAllOperations&&consequential) return deny('E_APPROVAL_REQUIRED');
+    if (!a.allowAllOperations&&consequential) return deny('E_APPROVAL_REQUIRED','consequential_operation');
+    if(!a.allowAllOperations&&a.action==='press'&&a.key==='Enter'&&form)return deny('E_APPROVAL_REQUIRED','consequential_operation');
     if (!a.allowAllOperations&&submitsForm) return deny('E_POLICY_DENIED');
     if (a.action === 'fill' && (!editable || readonly)) return deny('E_POLICY_DENIED');
     if (!enabled) return deny('E_STALE_STATE');
-    if (!visible || a.requireHit && (!inViewport || !hit)) return deny('E_STALE_STATE');
+    if (!visible || a.requireHit&&!inViewport) return deny('E_STALE_STATE','not_visible');
+    if(a.requireHit&&!hit)return deny('E_STALE_STATE','occluded');
     return {ok: true, role, name, enabled, unique: true, visible, inViewport, hit};
   } catch { return deny('E_STALE_STATE'); }
 }
 
 function assertProbe(p: Probe, requireHit = true): void {
-  if (!p.ok) throw new AdlError(p.code ?? 'E_STALE_STATE');
+  if (!p.ok) throw new AdlError(p.code ?? 'E_STALE_STATE',p.reason);
   if (p.unique !== true || p.visible !== true || requireHit && (p.inViewport !== true || p.hit !== true)) throw new AdlError('E_STALE_STATE');
 }
 
 export async function preflightBrowserInput(
   page: Page, el: ElementHandle, action: Action, selector: string,
-  signal: AbortSignal, assertCurrent: () => void, allowAllOperations=false,
+  signal: AbortSignal, assertCurrent: () => void, allowAllOperations=false,onHover?:()=>void,
 ): Promise<PreflightResult> {
   guard(signal, assertCurrent);
-  if (action.action !== 'click' && action.action !== 'fill') throw new AdlError('E_UNSUPPORTED_ACTION');
+  if (!['click','fill','press','hover'].includes(action.action)) throw new AdlError('E_UNSUPPORTED_ACTION');
   if (typeof selector !== 'string' || selector.length === 0) throw new AdlError('E_INVALID_ARGUMENT');
   const explicit = {...action.expected_target};
   if(allowAllOperations&&explicit.name?.includes('[redacted]'))delete explicit.name;
   if (page.isClosed()) throw new AdlError('E_STALE_STATE');
-  const args = (expectRole?: string, expectName?: string, requireHit = true): ProbeArgs => ({secretLabelPattern:SECRET_LABEL_PATTERN,privacyRules:BROWSER_PRIVACY_RULES,allowAllOperations,selector, action: action.action as 'click' | 'fill', expectRole, expectName, requireHit});
+  const args = (expectRole?: string, expectName?: string, requireHit = true): ProbeArgs => ({secretLabelPattern:SECRET_LABEL_PATTERN,privacyRules:BROWSER_PRIVACY_RULES,allowAllOperations,selector, action: action.action as 'click' | 'fill' | 'press' | 'hover', expectRole, expectName, requireHit,key:action.value});
   const runProbe = async (expectRole?: string, expectName?: string, requireHit = true): Promise<Probe> => {
     guard(signal, assertCurrent);
     const p = await el.evaluate(probe as never, args(expectRole, expectName, requireHit)) as unknown as Probe;
@@ -177,17 +181,17 @@ export async function preflightBrowserInput(
   assertProbe(first);
 
   // hover() is a virtual mouse move and may trigger overlays or replacement.
-  await el.hover();
+  onHover?.();await el.hover();
   guard(signal, assertCurrent);
   assertProbe(await runProbe(anchorRole, anchorName));
 
   let focusMatchesTarget = false;
-  if (action.action === 'fill') {
+  if (action.action === 'fill'||action.action==='press') {
     await el.focus();
     guard(signal, assertCurrent);
     // Focus may redirect: activeElement must be exactly the intended target before any input.
     guard(signal, assertCurrent);
-    const active = await el.evaluate((e) => document.activeElement === e) as boolean;
+    const active = await el.evaluate((e) => (e.getRootNode() as Document|ShadowRoot).activeElement === e) as boolean;
     guard(signal, assertCurrent);
     if (!active) throw new AdlError('E_FOCUS_CHANGED');
     assertProbe(await runProbe(anchorRole, anchorName));

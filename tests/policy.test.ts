@@ -33,11 +33,37 @@ test('redaction covers secret fields, emails, token query strings and API keys',
   const e = redactElement({id:'e1',role:'textbox',name:'Password',value:'canary-unknown-value',enabled:true,sensitive:true});
   assert.ok(!JSON.stringify(e).includes('canary')); assert.ok(!('sensitive' in e));
 });
+
+test('ordinary labels, long links and prose remain readable while structured secrets are hidden', () => {
+  for (const name of ['Opinion', 'Shipping', 'Author', 'Session length', 'Cookie settings']) {
+    assert.equal(redactElement({id:'e', role:'button', name, enabled:true}).name, name);
+  }
+  for (const text of [
+    'https://example.com/this-is-a-long-readable-documentation-path?category=shipping',
+    'A long paragraph about documentation with https://example.com/a-long-public-path-for-reading and other ordinary words.',
+    'opinion=positive shipping=express author=Alice',
+    'The token budget and token lifetime are documented here.',
+  ]) assert.equal(redactString(text), text);
+  const prose='This session explains cookie storage and credential handling. '+ 'Public documentation. '.repeat(40);
+  const paragraph=redactElement({id:'e',role:'text',name:prose,enabled:true});assert.equal(paragraph.name,prose.slice(0,512));
+  assert.ok(!redactElement({id:'e',role:'text',name:'Database db_password=PRIVATE_CANARY',enabled:true}).name.includes('PRIVATE_CANARY'));
+  for (const text of [
+    'https://example.com/?access_token=PRIVATE_CANARY',
+    'password=PRIVATE_CANARY', 'cookie=PRIVATE_CANARY', 'session_id=PRIVATE_CANARY',
+    'oauth_access_token=PRIVATE_CANARY', 'db_password=PRIVATE_CANARY', 'database.connection.password=PRIVATE_CANARY',
+    'Authorization: Bearer PRIVATE_CANARY', 'Authorization: Token PRIVATE_CANARY', 'Authorization: Basic PRIVATE_CANARY',
+    'https://example.com/?oauth_access_token=PRIVATE_CANARY&category=shipping',
+    'Bearer PRIVATE_CANARY_1234', 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjMifQ.signature123',
+  ]) assert.ok(!redactString(text).includes(text.includes('PRIVATE_CANARY') ? 'PRIVATE_CANARY' : text), text);
+});
 test('unsafe actions are denied, consequential controls fail closed', () => {
+  assert.throws(()=>authorizeAction({action:'click'}, {id:'e',role:'button',name:'Protected',enabled:true,protected:true},true),{code:'E_PRIVACY_BLOCKED'});
   assert.throws(()=>authorizeAction({action:'fill',value:'secret'}, {id:'e',role:'textbox',name:'Password',enabled:true,sensitive:true}),{code:'E_PRIVACY_BLOCKED'});
   for(const name of ['Delete account','Upload file','Pay now','Send email','Sign in','Submit'])
     assert.throws(()=>authorizeAction({action:'click'},{id:'e',role:'button',name,enabled:true}),{code:'E_APPROVAL_REQUIRED'});
   authorizeAction({action:'fill',value:'TEST-001'},{id:'e',role:'textbox',name:'Search',enabled:true});
+  authorizeAction({action:'scroll',direction:'down'},{id:'e',role:'region',name:'Payment documentation',enabled:true});
+  assert.throws(()=>authorizeAction({action:'press',value:'Control+Enter'},{id:'e',role:'textbox',name:'Search',enabled:true},true),{code:'E_INVALID_ARGUMENT'});
 });
 test('IPv6 transitions, mapped loopback and mixed DNS cannot bypass policy',async()=>{
  const p=config();for(const ip of ['::ffff:7f00:1','::ffff:127.0.0.1','::','ff02::1','fe80::1','fc00::1','2002:7f00:1::','2001::1','64:ff9b::7f00:1','fe80::1%eth0','192.0.2.1'])await assert.rejects(assertUrlAllowed('https://example.com',p,async()=>[ip]));

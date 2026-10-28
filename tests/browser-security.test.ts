@@ -39,9 +39,9 @@ test('navigation changes document handle namespace and sessions never share hand
 test('page text cannot authorize a selector; ambiguous selectors fail closed',async()=>{
  const f=await fixture('<button id="approved" type="button">Continue</button><button id="unapproved" data-actions="click" type="button">Continue</button>',[{selector:'button',actions:['click']}]);try{const s=await f.adapter.open(f.target,'strict_isolated',new AbortController().signal);const p=await s.snapshot();for(const e of p.elements)await assert.rejects(s.act({action:'click',element_id:e.id},new AbortController().signal),{code:'E_APPROVAL_REQUIRED'});}finally{await f.close();}
 });
-test('depth and collection limits mark truncation; oversized fields fail safely',async()=>{
- for(const html of ['<div>'.repeat(15)+'<button>Deep</button>'+'</div>'.repeat(15),Array.from({length:100},(_,i)=>`<button>Button ${i}</button>`).join('')]){
- const f=await fixture(html,[],10);try{const s=await f.adapter.open(f.target,'strict_isolated',new AbortController().signal);const p=await s.snapshot();assert.equal(p.truncated,true);assert.ok(p.elements.length<=10);}finally{await f.close();}}
+test('depth and internal collection bounds mark truncation; oversized fields fail safely',async()=>{
+ for(const html of ['<div>'.repeat(15)+'<button>Deep</button>'+'</div>'.repeat(15),Array.from({length:5001},(_,i)=>`<button>Button ${i}</button>`).join('')]){
+ const f=await fixture(html,[],10);try{const s=await f.adapter.open(f.target,'strict_isolated',new AbortController().signal);const p=await s.snapshot();assert.equal(p.truncated,true);assert.ok(p.elements.length<=5000);}finally{await f.close();}}
  const f=await fixture(`<p id="x" role="status">Ready</p><script>document.getElementById('x').setAttribute('role','R'.repeat(100000));</script>`);try{const s=await f.adapter.open(f.target,'strict_isolated',new AbortController().signal);await assert.rejects(s.snapshot(),{code:'E_RESOURCE_LIMIT'});}finally{await f.close();}
 });
 test('network response size cap fails before oversized document is loaded',async()=>{

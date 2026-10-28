@@ -9,11 +9,12 @@ import type {GesturePlan,GesturePolicy} from '../src/gesture-types.js';
 // Execute the supplied browser functions against a minimal DOM. The mock does not
 // inspect source strings to guess which evaluate call the implementation made.
 class FakeElement {
-  tagName='CANVAS';isConnected=true;disabled=false;parentElement:FakeElement|null=null;
+  tagName='CANVAS';isConnected=true;disabled=false;parentElement:FakeElement|null=null;sensitive=false;
   constructor(readonly id:string,readonly rect={x:10,y:10,left:10,top:10,right:610,bottom:260,width:600,height:250}){}
   getBoundingClientRect(){return {...this.rect};}getClientRects(){return [this.getBoundingClientRect()];}
   checkVisibility(){return true;}contains(node:FakeElement){return node===this||node.parentElement===this;}
-  matches(selector:string){return selector==='#board'||selector==='canvas';}
+  getRootNode(){return {};}
+  matches(selector:string){return selector==='#board'||selector==='canvas'||this.sensitive&&selector.includes('data-adl-classification');}
   closest(selector:string){if(selector.includes('input')||selector.includes('iframe')||selector.includes('button')||selector.includes('data-adl-sensitive'))return null;return null;}
   getAttribute(name:string){return name==='id'?this.id:null;}hasAttribute(){return false;}
 }
@@ -32,7 +33,7 @@ function fake(){
   const policy:GesturePolicy={enabled:true,surfaces:[{id:'board',selector:'#board',kinds:['drag','swipe']}]};
   const reference={png:Buffer.from('not-decoded-by-gesture'),captured_at:new Date().toISOString(),coordinate_space:'viewport_css_pixels',viewport:{width:1000,height:700,scroll_x:0,scroll_y:0,device_scale_factor:1},redacted:true,origin:'https://example.com'} as CapturedImage;
   const plan:GesturePlan={surface_id:'board',kind:'drag',points:[{x:50,y:50,t_ms:0},{x:150,y:70,t_ms:20},{x:250,y:100,t_ms:40}]};
-  return {page,state,events,policy,reference,plan};
+  return {page,state,events,policy,reference,plan,surface};
 }
 function inputEvents(events:{kind:string}[]){return events.filter(e=>e.kind==='down'||e.kind==='move'||e.kind==='up'||e.kind==='Input.dispatchTouchEvent');}
 
@@ -46,6 +47,11 @@ test('gesture module: invalid points/timing and non-unique surfaces fail before 
 test('gesture module: stale geometry, document generation and sensitive occlusion fail before input',{timeout:3000},async()=>{
  for(const change of [(f:ReturnType<typeof fake>)=>{f.state.scrollY=5;},(f:ReturnType<typeof fake>)=>{f.state.width=999;},(f:ReturnType<typeof fake>)=>{f.state.dpr=2;},(f:ReturnType<typeof fake>)=>{f.state.occluded=true;}]){const f=fake();change(f);await assert.rejects(runBrowserGesture(f.page,f.plan,f.policy,f.reference,new AbortController().signal,()=>{}));assert.equal(inputEvents(f.events).length,0);}
  const f=fake();await assert.rejects(runBrowserGesture(f.page,f.plan,f.policy,f.reference,new AbortController().signal,()=>{throw Object.assign(new Error('stale'),{code:'E_STALE_STATE'});}));assert.equal(inputEvents(f.events).length,0);
+});
+test('gesture module: explicitly protected surface remains blocked with broad permissions',{timeout:3000},async()=>{
+ const f=fake();f.surface.sensitive=true;
+ await assert.rejects(runBrowserGesture(f.page,f.plan,f.policy,f.reference,new AbortController().signal,()=>{},true),{code:'E_POLICY_DENIED'});
+ assert.equal(inputEvents(f.events).length,0);
 });
 test('gesture module: mouse drag releases once and reports input completion only',{timeout:3000},async()=>{
  const f=fake();const out=await runBrowserGesture(f.page,f.plan,f.policy,f.reference,new AbortController().signal,()=>{});assert.equal(out.released_input,true);assert.equal(out.kind,'drag');assert.equal(out.points_executed,3);assert.equal(out.verified,'input_sequence_completed');assert.equal(f.events.filter(e=>e.kind==='down').length,1);assert.equal(f.events.filter(e=>e.kind==='up').length,1);assert.ok(!f.events.some(e=>e.kind==='Input.dispatchTouchEvent'));

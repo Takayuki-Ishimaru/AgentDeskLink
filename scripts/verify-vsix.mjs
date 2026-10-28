@@ -16,7 +16,7 @@ const require = createRequire(import.meta.url);
 const yauzl = createRequire(require.resolve('@vscode/vsce'))('yauzl');
 const root = fileURLToPath(new URL('../', import.meta.url));
 const pkg = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'));
-const vsix = resolve(process.argv.slice(2).find(arg => !arg.startsWith('--')) ?? join(root, 'artifacts', `${pkg.name}-${pkg.version}.vsix`));
+const vsix = resolve(process.argv.slice(2).find(arg => !arg.startsWith('--')) ?? join(root, 'artifacts', process.argv.includes('--universal')?`${pkg.name}-${pkg.version}.vsix`:`${pkg.name}-${process.platform}-${process.arch}-${pkg.version}.vsix`));
 const forceBrowserDownload = process.argv.includes('--download-browser');
 const temp = await mkdtemp(join(tmpdir(), 'adl-vsix-cold-'));
 
@@ -129,7 +129,9 @@ try {
     assert.equal(result.ok, true, `${name}: ${JSON.stringify(result)} ${errors.join('')}`);
     return {raw,result};
   };
-  assert.equal((await client.listTools()).tools.length, 16);
+  const toolNames=(await client.listTools()).tools.map(tool=>tool.name).sort();
+  const expectedTools=['adl_capabilities','adl_targets','adl_sessions','adl_open','adl_observe','adl_capture','adl_record','adl_gesture','adl_act','adl_execute','adl_wait','adl_task','adl_close',...(manifest.helper?['adl_applications','adl_app']:[])].sort();
+  assert.deepEqual(toolNames,expectedTools,'register only tools supported by this host and policy');
   assert.equal((await call('adl_capabilities')).result.version, pkg.version);
   if (manifest.helper) assert.equal((await call('adl_applications')).result.applications[0].application_id, 'local.agentdesklink.package-probe');
   const target = (await call('adl_targets',{surface:'browser'})).result.targets[0];
@@ -165,7 +167,7 @@ try {
   assert.equal(stopped.error.code,'E_CANCELLED');
   const blocked=JSON.parse((await client.callTool({name:'adl_open',arguments:{url:origin}})).content.find(item=>item.type==='text').text);
   assert.equal(blocked.error.code,'E_CANCELLED');
-  console.log(JSON.stringify({ok:true,vsix,target:manifest.target,node:version,systemPath:'empty',browser:browser.source,browserBundled:false,cacheReuse:browser.source==='chromium',nativeHelper:manifest.helper ? 'loader and policy default verified; OS permissions require interactive acceptance' : null,mcpTools:16,browserFill:true,browserCapture:true,explicitPermissions:true,emergencyStop:true}));
+  console.log(JSON.stringify({ok:true,vsix,target:manifest.target,node:version,systemPath:'empty',browser:browser.source,browserBundled:false,cacheReuse:browser.source==='chromium',nativeHelper:manifest.helper ? 'loader and policy default verified; OS permissions require interactive acceptance' : null,mcpTools:toolNames.length,browserFill:true,browserCapture:true,explicitPermissions:true,emergencyStop:true}));
 } finally {
   await client?.close();
   if (http) await new Promise(accept => http.close(accept));

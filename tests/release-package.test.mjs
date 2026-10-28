@@ -37,7 +37,7 @@ test('package.json files array is exactly the public payload allowlist', () => {
 // Bounded child: kill npm if it ever hangs, and only ever run it with --ignore-scripts.
 function npmPackDryRun(cwd) {
   return new Promise((resolve, reject) => {
-    const args = ['pack', '--dry-run', '--json', '--ignore-scripts'];
+    const args = ['pack', '--dry-run', '--json', '--ignore-scripts', '--offline', '--no-audit', '--no-fund', '--update-notifier=false', '--cache', path.join(cwd,'.npm-cache')];
     // npm.cmd cannot be spawned directly on Windows. npm scripts expose the CLI path.
     const npmCli = process.env.npm_execpath;
     const child = spawn(npmCli ? process.execPath : 'npm', npmCli ? [npmCli, ...args] : args, {

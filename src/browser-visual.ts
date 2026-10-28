@@ -1,5 +1,6 @@
 import {Buffer} from 'node:buffer';
-import {errors,type Locator,type Page} from 'playwright';
+import {randomBytes} from 'node:crypto';
+import {errors,type CDPSession,type Locator,type Page} from 'playwright';
 import {AdlError} from './types.js';
 import type {CapturedImage, VisualPolicy} from './visual-types.js';
 import {TEXT_REDACTION_RULES} from './privacy.js';
@@ -9,7 +10,7 @@ const MAX_DIMENSION = 4096;
 const MAX_PIXELS = 4194304;
 const MAX_PNG_BYTES = 8 * 1024 * 1024;
 const CAPTURE_TIMEOUT_MS = 5000;
-const BASE_MASK_SELECTORS = ['input', 'textarea', 'select', '[contenteditable]', 'iframe', 'frame', '[data-adl-sensitive]'];
+const BASE_MASK_SELECTORS = ['input[type="password" i]', 'iframe', 'frame', '[data-adl-sensitive]'];
 
 interface Geometry {
   width: number; height: number; scroll_x: number; scroll_y: number; device_scale_factor: number;
@@ -97,13 +98,69 @@ function maskSelectors(visual: VisualPolicy): string[] {
   return [...new Set([...BASE_MASK_SELECTORS, ...trusted,browserPrivacyMaskSelector,...textMasks])];
 }
 
+// The isolated world is inaccessible to page scripts. Keep its bounded DOM
+// snapshot private: values are compared locally and are never returned.
+const DOM_STATE_EXPRESSION = `(() => {
+  const roots=[document], out=[]; let visited=0, size=0;
+  while(roots.length){const root=roots.pop(), walker=document.createTreeWalker(root,NodeFilter.SHOW_ELEMENT|NodeFilter.SHOW_TEXT);let node;
+    while((node=walker.nextNode())){
+      if(++visited>10000)throw new Error('limit');
+      if(node.nodeType===3){const t=node.nodeValue||'';size+=t.length;out.push(['t',t]);}
+      else {const e=node, attrs=Array.from(e.attributes,a=>[a.name,a.value]).sort((a,b)=>a[0].localeCompare(b[0]));
+        let value='';if(e instanceof HTMLInputElement||e instanceof HTMLTextAreaElement||e instanceof HTMLSelectElement)value=e.value;
+        if(value.length>4096)throw new Error('limit');
+        const checked=e instanceof HTMLInputElement?e.checked:null;
+        size+=value.length+JSON.stringify(attrs).length;out.push([e.tagName,attrs,value,checked]);
+        if(e.shadowRoot)roots.push(e.shadowRoot);
+      }
+      if(size>4194304)throw new Error('limit');
+    }
+  }return JSON.stringify(out);
+})()`;
+
+async function domState(cdp:CDPSession,contextId:number,signal:AbortSignal):Promise<string>{
+  const result=await guarded(()=>cdp.send('Runtime.evaluate',{expression:DOM_STATE_EXPRESSION,contextId,returnByValue:true}),signal);
+  if(result.exceptionDetails||typeof result.result.value!=='string')throw new AdlError('E_PRIVACY_BLOCKED');
+  return result.result.value;
+}
+
 export async function captureBrowserImage(
   page: Page, origin: string, visual: VisualPolicy | undefined, signal: AbortSignal
 ): Promise<CapturedImage> {
   assertActive(signal);
   if (visual?.enabled !== true) throw new AdlError('E_PRIVACY_BLOCKED');
+  assertOrigin(page,origin);
+  let cdp:CDPSession|undefined,disabled=false;const marked:number[]=[];const marker=`data-adl-private-${randomBytes(8).toString('hex')}`;
+  try{
+    cdp=await guarded(()=>page.context().newCDPSession(page),signal);
+    disabled=true;await guarded(()=>cdp!.send('Emulation.setScriptExecutionDisabled',{value:true}),signal);
+    const dom=await guarded(()=>cdp!.send('DOM.getDocument',{depth:-1,pierce:true}),signal);
+    const pending=[dom.root];let visited=0;
+    while(pending.length){const node=pending.pop()!;if(++visited>10000)throw new AdlError('E_RESOURCE_LIMIT');
+      if(node.shadowRoots?.some(root=>root.shadowRootType==='closed')){marked.push(node.nodeId);await guarded(()=>cdp!.send('DOM.setAttributeValue',{nodeId:node.nodeId,name:marker,value:''}),signal);}
+      if(node.children)pending.push(...node.children);if(node.shadowRoots)pending.push(...node.shadowRoots);
+    }
+    const tree=await guarded(()=>cdp!.send('Page.getFrameTree'),signal);
+    const world=await guarded(()=>cdp!.send('Page.createIsolatedWorld',{frameId:tree.frameTree.frame.id,worldName:'adl-capture-privacy'}),signal);
+    const before=await domState(cdp,world.executionContextId,signal);
+    const image=await captureFrozenBrowserImage(page,origin,visual,signal,marked.length?`[${marker}]`:undefined);
+    const after=await domState(cdp,world.executionContextId,signal);
+    if(before!==after)throw new AdlError('E_PRIVACY_BLOCKED');
+    return image;
+  }finally{
+    if(cdp){
+      try{for(const nodeId of marked)await cdp.send('DOM.removeAttribute',{nodeId,name:marker});if(disabled)await cdp.send('Emulation.setScriptExecutionDisabled',{value:false});}
+      catch{await page.context().close().catch(()=>undefined);throw new AdlError('E_PRIVACY_BLOCKED');}
+      finally{await cdp.detach().catch(()=>undefined);}
+    }
+  }
+}
+
+async function captureFrozenBrowserImage(
+  page: Page, origin: string, visual: VisualPolicy, signal: AbortSignal,additionalMask?:string
+): Promise<CapturedImage> {
   await guarded(()=>ensureBrowserPrivacySelectors(),signal);
-  const selectors = maskSelectors(visual);
+  const selectors = [...maskSelectors(visual),...(additionalMask?[additionalMask]:[])];
   assertOrigin(page, origin);
 
   const before = validateGeometry(await guarded(() => page.evaluate(GEOMETRY_EXPRESSION), signal));
@@ -121,7 +178,7 @@ export async function captureBrowserImage(
     type: 'png',
     scale: 'css',
     fullPage: false,
-    animations: 'allow',
+    animations: 'disabled',
     caret: 'initial',
     timeout: CAPTURE_TIMEOUT_MS,
     maskColor: '#000000',

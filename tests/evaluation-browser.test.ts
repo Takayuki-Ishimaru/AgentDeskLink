@@ -86,6 +86,19 @@ test('body email text is blacked out before retention and remains masked in crop
   }finally{await f.close();}
 });
 
+test('public navigation and long prose stay visible in screenshots while sensitive content is masked',{timeout:20000},async()=>{
+  const f=await fixture('<nav style="position:absolute;left:20px;top:200px;background:#00ff00;width:600px;height:30px"><a href="/one">Documentation</a><a href="/two">Community</a><a href="/three">Resources</a><a href="/four">Downloads</a></nav><p style="position:absolute;left:20px;top:250px;margin:0;background:#00ff00;width:600px;height:80px">'+('This is ordinary public documentation about the project and its features. '.repeat(10))+'</p><p style="position:absolute;left:20px;top:350px;margin:0;background:#00ff00;width:300px;height:30px">password: PRIVATE_CANARY</p>');
+  try{
+    const frame=await f.engine.capture(f.id,{max_dimension:2048,max_pixels:4194304});
+    for(const top of [205,255]){
+      const pixel=await sharp(frame.png).extract({left:610,top,width:1,height:1}).removeAlpha().raw().toBuffer();
+      assert.deepEqual([...pixel],[0,255,0],`public content at ${top} must remain visible`);
+    }
+    const secret=await sharp(frame.png).extract({left:25,top:355,width:1,height:1}).removeAlpha().raw().toBuffer();
+    assert.deepEqual([...secret],[0,0,0]);
+  }finally{await f.close();}
+});
+
 test('select option metadata and its selected value share secret redaction',{timeout:20000},async()=>{
   const f=await fixture('<select aria-label="Color"><option value="CANARY_OPTION_VALUE">API key</option><option value="b">青</option></select>');
   try{

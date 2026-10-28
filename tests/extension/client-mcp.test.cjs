@@ -23,7 +23,7 @@ test('a generated Claude Code registration discovers real MCP tools and bulk dis
   const transport=new StdioClientTransport({...registration,cwd:home,stderr:'pipe'});
   let stderr='';transport.stderr?.on('data',chunk=>{stderr+=chunk;});
   try{await client.connect(transport);}catch(error){throw new Error(`Managed MCP startup failed: ${stderr}`,{cause:error});}
-  const {tools}=await client.listTools();assert.equal(tools.length,16);assert.ok(tools.some(t=>t.name==='adl_capabilities'));
+  const {tools}=await client.listTools();assert.equal(tools.length,13);assert.ok(tools.some(t=>t.name==='adl_capabilities'));assert.ok(!tools.some(t=>t.name==='adl_approvals'));
   const targets=await client.callTool({name:'adl_targets',arguments:{}});assert.deepEqual(JSON.parse(targets.content[0].text).targets,[]);
   let timer;const closed=new Promise((resolve,reject)=>{client.onclose=resolve;timer=setTimeout(()=>reject(new Error('managed MCP connection did not close after disable')),3000);});
   try{await manager.sync(false,true);await closed;}finally{clearTimeout(timer);}
