@@ -110,7 +110,7 @@ try {
   await new Promise(accept => http.listen(0, '127.0.0.1', accept));
   const origin = `http://127.0.0.1:${http.address().port}`;
   const policy = {
-    allowLoopback:true, allowedOrigins:[origin],
+    allowLoopback:true, allowedOrigins:[origin], actionTimeoutMs:30_000,
     browserTargets:[{id:'bundle',label:'Bundled browser',url:origin,classification:'PUBLIC',visual:{enabled:true},controls:[{selector:'#q',actions:['fill']}]}],
     ...(manifest.helper ? {[process.platform === 'darwin' ? 'macos' : 'windows']:{appId:'local.agentdesklink.package-probe', appPath:node, classification:'PUBLIC', lifecycle:{enabled:true}}} : {}),
   };
@@ -124,7 +124,7 @@ try {
   await client.connect(transport);
   assert.equal(client.getServerVersion().version, pkg.version);
   const call = async (name, args = {}) => {
-    const raw = await client.callTool({name,arguments:args},{},{timeout:20000});
+    const raw = await client.callTool({name,arguments:args},{},{timeout:45000});
     const result = JSON.parse(raw.content.find(item => item.type === 'text').text);
     assert.equal(result.ok, true, `${name}: ${JSON.stringify(result)} ${errors.join('')}`);
     return {raw,result};

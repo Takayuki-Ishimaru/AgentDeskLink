@@ -26,7 +26,7 @@ async function runNavigation(action:'click'|'navigate') {
       browserTargets:[{id:'fixture',label:'Navigation fixture',url:origin,classification:'PUBLIC',
         controls:[{selector:'#next',actions:['click']},{selector:'#destination',actions:['fill']}]}]}));
     await client.connect(new StdioClientTransport({command:process.execPath,
-      args:[resolve(root,'dist/src/server.js'),'--config',config],cwd:root,stderr:'pipe'}));
+      args:[resolve(root,'dist/src/server.js'),'--config',config],cwd:root,stderr:'pipe',env:{CHROME_DEVEL_SANDBOX:process.env.CHROME_DEVEL_SANDBOX??''}}));
     const call=async(name:string,args:Record<string,unknown>={})=>{
       const result=await client.callTool({name,arguments:args});
       return JSON.parse((result.content as {type:string;text?:string}[]).find(block=>block.type==='text')!.text!) as any;
