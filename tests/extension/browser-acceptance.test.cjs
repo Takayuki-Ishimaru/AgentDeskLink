@@ -5,7 +5,7 @@ const path=require('node:path');
 const os=require('node:os');
 const load=()=>import('../../dist/src/extension/browser-setup.js');
 async function fixture(t){
-  const root=await fs.mkdtemp(path.join(os.tmpdir(),'adl-browser-parent-'));t.after(()=>fs.rm(root,{recursive:true,force:true}));
+  const root=await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(),'adl-browser-parent-')));t.after(()=>fs.rm(root,{recursive:true,force:true}));
   const extensionRoot=path.join(root,'extension');await fs.mkdir(path.join(extensionRoot,'node_modules/playwright'),{recursive:true});
   await fs.writeFile(path.join(extensionRoot,'node_modules/playwright/cli.js'),'fake');
   const storageDir=path.join(root,'storage');const calls=[];

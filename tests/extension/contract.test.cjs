@@ -41,7 +41,7 @@ function makeBundle(root, options = {}) {
 }
 
 function harness(initial = {}, options = {}) {
-  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'adl-extension-'));
+  const temp = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'adl-extension-')));
   const extensionRoot = path.join(temp, 'extension');
   fs.mkdirSync(extensionRoot, { recursive: true });
   if (options.bundle !== false) makeBundle(extensionRoot, options);
