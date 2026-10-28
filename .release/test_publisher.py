@@ -14,6 +14,7 @@ class API:
         if route=='actions/runs/123': return copy.deepcopy(self.ci)
         if route=='git/ref/heads/main': return {'object':{'sha':self.main}}
         if route=='git/ref/tags/v0.1.5': return None if self.tag is None else {'object':{'sha':self.tag,'type':'commit'}}
+        if route=='releases?per_page=100':return [] if self.release is None else [copy.deepcopy(self.release)]
         if route.startswith('releases/'): return copy.deepcopy(self.release)
         raise AssertionError(route)
     def patch(self, route, data):
