@@ -8,6 +8,7 @@ concurrency:
 jobs:
   browser:
     strategy:
+      fail-fast: false
       matrix:
         # The native helper currently builds with Visual Studio 2022.
         os: [macos-latest, windows-2022, ubuntu-24.04]

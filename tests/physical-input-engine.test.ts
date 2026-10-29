@@ -198,7 +198,12 @@ async function setup(
     },
   };
   const policy = parsePolicy({ macos: config, windows: config });
-  const engine = new Engine(policy, { browser: adapter, desktop: adapter });
+  // The synthetic physical desktop models macOS/Windows, independently of the test runner's OS.
+  const engine = new Engine(
+    policy,
+    { browser: adapter, desktop: adapter },
+    process.platform === 'darwin' ? 'darwin' : 'win32',
+  );
   await engine.listTargets('desktop');
   const session =
     options.open === false ? undefined : await engine.open(target.target_id, options.mode ?? 'interactive_desktop');
