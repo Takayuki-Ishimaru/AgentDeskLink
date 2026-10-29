@@ -433,7 +433,35 @@ class BrowserSession implements AdapterSession {
     }
   }
 
+  // One recovery budget is shared by both recovery points of a single
+  // observation call: the collection catch below and the final integrity
+  // validation. A confirmed same-origin document replacement (main generation
+  // advanced with the old store context destroyed) rebuilds the store and lets
+  // the whole result be recollected once; a second race fails closed instead
+  // of restarting again.
   async snapshot(signal?:AbortSignal): Promise<RawSnapshot> {
+    let spent = false;
+    const recover = async (): Promise<boolean> => {
+      if (spent) return false;
+      if (!(await this.storeContextGone())) return false;
+      spent = true;
+      this.checkAlive();
+      if (signal?.aborted) throw new AdlError('E_CANCELLED');
+      if (new URL(this.page.url()).origin !== this.origin) {await this.close();throw new AdlError('E_POLICY_DENIED');}
+      await this.freshStoreAssign();
+      return true;
+    };
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await this.snapshotAttempt(signal, recover);
+      } catch (error) {
+        if (attempt > 0 || !(error instanceof AdlError) || error.code !== 'E_STALE_STATE') throw error;
+        if (!(await recover())) throw error;
+      }
+    }
+  }
+
+  private async snapshotAttempt(signal:AbortSignal|undefined, recover:() => Promise<boolean>): Promise<RawSnapshot> {
     this.checkAlive();
     await this.settleRedirect();
     if(new URL(this.page.url()).origin!==this.origin){await this.close();throw new AdlError('E_POLICY_DENIED');}
@@ -449,9 +477,7 @@ class BrowserSession implements AdapterSession {
       this.checkAlive();
       // Bounded lazy recovery: a same-origin document replacement (link click)
       // destroys the store handle's context; rebuild once, only when confirmed.
-      if (!(await this.storeContextGone())) {this.checkAlive();throw new AdlError('E_INTERNAL');}
-      if(new URL(this.page.url()).origin!==this.origin){await this.close();throw new AdlError('E_POLICY_DENIED');}
-      await this.freshStoreAssign();
+      if (!(await recover())) {this.checkAlive();throw new AdlError('E_INTERNAL');}
       this.checkAlive();
       try {
         res = await this.collectSnapshot(this.store!,cfg,signal);

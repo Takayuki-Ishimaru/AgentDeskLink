@@ -127,3 +127,157 @@ test('cancellation before a navigating click dispatch preserves the session', {t
     await s.close();
   } finally {await f.close();}
 });
+
+// Recovery-budget regressions. These intercept the session's own private
+// methods through a cast so the race is deterministic without any product hook.
+type StoreHandle = {evaluate: (fn: (value: unknown) => unknown) => Promise<unknown>};
+type SessionInternals = {
+  store: StoreHandle | null;
+  collectSnapshot(store: StoreHandle, cfg: unknown, signal?: AbortSignal): Promise<unknown>;
+  assertIntegrity(signal?: AbortSignal): Promise<void>;
+  pageValue: {goto: (url: string, opts?: {waitUntil?: string}) => Promise<unknown>} | null;
+};
+const internals = (s: object) => s as unknown as SessionInternals;
+const DESTROYED = 'Execution context was destroyed during collection';
+
+test('snapshot recovery budget spans collection and final integrity', {timeout: 30000}, async () => {
+  const f = await fixture();
+  try {
+    const s = await f.adapter.open(f.target, 'strict_isolated', sig());
+    const held = internals(s);
+    const navigate = async () => {await held.pageValue!.goto(`${f.origin}/next`, {waitUntil: 'load'});};
+    const before = f.nextRequests();
+    let collects = 0;
+    const realCollect = held.collectSnapshot.bind(held);
+    held.collectSnapshot = async (h, cfg, signal) => {
+      collects++;
+      if (collects === 1) {await navigate(); throw new Error(DESTROYED);}
+      return realCollect(h, cfg, signal);
+    };
+    const realIntegrity = held.assertIntegrity.bind(held);
+    held.assertIntegrity = async (signal) => {await navigate(); await realIntegrity(signal);};
+    // One recovery was already spent on the collection race, so the second
+    // confirmed navigation must fail closed instead of collecting a third time.
+    await assert.rejects(s.snapshot(), {code: 'E_STALE_STATE'});
+    assert.equal(collects, 2);
+    assert.equal(f.nextRequests(), before + 2);
+    held.collectSnapshot = realCollect;
+    held.assertIntegrity = realIntegrity;
+    const b = await s.snapshot();
+    assert.ok(b.elements.some((e) => e.role === 'heading' && e.name === 'Next page'));
+    assert.equal(f.nextRequests(), before + 2);
+    await s.close();
+  } finally {await f.close();}
+});
+
+test('final integrity navigation recovers once with fresh element IDs', {timeout: 30000}, async () => {
+  const f = await fixture();
+  try {
+    const s = await f.adapter.open(f.target, 'strict_isolated', sig());
+    const held = internals(s);
+    const a = await s.snapshot();
+    const oldNext = byName(a, 'Next').id;
+    const before = f.nextRequests();
+    let collects = 0;
+    const realCollect = held.collectSnapshot.bind(held);
+    held.collectSnapshot = (h, cfg, signal) => {collects++; return realCollect(h, cfg, signal);};
+    // The navigation commits after the old document was collected and before
+    // the snapshot validated integrity.
+    let fired = false;
+    const realIntegrity = held.assertIntegrity.bind(held);
+    held.assertIntegrity = async (signal) => {
+      if (!fired) {fired = true; await held.pageValue!.goto(`${f.origin}/next`, {waitUntil: 'load'});}
+      await realIntegrity(signal);
+    };
+    const b = await s.snapshot();
+    assert.equal(collects, 2);
+    assert.ok(b.elements.some((e) => e.role === 'heading' && e.name === 'Next page'));
+    assert.ok(!b.elements.some((e) => e.name === 'Next' && e.id === oldNext));
+    assert.equal(f.nextRequests(), before + 1);
+    await assert.rejects(s.act({action: 'fill', element_id: oldNext, value: 'x'}, sig()), {code: 'E_TARGET_NOT_FOUND'});
+    held.assertIntegrity = realIntegrity;
+    const c = await s.snapshot();
+    assert.ok(c.elements.some((e) => e.role === 'heading' && e.name === 'Next page'));
+    assert.ok(c.elements.some((e) => e.name === 'Destination' && e.id !== oldNext));
+    await s.act({action: 'fill', element_id: byName(c, 'Destination').id, value: 'typed'}, sig());
+    assert.equal(byName(await s.snapshot(), 'Destination').value, 'typed');
+    await s.close();
+  } finally {await f.close();}
+});
+
+test('repeated final integrity navigation is bounded at two attempts', {timeout: 30000}, async () => {
+  const f = await fixture();
+  try {
+    const s = await f.adapter.open(f.target, 'strict_isolated', sig());
+    const held = internals(s);
+    const before = f.nextRequests();
+    let collects = 0;
+    const realCollect = held.collectSnapshot.bind(held);
+    held.collectSnapshot = (h, cfg, signal) => {collects++; return realCollect(h, cfg, signal);};
+    const realIntegrity = held.assertIntegrity.bind(held);
+    held.assertIntegrity = async (signal) => {await held.pageValue!.goto(`${f.origin}/next`, {waitUntil: 'load'}); await realIntegrity(signal);};
+    await assert.rejects(s.snapshot(), {code: 'E_STALE_STATE'});
+    assert.equal(collects, 2);
+    assert.equal(f.nextRequests(), before + 2);
+    held.assertIntegrity = realIntegrity;
+    assert.ok((await s.snapshot()).elements.some((e) => e.role === 'heading' && e.name === 'Next page'));
+    await s.close();
+  } finally {await f.close();}
+});
+
+test('E_STALE_STATE from a live store context is not retried', {timeout: 30000}, async () => {
+  const f = await fixture();
+  try {
+    const s = await f.adapter.open(f.target, 'strict_isolated', sig());
+    const held = internals(s);
+    const store = held.store!;
+    let collects = 0;
+    const realCollect = held.collectSnapshot.bind(held);
+    held.collectSnapshot = (h, cfg, signal) => {collects++; return realCollect(h, cfg, signal);};
+    const realIntegrity = held.assertIntegrity.bind(held);
+    held.assertIntegrity = async () => {await store.evaluate(() => undefined); throw new AdlError('E_STALE_STATE');};
+    await assert.rejects(s.snapshot(), {code: 'E_STALE_STATE'});
+    assert.equal(collects, 1);
+    held.assertIntegrity = realIntegrity;
+    assert.ok((await s.snapshot()).elements.some((e) => e.name === 'Next'));
+    await s.close();
+  } finally {await f.close();}
+});
+
+test('privacy, cancellation and timeout failures are never retried', {timeout: 30000}, async () => {
+  const f = await fixture();
+  try {
+    const s = await f.adapter.open(f.target, 'strict_isolated', sig());
+    const held = internals(s);
+    let collects = 0;
+    const realCollect = held.collectSnapshot.bind(held);
+    held.collectSnapshot = (h, cfg, signal) => {collects++; return realCollect(h, cfg, signal);};
+    const realIntegrity = held.assertIntegrity.bind(held);
+    for (const error of [new AdlError('E_PRIVACY_BLOCKED', 'untrusted_dom_api'), new AdlError('E_CANCELLED'), new AdlError('E_TIMEOUT')]) {
+      collects = 0;
+      held.assertIntegrity = async () => {throw error;};
+      await assert.rejects(s.snapshot(), {code: error.code});
+      assert.equal(collects, 1);
+    }
+    held.assertIntegrity = realIntegrity;
+    assert.ok((await s.snapshot()).elements.some((e) => e.name === 'Next'));
+    await s.close();
+  } finally {await f.close();}
+});
+
+test('cancellation after a confirmed navigation does not recover', {timeout: 30000}, async () => {
+  const f = await fixture();
+  try {
+    const s = await f.adapter.open(f.target, 'strict_isolated', sig());
+    const held = internals(s);
+    const before = f.nextRequests();
+    const realIntegrity = held.assertIntegrity.bind(held);
+    const c = new AbortController();
+    held.assertIntegrity = async (signal) => {await held.pageValue!.goto(`${f.origin}/next`, {waitUntil: 'load'}); c.abort(); await realIntegrity(signal);};
+    await assert.rejects(s.snapshot(c.signal), {code: 'E_CANCELLED'});
+    assert.equal(f.nextRequests(), before + 1);
+    held.assertIntegrity = realIntegrity;
+    assert.ok((await s.snapshot()).elements.some((e) => e.role === 'heading' && e.name === 'Next page'));
+    await s.close();
+  } finally {await f.close();}
+});
