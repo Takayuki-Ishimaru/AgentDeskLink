@@ -2,21 +2,21 @@
 
 [日本語](INSTALL.md) | **English**
 
-Target version: `0.1.6` (beta)
+Target version: `0.1.7` (beta)
 
 ## Requirements
 
 - VS Code 1.101 or newer.
-- The common `agentdesklink-0.1.6.vsix` package. Check the [supported environments and known limitations](KNOWN_ISSUES_en.md).
+- The common `agentdesklink-0.1.7.vsix` package. Check the [supported environments and known limitations](KNOWN_ISSUES_en.md).
 - A network connection for the first Chromium download if Chrome is not installed.
 
-One VSIX bundles Node.js and image-processing libraries for macOS / Apple silicon, Windows x64 and Linux x64. It also includes the macOS and Windows desktop helpers. It selects the matching runtime at startup, so no separate build is needed.
+One VSIX bundles Node.js and image-processing libraries for macOS / Apple silicon, Windows x64 and Linux x64. It also includes the macOS, Windows and Linux desktop helpers (the Linux helper is a Python 3 script that needs the OS python3-gi packages). It selects the matching runtime at startup, so no separate build is needed.
 
 The distribution file is shared across these operating systems. This common VSIX does not support macOS x64, Windows arm64 or Linux arm64.
 
 ## Installation
 
-1. Download `agentdesklink-0.1.6.vsix` and `SHA256SUMS` from the release page.
+1. Download `agentdesklink-0.1.7.vsix` and `SHA256SUMS` from the release page.
 2. Compute the SHA-256 using the [update guide](UPDATES_en.md) and confirm it matches the list.
 3. In the VS Code Command Palette, choose “Extensions: Install from VSIX...” and select the VSIX.
 4. Open the folder you want to use, review its contents and trust the workspace.
@@ -50,6 +50,7 @@ MCP is disabled by default for every workspace. Enabling it grants no target acc
 | `agentdesklink.browserHeadless` | Defaults to `true`. Set false for a visible browser and manual login |
 | `agentdesklink.sessionIdleMinutes` | Idle session timeout, 1–60 minutes; defaults to 15 |
 | `agentdesklink.browserProxyServer` | HTTP(S) proxy origin without credentials, path or query; defaults to empty |
+| `agentdesklink.browserProxyConnectByHostname` | Off by default; sends HTTPS CONNECT by hostname for proxies that grant hosts by name. Local DNS/IP and TLS checks remain enforced |
 | `agentdesklink.allowUnredactedImages` | Allows unredacted native images. Defaults to off |
 | `agentdesklink.allowPhysicalInput` | Allows physical input. Also requires a configured app and `allowUnredactedImages`. Defaults to off |
 | `agentdesklink.allowLoopback` / `agentdesklink.allowPrivateNetwork` | Allows loopback/private-network connections. Defaults to off |
@@ -58,11 +59,11 @@ Check “Current permissions” in the panel to see the effective grants. Observ
 
 ### Permission tiers and one-shot approvals
 
-- **Read only**: observe, navigate and scroll.
-- **Standard**: ordinary browser inputs, clicks and GET search forms; consequential actions such as purchase, deletion or credential entry are denied.
-- **Ask each time**: standard actions plus inspected consequential actions approved once in a VS Code dialog. Review the target and contents, then approve or deny. The AI cannot decide the approval. After approval, it retries the same operation.
+- **Read only**: observe, navigate and scroll. Allowed desktop apps are observe-only; operations are refused with `desktop_operation_not_granted`.
+- **Standard**: ordinary browser inputs, clicks and forms handled within JavaScript, plus ordinary actions on the allowed desktop app on macOS, Windows and Linux (click, fill, check, select, scroll); consequential actions such as purchase, deletion or credential entry are denied.
+- **Ask each time**: standard actions plus inspected consequential actions approved once in a VS Code dialog. For a desktop app the dialog shows the app ID, window title, role and control name. Review the target and contents, then approve or deny. The AI cannot decide the approval. After approval, it retries the same operation.
 
-Approvals cover inspected controls in the main document, open Shadow DOM and same-origin iframes. Closed shadow roots, out-of-process iframe proofs, native apps, generic AJAX/DELETE and file uploads remain unsupported. Changed contents, expiry and emergency stop invalidate approvals. Unavailable approval dialogs do not authorize consequential operations. Secret values are not sent to the dialog.
+Browser approvals cover inspected controls in the main document, open Shadow DOM and same-origin iframes. A desktop approval covers a single action on a consequential control (delete, send and similar) at the observed revision only. Sensitive controls such as password fields are always refused, even with approval. Closed shadow roots, out-of-process iframe proofs, generic AJAX/DELETE and file uploads remain unsupported. Changed contents, expiry and emergency stop invalidate approvals. Unavailable approval dialogs do not authorize consequential operations. Secret values are not sent to the dialog.
 
 An existing `allowAllOperations: true` still takes precedence after updating. To use a permission tier, select Read only, Standard or Ask each time in the panel. Reconnect external clients after changing settings when needed.
 
@@ -81,6 +82,13 @@ When launching the CLI from another MCP host, supply a policy JSON with `--confi
 - **macOS**: desktop control requires Accessibility permission, and image capture requires Screen Recording. Grant these in System Settings.
 - **Windows**: run the target application and server in the same interactive session.
 - **Linux x64 (Ubuntu 24.04)**: browser operations are supported. Install the operating system shared libraries needed by Chrome or Chromium and run as a regular user with a working OS sandbox. If libraries are missing, install the browser runtime dependencies through your operating system package manager.
+- **Linux desktop control (AT-SPI2)**: install `sudo apt install python3-gi gir1.2-atspi-2.0 at-spi2-core` and enable accessibility (GNOME: `gsettings set org.gnome.desktop.interface toolkit-accessibility true`; on other X11 desktops a running `at-spi-bus-launcher` is enough). In the settings panel the application ID is the AT-SPI application name and the path is the absolute executable (`readlink /proc/<pid>/exe`; for scripted applications this is the interpreter). List application names with:
+
+  ```sh
+  python3 -c "import gi; gi.require_version('Atspi','2.0'); from gi.repository import Atspi; d=Atspi.get_desktop(0); print(*[(a.get_name(), a.get_process_id()) for a in (d.get_child_at_index(i) for i in range(d.get_child_count())) if a], sep='\n')"
+  ```
+
+  Supported are window observation and the semantic actions click / fill / check / select / scroll. The standard tier refuses consequential controls (delete, send, purchase, login and similar) and sensitive fields such as passwords (sensitive fields stay refused even with all operations allowed). Physical input, window images and application launch/quit are unsupported on Linux and listed under `platform_unsupported` in `adl_capabilities`. Native Wayland apps expose size but no screen position or display ID. XWayland apps still return an X display ID within a Wayland session. GTK 4 check boxes have no AT-SPI action, so `check` is reported as unsupported for them. Without the prerequisite packages or an accessibility bus, operations fail with reason `linux_accessibility_unavailable`.
 
 Ubuntu 24.04 restricts user namespaces, so automatically downloaded Chromium may need an administrator to configure its sandbox. Use an OS-installed Chrome or ask your administrator to review Chromium's [sandbox setup](https://chromium.googlesource.com/chromium/src/+/main/docs/security/apparmor-userns-restrictions.md). AgentDeskLink does not change operating system settings automatically or launch Chromium with its sandbox disabled.
 

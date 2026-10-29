@@ -110,12 +110,17 @@ final class SemanticInputMonitor: @unchecked Sendable {
 }
 final class Broker {
     let appID:String; let appPath:String; let rules:[String:Rule];let allowAll:Bool;let restrictTargets:Bool
+    // --operation-mode standard|ask (argv only): the vocabulary tier shared with the Linux and Windows helpers. ask also
+    // honours the parent's one-shot `approved:true` on the consequential gate; sensitive controls stay refused in both.
+    let operationMode:String?
+    var tier:Bool {operationMode != nil}
+    var ask:Bool {operationMode=="ask"}
     var targets:[WindowTarget]=[]; var sessions:[String:Session]=[:]; var observers:[pid_t:(start:String,observer:AXObserver)]=[:]
     let system = AXUIElementCreateSystemWide()
     let captureBroker: WindowCaptureBroker
     let lifecycle:NativeApplicationLifecycle
-    init(_ appID:String,_ appPath:String,_ controls:String?,_ visualEnabled:Bool=false,_ interactiveConfig:String?=nil,_ lifecycleEnabled:Bool=false,_ allowAll:Bool=false,_ restrictTargets:Bool=false) throws {
-        self.allowAll=allowAll;self.restrictTargets=restrictTargets;self.appID=appID;self.appPath=URL(fileURLWithPath:appPath).resolvingSymlinksInPath().path
+    init(_ appID:String,_ appPath:String,_ controls:String?,_ visualEnabled:Bool=false,_ interactiveConfig:String?=nil,_ lifecycleEnabled:Bool=false,_ allowAll:Bool=false,_ restrictTargets:Bool=false,_ operationMode:String?=nil) throws {
+        self.allowAll=allowAll;self.restrictTargets=restrictTargets;self.operationMode=operationMode;self.appID=appID;self.appPath=URL(fileURLWithPath:appPath).resolvingSymlinksInPath().path
         self.captureBroker=WindowCaptureBroker(appID,self.appPath,visualEnabled,allowAll:allowAll,restrictTargets:restrictTargets)
         self.lifecycle=NativeApplicationLifecycle(appID,self.appPath,lifecycleEnabled)
         guard appPath.hasPrefix("/"), !appID.isEmpty, appID.utf8.count<=128 else {throw fail("E_INVALID_ARGUMENT")}
@@ -315,7 +320,17 @@ final class Broker {
         guard let expected=request["expected_revision"] as? NSNumber,CFGetTypeID(expected) != CFBooleanGetTypeID(),expected.doubleValue==Double(s.revision) else {throw fail("E_STALE_STATE")}
         guard fresh["truncated"] as? Bool == false else {throw fail("E_RESOURCE_LIMIT")}
         guard let id=request["element_id"] as? String,let node=s.nodes.first(where:{$0.id==id}),let action=request["action"] as? String else {throw fail("E_TARGET_NOT_FOUND")}
-        if !allowAll {
+        var approved=false
+        if let flag=request["approved"] {
+            // The parent's one-shot host approval: accepted only by an ask-tier launch and only as the literal true.
+            guard ask,let value=flag as? NSNumber,CFGetTypeID(value)==CFBooleanGetTypeID(),value.boolValue else {throw fail("E_INVALID_ARGUMENT")}
+            approved=true
+        }
+        if !allowAll && tier {
+            // Standard / ask tier: no allowlist, the shared vocabulary decides; scroll is exempt.
+            guard node.publicData["sensitive"] as? Bool != true else {throw fail("E_PRIVACY_BLOCKED")}
+            if action != "scroll" && !approved && (consequentialLabel(node.privateData["name"] as? String ?? "") || consequentialLabel(node.identifier)) {throw fail("E_APPROVAL_REQUIRED")}
+        } else if !allowAll {
             guard let rule=rules[node.identifier],rule.allowed.contains(action),rule.role==node.rawRole || rule.role==role(node.rawRole),rule.subrole==nil || rule.subrole==node.subrole else {throw fail("E_POLICY_DENIED")}
             guard s.nodes.filter({$0.identifier==node.identifier && $0.rawRole==node.rawRole}).count==1,node.publicData["sensitive"] as? Bool != true else {throw fail("E_POLICY_DENIED")}
         }
@@ -373,7 +388,7 @@ final class Broker {
     }
     func request(_ r:[String:Any]) throws -> [String:Any] {
         guard let op=r["op"] as? String else {throw fail("E_INVALID_ARGUMENT")}
-        let fields:[String:Set<String>]=["application":["op","request_id","action"],"discover":["op","request_id"],"open":["op","request_id","target_id","mode"],"snapshot":["op","request_id","target_id","session_id"],"close":["op","request_id","target_id","session_id"],"capture":["op","request_id","target_id","session_id"],"gesture":["op","request_id","target_id","session_id","expected_revision","input_token","surface_id","kind","points","swipe_backend"],"prepare_input":["op","request_id","target_id","session_id","input_token","point","action","expected_target"],"commit_input":["op","request_id","target_id","session_id","confirmation_id","value"],"act":["op","request_id","target_id","session_id","expected_revision","action","element_id","value","checked","direction"]]
+        let fields:[String:Set<String>]=["application":["op","request_id","action"],"discover":["op","request_id"],"open":["op","request_id","target_id","mode"],"snapshot":["op","request_id","target_id","session_id"],"close":["op","request_id","target_id","session_id"],"capture":["op","request_id","target_id","session_id"],"gesture":["op","request_id","target_id","session_id","expected_revision","input_token","surface_id","kind","points","swipe_backend"],"prepare_input":["op","request_id","target_id","session_id","input_token","point","action","expected_target"],"commit_input":["op","request_id","target_id","session_id","confirmation_id","value"],"act":["op","request_id","target_id","session_id","expected_revision","action","element_id","value","checked","direction","approved"]]
         guard let allowed=fields[op],Set(r.keys).isSubset(of:allowed) else {throw fail("E_INVALID_ARGUMENT")}
         if op=="application" {
             guard let action=r["action"] as? String,let id=r["request_id"] as? String else{throw fail("E_INVALID_ARGUMENT")}
@@ -387,7 +402,7 @@ final class Broker {
             guard allowAll || semantic.count+visual.count<=32 else {throw fail("E_RESOURCE_LIMIT")}
             var combined:[[String:Any]]=[]
             if allowAll{for i in 0..<max(semantic.count,visual.count){if i<semantic.count{combined.append(semantic[i])};if i<visual.count{combined.append(visual[i])}}}else{combined=semantic+visual}
-            return ["protocol_version":2,"targets":Array(combined.prefix(32)),"mutations_enabled":allowAll || !rules.isEmpty,"focus_control":"probe_guarded_semantic","visual_capture":captureBroker.available,"interactive_input":captureBroker.input?.available ?? false,"gesture_backends":captureBroker.input?.backends ?? []]
+            return ["protocol_version":2,"targets":Array(combined.prefix(32)),"mutations_enabled":allowAll || !rules.isEmpty || tier,"focus_control":"probe_guarded_semantic","visual_capture":captureBroker.available,"interactive_input":captureBroker.input?.available ?? false,"gesture_backends":captureBroker.input?.backends ?? []]
         }
         if let targetID=r["target_id"] as? String,captureBroker.owns(targetID) {return try captureBroker.request(op,r,targetID)}
         if op=="capture" {throw fail("E_UNSUPPORTED_ACTION")}
@@ -414,10 +429,12 @@ let restrictTargetFlags=args.filter{$0=="--restrict-targets"}.count
 let lifecycleFlags=args.filter{$0=="--lifecycle-enabled"}.count
 guard visualFlags<=1,lifecycleFlags<=1,allowAllFlags<=1,restrictTargetFlags<=1 else {exit(2)}
 args.removeAll{$0=="--visual-enabled" || $0=="--lifecycle-enabled" || $0=="--allow-all" || $0=="--restrict-targets"}
-while args.count>=2 {let key=args.removeFirst();if !["--app-id","--app-path","--controls-file","--interactive-config"].contains(key) || opts[key] != nil {exit(2)};opts[key]=args.removeFirst()}
+while args.count>=2 {let key=args.removeFirst();if !["--app-id","--app-path","--controls-file","--interactive-config","--operation-mode"].contains(key) || opts[key] != nil {exit(2)};opts[key]=args.removeFirst()}
 guard args.isEmpty,let appID=opts["--app-id"],let appPath=opts["--app-path"] else {exit(2)}
+// A tier is one policy: standard or ask, never combined with --allow-all or an allowlist.
+if let mode=opts["--operation-mode"] {guard ["standard","ask"].contains(mode),allowAllFlags==0,opts["--controls-file"]==nil else {exit(2)}}
 let broker:Broker
-do {broker=try Broker(appID,appPath,opts["--controls-file"],visualFlags==1,opts["--interactive-config"],lifecycleFlags==1,allowAllFlags==1,restrictTargetFlags==1)} catch {FileHandle.standardError.write(Data("AgentDeskLink: native setup unavailable.\n".utf8));exit(2)}
+do {broker=try Broker(appID,appPath,opts["--controls-file"],visualFlags==1,opts["--interactive-config"],lifecycleFlags==1,allowAllFlags==1,restrictTargetFlags==1,opts["--operation-mode"])} catch {FileHandle.standardError.write(Data("AgentDeskLink: native setup unavailable.\n".utf8));exit(2)}
 var running=true
 let reader=DispatchQueue(label:"adl.stdin")
 let pending=NativeRequestQueue()

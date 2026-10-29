@@ -2,7 +2,7 @@
   "name": "agentdesklink",
   "displayName": "AgentDeskLink",
   "description": "Local-first semantic browser and desktop control over MCP, with a per-workspace AgentDeskLink sidebar for VS Code.",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "publisher": "agentdesklink",
   "license": "MIT",
   "private": true,
@@ -146,6 +146,12 @@
           "scope": "window",
           "description": "公開プロキシ origin（http(s)、認証情報・パスなし）/ Public proxy origin (http(s), no credentials or path)."
         },
+        "agentdesklink.browserProxyConnectByHostname": {
+          "type": "boolean",
+          "default": false,
+          "scope": "window",
+          "description": "信頼できるワークスペース設定: プロキシへの CONNECT を、検査済みの IP アドレスではなくホスト名で送る（ホスト名で許可判定する企業プロキシ向け）。ローカルの DNS／IP 検査と TLS のホスト名検証は維持されます。HTTPS のみ。 / Trusted per-workspace setting: send the proxy CONNECT by hostname instead of the vetted IP address, for corporate proxies that allow traffic by hostname. Local DNS and IP checks and TLS hostname verification still apply. HTTPS only."
+        },
         "agentdesklink.desktopAppId": {
           "type": "string",
           "default": "",
@@ -249,11 +255,14 @@
     "build:tsc": "tsc",
     "build:extension": "node esbuild.extension.mjs",
     "check": "tsc --noEmit",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
     "test": "npm run build && node scripts/run-tests.mjs",
     "test:unit": "npm run build:tsc && node --test --test-timeout=10000 dist/tests/policy.test.js dist/tests/snapshot.test.js dist/tests/core.test.js",
     "test:extension": "npm run build && node --test --test-concurrency=1 --test-timeout=10000 --test-force-exit tests/extension/*.test.cjs",
     "prepare:runtime": "node scripts/prepare-runtime.mjs",
     "test:package": "node --test --test-concurrency=1 --test-timeout=10000 --test-force-exit tests/package-runtime.test.mjs tests/release-package.test.mjs tests/universal-*.test.mjs",
+    "test:live": "npm run build:tsc && node --test --test-timeout=120000 --test-force-exit scripts/python-docs-live.mjs",
     "verify:vsix": "node scripts/verify-vsix.mjs",
     "package:vsix": "npm run build && node scripts/package-vsix.mjs",
     "start": "node dist/src/server.js",
@@ -284,6 +293,7 @@
     "@types/vscode": "1.101.0",
     "@vscode/vsce": "3.6.1",
     "esbuild": "0.25.10",
+    "prettier": "3.9.10",
     "typescript": "7.0.2"
   },
   "galleryBanner": {

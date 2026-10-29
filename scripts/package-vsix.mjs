@@ -7,12 +7,15 @@ import { assembleUniversalVsix, UNIVERSAL_TARGETS } from './universal-vsix.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const pkg = JSON.parse(await readFile(path.join(root, 'package.json'), 'utf8'));
-let component = false, universal=false, directory, help = false;
+let component = false,
+  universal = false,
+  directory,
+  help = false;
 const args = process.argv.slice(2);
 for (let i = 0; i < args.length; i++) {
   const arg = args[i];
   if (arg === '--component') component = true;
-  else if(arg==='--universal')universal=true;
+  else if (arg === '--universal') universal = true;
   else if (arg === '--components') {
     directory = args[++i];
     if (!directory || directory.startsWith('--')) throw new Error('--components requires a directory');
@@ -22,17 +25,24 @@ for (let i = 0; i < args.length; i++) {
   } else if (arg === '--help' || arg === '-h') help = true;
   else throw new Error(`Unknown argument: ${arg}`);
 }
-if (component && (directory||universal)) throw new Error('--component and --universal/--components cannot be combined');
+if (component && (directory || universal))
+  throw new Error('--component and --universal/--components cannot be combined');
 if (help) {
-  console.log('Usage: npm run package:vsix -- [--universal [--components DIR]]\nBy default creates a smaller VSIX for the current OS/architecture.\n--universal assembles all three OS components; --component remains a compatible alias for the default.');
-} else if (component||!universal&&!directory) {
+  console.log(
+    'Usage: npm run package:vsix -- [--universal [--components DIR]]\nBy default creates a smaller VSIX for the current OS/architecture.\n--universal assembles all three OS components; --component remains a compatible alias for the default.',
+  );
+} else if (component || (!universal && !directory)) {
   const target = `${process.platform}-${process.arch}`;
   await mkdir(path.join(root, 'artifacts'), { recursive: true });
   await prepareRuntime({ root, target });
   const { createVSIX } = createRequire(import.meta.url)('@vscode/vsce');
-  await createVSIX({ cwd: root, target,
+  await createVSIX({
+    cwd: root,
+    target,
     packagePath: path.join(root, 'artifacts', `${pkg.name}-${target}-${pkg.version}.vsix`),
-    allowMissingRepository: true, rewriteRelativeLinks: false });
+    allowMissingRepository: true,
+    rewriteRelativeLinks: false,
+  });
 } else {
   const componentDir = path.resolve(root, directory ?? 'artifacts/components');
   const wanted = new Map(UNIVERSAL_TARGETS.map(target => [`${pkg.name}-${target}-${pkg.version}.vsix`, []]));
@@ -46,14 +56,23 @@ if (help) {
       else if (entry.isFile() && wanted.has(entry.name)) wanted.get(entry.name).push(file);
     }
   }
-  try { await collect(componentDir); }
-  catch (error) { throw new Error(`Cannot load component VSIX files from ${componentDir}: ${error.message}`); }
+  try {
+    await collect(componentDir);
+  } catch (error) {
+    throw new Error(`Cannot load component VSIX files from ${componentDir}: ${error.message}`);
+  }
   const components = [];
   for (const [name, files] of wanted) {
-    if (files.length !== 1) throw new Error(`Exactly one ${name} is required; found ${files.length}. Build/download all three components first.`);
+    if (files.length !== 1)
+      throw new Error(
+        `Exactly one ${name} is required; found ${files.length}. Build/download all three components first.`,
+      );
     components.push(files[0]);
   }
-  const result = await assembleUniversalVsix({ components, version: pkg.version,
-    output: path.join(root, 'artifacts', `${pkg.name}-${pkg.version}.vsix`) });
+  const result = await assembleUniversalVsix({
+    components,
+    version: pkg.version,
+    output: path.join(root, 'artifacts', `${pkg.name}-${pkg.version}.vsix`),
+  });
   console.log(`Universal VSIX created: ${result.output} (${result.targets.join(', ')})`);
 }

@@ -1,10 +1,28 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
-import { detectClients, inspectClient, configureClient, type DetectOptions, type ClientInfo, type ClientResult, type Registration } from './ai-clients.js';
-import { readManagedDescriptor, writeManagedDescriptor, writeManagedLauncher, type ManagedLaunchDescriptor } from './client-launcher.js';
+import {
+  detectClients,
+  inspectClient,
+  configureClient,
+  type DetectOptions,
+  type ClientInfo,
+  type ClientResult,
+  type Registration,
+} from './ai-clients.js';
+import {
+  readManagedDescriptor,
+  writeManagedDescriptor,
+  writeManagedLauncher,
+  type ManagedLaunchDescriptor,
+} from './client-launcher.js';
 
-export interface ClientLaunch { command: string; args: string[]; env: Record<string, string>; cwd: string }
+export interface ClientLaunch {
+  command: string;
+  args: string[];
+  env: Record<string, string>;
+  cwd: string;
+}
 export interface ClientManagerOptions {
   storageDir: string;
   owner: string;
@@ -13,7 +31,10 @@ export interface ClientManagerOptions {
   getLaunch(): Promise<ClientLaunch | undefined>;
   changed?(): void;
 }
-export interface ClientRow extends ClientInfo { status: ClientResult['status'] | 'not-detected'; message: string }
+export interface ClientRow extends ClientInfo {
+  status: ClientResult['status'] | 'not-detected';
+  message: string;
+}
 
 // External clients share one explicitly selected workspace. Opening another window
 // never takes over its grants; the bulk-enable action is the ownership boundary.
@@ -37,7 +58,9 @@ export class AiClientManager {
     this.detect();
   }
 
-  private registration(): Registration { return { command: this.nodePath, args: [this.launcherPath, this.descriptorPath] }; }
+  private registration(): Registration {
+    return { command: this.nodePath, args: [this.launcherPath, this.descriptorPath] };
+  }
 
   detect(): void {
     this.results.clear();
@@ -53,7 +76,9 @@ export class AiClientManager {
     });
   }
 
-  owner(): string | undefined { return readManagedDescriptor(this.descriptorPath)?.owner; }
+  owner(): string | undefined {
+    return readManagedDescriptor(this.descriptorPath)?.owner;
+  }
 
   // Runs before asynchronous preparation or config writes, so a failed cleanup
   // still revokes connected clients and old saved launch commands.
@@ -66,18 +91,29 @@ export class AiClientManager {
   }
 
   sync(enabled: boolean, takeOwnership = false): Promise<void> {
-    try { this.revoke(takeOwnership); } catch (error) { this.error = this.message(error); return Promise.resolve(); }
+    try {
+      this.revoke(takeOwnership);
+    } catch (error) {
+      this.error = this.message(error);
+      return Promise.resolve();
+    }
     const revision = this.revision;
     const next = this.queue.then(() => this.performSync(enabled, takeOwnership, revision));
-    this.queue = next.catch(error => { this.error = this.message(error); this.options.changed?.(); });
+    this.queue = next.catch(error => {
+      this.error = this.message(error);
+      this.options.changed?.();
+    });
     return this.queue;
   }
 
-  private current(revision: number): boolean { return !this.disposed && revision === this.revision; }
+  private current(revision: number): boolean {
+    return !this.disposed && revision === this.revision;
+  }
 
   private ensureNode(source: string): void {
     const { launcherPath, descriptorPath } = writeManagedLauncher(this.options.storageDir);
-    if (launcherPath !== this.launcherPath || descriptorPath !== this.descriptorPath) throw new Error('Invalid managed launcher paths');
+    if (launcherPath !== this.launcherPath || descriptorPath !== this.descriptorPath)
+      throw new Error('Invalid managed launcher paths');
     // Keep the command stable across VSIX version-directory changes.
     const digest = (file: string) => createHash('sha256').update(fs.readFileSync(file)).digest('hex');
     if (fs.existsSync(this.nodePath)) {
@@ -87,10 +123,32 @@ export class AiClientManager {
     }
     const temporary = `${this.nodePath}.${randomUUID()}.tmp`;
     try {
-      fs.copyFileSync(source, temporary, fs.constants.COPYFILE_EXCL | fs.constants.COPYFILE_FICLONE);
-      fs.chmodSync(temporary, 0o700);
+      // A hard link avoids a second ~127 MB runtime on POSIX volumes; the old
+      // extension version can still be removed while a client runs it. Windows
+      // keeps a private copy (cloned where the volume supports it): a running
+      // client would otherwise pin the extension's own executable and block
+      // VS Code from deleting an old extension version.
+      let linked = false;
+      if (process.platform !== 'win32') {
+        try {
+          fs.linkSync(source, temporary);
+          linked = true;
+        } catch {
+          /* another volume: copy */
+        }
+      }
+      if (!linked) {
+        fs.copyFileSync(source, temporary, fs.constants.COPYFILE_EXCL | fs.constants.COPYFILE_FICLONE);
+        fs.chmodSync(temporary, 0o700);
+      }
       fs.renameSync(temporary, this.nodePath);
-    } finally { try { fs.unlinkSync(temporary); } catch { /* already renamed */ } }
+    } finally {
+      try {
+        fs.unlinkSync(temporary);
+      } catch {
+        /* already renamed */
+      }
+    }
   }
 
   private async performSync(enabled: boolean, takeOwnership: boolean, revision: number): Promise<void> {
@@ -110,8 +168,16 @@ export class AiClientManager {
         if (!this.options.canEnable()) throw new Error('信頼できるフォルダーで MCP を有効にしてください。');
         // Reserve ownership before slow runtime/browser preparation. Another
         // window's later enable/disable invalidates this exact reservation.
-        const claim: ManagedLaunchDescriptor = { schemaVersion: 1, owner: this.options.owner, generation: randomUUID(),
-          enabled: false, command: process.execPath, args: [], env: {}, cwd: path.resolve(this.options.storageDir) };
+        const claim: ManagedLaunchDescriptor = {
+          schemaVersion: 1,
+          owner: this.options.owner,
+          generation: randomUUID(),
+          enabled: false,
+          command: process.execPath,
+          args: [],
+          env: {},
+          cwd: path.resolve(this.options.storageDir),
+        };
         writeManagedDescriptor(this.descriptorPath, claim);
         const launch = await this.options.getLaunch();
         if (!this.current(revision) || !this.options.canEnable()) return;
@@ -127,12 +193,22 @@ export class AiClientManager {
         if (!this.current(revision)) break;
         if (!client.detected && enabled) continue;
         const result = configureClient(client, this.registration(), enabled);
-        if (client.detected || result.status === 'error' || result.status === 'conflict') this.results.set(client.id, result);
+        if (client.detected || result.status === 'error' || result.status === 'conflict')
+          this.results.set(client.id, result);
       }
-    } catch (error) { this.error = this.message(error); }
-    finally { this.busy = false; this.options.changed?.(); }
+    } catch (error) {
+      this.error = this.message(error);
+    } finally {
+      this.busy = false;
+      this.options.changed?.();
+    }
   }
 
-  private message(error: unknown): string { return error instanceof Error ? error.message : String(error); }
-  dispose(): void { this.disposed = true; this.revision++; }
+  private message(error: unknown): string {
+    return error instanceof Error ? error.message : String(error);
+  }
+  dispose(): void {
+    this.disposed = true;
+    this.revision++;
+  }
 }

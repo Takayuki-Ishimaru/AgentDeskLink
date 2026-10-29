@@ -2,21 +2,21 @@
 
 **日本語** | [English](INSTALL_en.md)
 
-対象バージョン: `0.1.6`（ベータ版）
+対象バージョン: `0.1.7`（ベータ版）
 
 ## 必要なもの
 
 - VS Code 1.101 以上。
-- 共通 VSIX `agentdesklink-0.1.6.vsix`。[対応環境と既知の制限](KNOWN_ISSUES.md)を確認してください。
+- 共通 VSIX `agentdesklink-0.1.7.vsix`。[対応環境と既知の制限](KNOWN_ISSUES.md)を確認してください。
 - Chrome がない場合、初回の Chromium 自動取得に必要なネット接続。
 
-1 つの VSIX に macOS / Apple silicon、Windows x64、Linux x64 用の Node.js と画像処理ライブラリを同梱します。macOS/Windows 用のデスクトップ操作 helper も含みます。起動時に対応するものを選ぶため、別途ビルドする必要はありません。
+1 つの VSIX に macOS / Apple silicon、Windows x64、Linux x64 用の Node.js と画像処理ライブラリを同梱します。macOS/Windows/Linux 用のデスクトップ操作 helper も含みます（Linux は Python 3 スクリプトで、OS の python3-gi などが必要です）。起動時に対応するものを選ぶため、別途ビルドする必要はありません。
 
 配布ファイルは各 OS 共通です。macOS x64、Windows arm64、Linux arm64 は今回の共通 VSIX の対象外です。
 
 ## インストール
 
-1. リリースページから `agentdesklink-0.1.6.vsix` と `SHA256SUMS` をダウンロードします。
+1. リリースページから `agentdesklink-0.1.7.vsix` と `SHA256SUMS` をダウンロードします。
 2. [更新ガイドの方法](UPDATES.md)で VSIX の SHA-256 を計算し、一覧と一致することを確認します。
 3. VS Code のコマンドパレットで「拡張機能: VSIXからのインストール」を選び、VSIX を指定します。
 4. 利用するフォルダーを開き、内容を確認してワークスペースを信頼します。
@@ -52,6 +52,7 @@ MCP はワークスペースごとに既定で無効です。有効にしても�
 | `agentdesklink.browserHeadless` | 既定は `true`。手動ログインには `false` で可視ブラウザを使います |
 | `agentdesklink.sessionIdleMinutes` | 操作がないセッションの終了期限。1〜60 分、既定は 15 分です |
 | `agentdesklink.browserProxyServer` | 認証情報・パス・クエリのない HTTP(S) プロキシ origin。既定は空です |
+| `agentdesklink.browserProxyConnectByHostname` | 既定はオフ。ホスト名で許可を判定するプロキシ向けに HTTPS の CONNECT をホスト名で送ります。ローカル DNS/IP 検査と TLS 検証は維持します |
 | `agentdesklink.allowUnredactedImages` | 無加工のネイティブ画像の取得を許可します。既定はオフです |
 | `agentdesklink.allowPhysicalInput` | 物理入力を許可します。対象アプリの指定と `allowUnredactedImages` も必要です。既定はオフです |
 | `agentdesklink.allowLoopback` / `agentdesklink.allowPrivateNetwork` | ループバック／プライベートネットワークへの接続を許可します。既定はオフです |
@@ -60,11 +61,11 @@ MCP はワークスペースごとに既定で無効です。有効にしても�
 
 ### 権限段階と個別承認
 
-- **読み取り専用**: 観測・移動・スクロールを利用します。
-- **標準**: 通常のブラウザ入力・クリックと GET 検索フォームを許可し、購入・削除・認証情報の入力などの重要操作は拒否します。
-- **都度承認**: 標準の操作に加え、検査可能な重要操作を VS Code の確認画面で一度ずつ承認します。対象と内容を確認して承認または拒否してください。AI が承認を決めることはできません。承認後、AI は同じ操作を再要求します。
+- **読み取り専用**: 観測・移動・スクロールを利用します。許可したデスクトップアプリは観測のみで、操作は `desktop_operation_not_granted` で拒否されます。
+- **標準**: 通常のブラウザ入力・クリックと JavaScript 内で処理するフォームに加え、許可したデスクトップアプリ（macOS・Windows・Linux）の通常操作（クリック・入力・チェック・選択・スクロール）を許可します。購入・削除・認証情報の入力などの重要操作は拒否します。
+- **都度承認**: 標準の操作に加え、検査可能な重要操作を VS Code の確認画面で一度ずつ承認します。デスクトップアプリの確認画面にはアプリ ID・ウィンドウタイトル・ロール・コントロール名が表示されます。対象と内容を確認して承認または拒否してください。AI が承認を決めることはできません。承認後、AI は同じ操作を再要求します。
 
-承認は main document、open Shadow DOM、同一 origin の iframe の検査可能な対象で利用できます。閉じた Shadow DOM、別プロセスの iframe、ネイティブアプリ、一般的な AJAX/DELETE・ファイル送信には対応しません。内容変更・失効・緊急停止後の承認は使えません。確認画面へ接続できない場合も重要操作は許可されません。秘密値は確認画面へ渡しません。
+ブラウザの承認は main document、open Shadow DOM、同一 origin の iframe の検査可能な対象で利用できます。デスクトップアプリの承認は、削除・送信などの重要コントロールへの 1 回の操作だけに有効で、観測した revision でのみ使えます。パスワード欄などの機密コントロールは、承認があっても常に拒否します。閉じた Shadow DOM、別プロセスの iframe、一般的な AJAX/DELETE・ファイル送信には対応しません。内容変更・失効・緊急停止後の承認は使えません。確認画面へ接続できない場合も重要操作は許可されません。秘密値は確認画面へ渡しません。
 
 以前から `allowAllOperations: true` を使っている場合、更新後も全操作許可が優先されます。段階的な権限へ切り替えるにはパネルで読み取り専用・標準・都度承認を選び直してください。設定変更後は必要に応じて外部クライアントを再接続します。
 
@@ -83,6 +84,13 @@ CLI を別の MCP ホストから起動する場合は、`--config` でポリシ
 - **macOS**: デスクトップ操作にはアクセシビリティ権限、画像取得には画面収録権限が必要です。利用者がシステム設定で許可してください。
 - **Windows**: 対象アプリとサーバーを同じ対話セッションで実行します。
 - **Linux x64（Ubuntu 24.04）**: ブラウザ操作に対応します。Chrome または Chromium の実行に必要な共有ライブラリを OS 側で用意し、OS sandbox が動作する一般ユーザーの環境で実行してください。共有ライブラリが不足する場合は、OS のパッケージ管理機能でブラウザの実行環境を導入してください。
+- **Linux のデスクトップ操作（AT-SPI2）**: `sudo apt install python3-gi gir1.2-atspi-2.0 at-spi2-core` を導入し、アクセシビリティを有効にします（GNOME: `gsettings set org.gnome.desktop.interface toolkit-accessibility true`。X11 セッションの他のデスクトップでは `at-spi-bus-launcher` が動作していれば十分です）。設定パネルのアプリ ID には AT-SPI のアプリケーション名、パスには実行ファイルの絶対パス（`readlink /proc/<pid>/exe` の値。スクリプトのアプリではインタープリターのパス）を指定します。アプリケーション名は次のコマンドで確認できます。
+
+  ```sh
+  python3 -c "import gi; gi.require_version('Atspi','2.0'); from gi.repository import Atspi; d=Atspi.get_desktop(0); print(*[(a.get_name(), a.get_process_id()) for a in (d.get_child_at_index(i) for i in range(d.get_child_count())) if a], sep='\n')"
+  ```
+
+  対応するのはウィンドウの観測と click / fill / check / select / scroll の意味的操作です。標準モードでは削除・送信・購入・ログインなどの重要操作と、パスワードなどの機密欄を拒否します（「すべて許可」でも機密欄は拒否）。物理入力・ウィンドウ画像・アプリの起動／終了は Linux では未対応で、`adl_capabilities` の `platform_unsupported` に表示されます。Wayland ネイティブのアプリは画面上の位置を取得できず、大きさのみ有効で画面 ID は空です。Wayland セッションでも XWayland アプリには X の画面 ID を返します。GTK 4 のチェックボックスは AT-SPI の操作を持たないため `check` は対応外として報告されます。前提パッケージやアクセシビリティバスがない場合、操作は理由 `linux_accessibility_unavailable` で失敗します。
 
 Ubuntu 24.04 では、OS がユーザー名前空間を制限するため、自動取得した Chromium の起動に管理者による sandbox の設定が必要になる場合があります。OS に導入した Chrome を使うか、管理者に Chromium の [sandbox 設定](https://chromium.googlesource.com/chromium/src/+/main/docs/security/apparmor-userns-restrictions.md)を確認してもらってください。AgentDeskLink は OS の設定を自動変更せず、Chromium の sandbox を無効にして起動することもありません。
 

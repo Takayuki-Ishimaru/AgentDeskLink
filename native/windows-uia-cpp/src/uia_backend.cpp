@@ -63,6 +63,7 @@ struct Impl {
   bool lifecycle_enabled = false;
   bool allow_all = false;  // trusted --allow-all: any current-user desktop window
   bool restrict_targets = false;
+  bool tier = false;  // trusted --operation-mode standard|ask: vocabulary-gated, no allowlist
   std::unique_ptr<HumanFocusProbe> human_probe;
   HANDLE owned_process=nullptr;
   DWORD owned_pid=0;
@@ -453,9 +454,9 @@ Status VerifyUniqueLiveElement(Impl* im, SessionState* ss, IUIAutomationElement*
       BOOL same = FALSE;
       if (FAILED(im->uia->CompareElements(target, current.Get(), &same)))
         return Status::Fail("E_UIA_READ_FAILED", "cannot compare the retained control");
-      // Broad permissions use the retained UIA identity, so anonymous or repeated
-      // AutomationIds do not prevent input to one exactly observed control.
-      if (!im->allow_all || same) ++matches;
+      // Broad permissions and the vocabulary tiers use the retained UIA identity, so anonymous
+      // or repeated AutomationIds do not prevent input to one exactly observed control.
+      if (!(im->allow_all || im->tier) || same) ++matches;
       if (same) exact = true;
     }
     ComPtr<IUIAutomationElement> child;
@@ -895,7 +896,12 @@ Status ActImpl(void* ctx, Session& s, const ActionRequest& a, std::string& detai
   live.role = RoleName(control_type);
   live.is_password = password != FALSE;
   live.sensitive = live.is_password || IsSensitiveText(live.name) || IsSensitiveText(aid);
-  if (!im->allow_all && (IsBlockedControl(live) || live.sensitive))
+  if (im->tier && !im->allow_all) {
+    // Live re-check of the tier gates against the current provider values, never the snapshot alone.
+    if (live.sensitive) return Status::Fail("E_PRIVACY_BLOCKED", "sensitive control");
+    if (a.action != "scroll" && !a.approved && (IsConsequentialText(live.name) || IsConsequentialText(aid)))
+      return Status::Fail("E_APPROVAL_REQUIRED", "consequential control requires the one-shot host approval");
+  } else if (!im->allow_all && (IsBlockedControl(live) || live.sensitive))
     return Status::Fail("E_CONTROL_BLOCKED", "control is sensitive or consequential");
   Status identity_status = VerifyUniqueLiveElement(im, ss, el.Get(), aid, a.expected_role);
   if (!identity_status.ok()) return identity_status;
@@ -1004,6 +1010,7 @@ void* CreateBackendImpl(const LaunchConfig& cfg) {
   im->lifecycle_enabled=cfg.lifecycle_enabled;
   im->allow_all=cfg.allow_all;
   im->restrict_targets=cfg.restrict_targets;
+  im->tier=cfg.operation_mode=="standard"||cfg.operation_mode=="ask";
   im->visual_enabled = cfg.visual_enabled&&!cfg.lifecycle_enabled;
   if(cfg.input_cancelled)im->input_cancelled=cfg.input_cancelled;
   if(!ParseInteractiveConfig(cfg.interactive_config,im->input_surfaces,im->interactive_enabled)||

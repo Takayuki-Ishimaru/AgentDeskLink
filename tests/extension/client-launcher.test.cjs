@@ -17,16 +17,19 @@ function mkTmp() {
 }
 
 function baseDescriptor(overrides) {
-  return Object.assign({
-    schemaVersion: 1,
-    owner: 'test-owner',
-    generation: 'gen-1',
-    enabled: true,
-    command: NODE,
-    args: [],
-    env: {},
-    cwd: fs.realpathSync(os.tmpdir()),
-  }, overrides || {});
+  return Object.assign(
+    {
+      schemaVersion: 1,
+      owner: 'test-owner',
+      generation: 'gen-1',
+      enabled: true,
+      command: NODE,
+      args: [],
+      env: {},
+      cwd: fs.realpathSync(os.tmpdir()),
+    },
+    overrides || {},
+  );
 }
 
 function writeDescriptor(file, descriptor) {
@@ -34,19 +37,40 @@ function writeDescriptor(file, descriptor) {
 }
 
 function startLauncher(launcherPath, descriptorPath, opts) {
-  const child = cp.spawn(NODE, [launcherPath, descriptorPath], Object.assign({
-    stdio: ['pipe', 'pipe', 'pipe'],
-    env: Object.assign({}, process.env, { ADL_POLICY: 'old', ADL_BROWSER_EXECUTABLE: '/old/browser', PLAYWRIGHT_BROWSERS_PATH: '/old/pw' }),
-  }, opts || {}));
+  const child = cp.spawn(
+    NODE,
+    [launcherPath, descriptorPath],
+    Object.assign(
+      {
+        stdio: ['pipe', 'pipe', 'pipe'],
+        env: Object.assign({}, process.env, {
+          ADL_POLICY: 'old',
+          ADL_BROWSER_EXECUTABLE: '/old/browser',
+          PLAYWRIGHT_BROWSERS_PATH: '/old/pw',
+        }),
+      },
+      opts || {},
+    ),
+  );
   return child;
 }
 
 function once(emitter, event, ms) {
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => { child.kill('SIGKILL'); reject(new Error(`timeout waiting for ${event}`)); }, ms || 8000);
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL');
+      reject(new Error(`timeout waiting for ${event}`));
+    }, ms || 8000);
     const child = emitter;
-    const done = (payload) => { clearTimeout(timer); emitter.removeListener('error', onErr); resolve(payload); };
-    const onErr = (err) => { clearTimeout(timer); reject(err); };
+    const done = payload => {
+      clearTimeout(timer);
+      emitter.removeListener('error', onErr);
+      resolve(payload);
+    };
+    const onErr = err => {
+      clearTimeout(timer);
+      reject(err);
+    };
     emitter.once(event, done);
     emitter.once('error', onErr);
   });
@@ -57,7 +81,7 @@ async function waitFor(predicate, ms, label) {
   for (;;) {
     if (predicate()) return;
     if (Date.now() > deadline) throw new Error(`timeout: ${label || 'predicate'}`);
-    await new Promise((r) => setTimeout(r, 25));
+    await new Promise(r => setTimeout(r, 25));
   }
 }
 
@@ -65,8 +89,11 @@ function readStdoutLines(child, count, ms) {
   return new Promise((resolve, reject) => {
     let buf = '';
     const lines = [];
-    const timer = setTimeout(() => reject(new Error(`timeout waiting for ${count} stdout line(s); got: ${JSON.stringify(buf)}`)), ms || 8000);
-    child.stdout.on('data', (d) => {
+    const timer = setTimeout(
+      () => reject(new Error(`timeout waiting for ${count} stdout line(s); got: ${JSON.stringify(buf)}`)),
+      ms || 8000,
+    );
+    child.stdout.on('data', d => {
       buf += d.toString('utf8');
       for (;;) {
         const nl = buf.indexOf('\n');
@@ -80,7 +107,10 @@ function readStdoutLines(child, count, ms) {
         }
       }
     });
-    child.on('error', (err) => { clearTimeout(timer); reject(err); });
+    child.on('error', err => {
+      clearTimeout(timer);
+      reject(err);
+    });
   });
 }
 
@@ -175,7 +205,7 @@ test('writeManagedDescriptor rejects symlink leaf and ancestor', () => {
     const linkDir = path.join(dir, 'linkdir');
     fs.symlinkSync(dir, linkDir);
     assert.throws(() => writeManagedDescriptor(path.join(linkDir, 'sub', 'launch.json'), d), /symlink/);
-    assert.equal(fs.existsSync(path.join(dir,'sub')),false,'reject before creating directories through a symlink');
+    assert.equal(fs.existsSync(path.join(dir, 'sub')), false, 'reject before creating directories through a symlink');
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -188,9 +218,15 @@ test('launcher: enabled descriptor echoes MCP-like stdout, cwd, env policy', asy
     const stub = writeStub(dir);
     const workdir = path.join(dir, 'work');
     fs.mkdirSync(workdir);
-    writeDescriptor(descriptorPath, baseDescriptor({
-      command: NODE, args: [stub, 'ADL-ARG-1'], cwd: workdir, env: { ADL_BROWSER_EXECUTABLE: '/new/browser', KEEP_ME: 'yes' },
-    }));
+    writeDescriptor(
+      descriptorPath,
+      baseDescriptor({
+        command: NODE,
+        args: [stub, 'ADL-ARG-1'],
+        cwd: workdir,
+        env: { ADL_BROWSER_EXECUTABLE: '/new/browser', KEEP_ME: 'yes' },
+      }),
+    );
     const child = startLauncher(launcherPath, descriptorPath);
     const lines = readStdoutLines(child, 1);
     child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: 7, method: 'ping' }) + '\n');
@@ -216,7 +252,10 @@ test('launcher: start denied for disabled, missing, malformed; exit code propaga
     const { launcherPath, descriptorPath } = writeManagedLauncher(dir);
     const stub = writeStub(dir);
     const cases = [
-      ['disabled', () => writeDescriptor(descriptorPath, baseDescriptor({ command: NODE, args: [stub], enabled: false }))],
+      [
+        'disabled',
+        () => writeDescriptor(descriptorPath, baseDescriptor({ command: NODE, args: [stub], enabled: false })),
+      ],
       ['missing', () => {}],
       ['malformed', () => fs.writeFileSync(descriptorPath, 'nope{')],
     ];
@@ -224,7 +263,9 @@ test('launcher: start denied for disabled, missing, malformed; exit code propaga
       setup();
       const child = startLauncher(launcherPath, descriptorPath);
       let stdout = '';
-      child.stdout.on('data', (d) => { stdout += d.toString('utf8'); });
+      child.stdout.on('data', d => {
+        stdout += d.toString('utf8');
+      });
       const code = await once(child, 'exit');
       assert.notEqual(code, 0, `${name}: nonzero exit`);
       assert.equal(stdout, '', `${name}: no stdout`);
@@ -251,10 +292,10 @@ test('launcher: generation, owner, policy and cwd changes terminate running chil
   try {
     const { launcherPath, descriptorPath } = writeManagedLauncher(dir);
     const scenarios = [
-      ['generation', (d) => Object.assign({}, d, { generation: 'gen-2' })],
-      ['owner', (d) => Object.assign({}, d, { owner: 'other-owner' })],
-      ['policy', (d) => Object.assign({}, d, { env: { POLICY: 'changed' } })],
-      ['cwd', (d) => Object.assign({}, d, { cwd: path.join(dir, 'other') })],
+      ['generation', d => Object.assign({}, d, { generation: 'gen-2' })],
+      ['owner', d => Object.assign({}, d, { owner: 'other-owner' })],
+      ['policy', d => Object.assign({}, d, { env: { POLICY: 'changed' } })],
+      ['cwd', d => Object.assign({}, d, { cwd: path.join(dir, 'other') })],
     ];
     for (const [name, mutate] of scenarios) {
       const stub = writeStub(path.join(dir, name));
@@ -341,7 +382,9 @@ test('launcher: missing cwd denies start', async () => {
     writeDescriptor(descriptorPath, baseDescriptor({ command: NODE, args: [stub], cwd: path.join(dir, 'nope') }));
     const child = startLauncher(launcherPath, descriptorPath);
     let stdout = '';
-    child.stdout.on('data', (d) => { stdout += d.toString('utf8'); });
+    child.stdout.on('data', d => {
+      stdout += d.toString('utf8');
+    });
     const code = await once(child, 'exit');
     assert.notEqual(code, 0);
     assert.equal(stdout, '');

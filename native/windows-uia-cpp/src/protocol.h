@@ -62,6 +62,9 @@ struct ActionRequest {
   bool has_checked = false;
   bool checked = false;
   std::string direction;
+  // The parent's one-shot host approval for this exact action. Accepted only
+  // from an --operation-mode ask launch; it lifts the consequential gate alone.
+  bool approved = false;
 };
 
 struct FocusProbe {
@@ -183,6 +186,14 @@ struct ControlsTable {
   // Trusted --allow-all launch mode: supported actions on any observed, enabled
   // control are permitted without an allowlist entry. Set only from argv.
   bool allow_all = false;
+  // Trusted --operation-mode launch tier ("standard" or "ask", else empty): the
+  // same semantics as the Linux helper. Supported actions on enabled controls
+  // that are neither sensitive (E_PRIVACY_BLOCKED) nor consequential by the
+  // shared vocabulary (E_APPROVAL_REQUIRED); scroll is exempt. "ask" also honours
+  // the request field approved:true on the consequential gate only. Set only from argv.
+  std::string operation_mode;
+  bool tier() const { return operation_mode == "standard" || operation_mode == "ask"; }
+  bool ask() const { return operation_mode == "ask"; }
 };
 
 // --- pure logic (protocol.cpp) ---
@@ -190,6 +201,9 @@ bool LoadControls(const nlohmann::json& doc, ControlsTable& out, std::string& er
 bool ActionAllowed(const ControlsTable&, const std::string& automation_id, const std::string& action);
 std::string ExpectedRole(const ControlsTable&, const std::string& automation_id);
 bool IsSensitiveText(const std::string& text);
+// Shared consequential vocabulary (src/policy.ts, the Linux helper), applied to a
+// name or AutomationId after camelCase / '_' / '-' splitting; Japanese terms included.
+bool IsConsequentialText(const std::string& text);
 bool IsBlockedControl(const ElemInfo&);
 std::string NewOpaqueHandle();
 std::string Redact(const std::string& text);

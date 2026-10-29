@@ -996,8 +996,86 @@ void T_allow_all_keeps_state_guards() {
   CHECK(!s.open);
 }
 
+// --- trusted --operation-mode standard|ask tiers (argv only; approved is the one protocol field) ---
+void T_standard_tier_vocabulary_gates() {
+  g_test = "standard_tier_permits_ordinary_refuses_consequential_and_sensitive";
+  ControlsTable c; c.operation_mode = "standard";
+  CHECK(c.tier()); CHECK(!c.ask()); CHECK(!ControlsTable().tier());
+  Fake f; Session s; s.target_id = kTarget;
+  Backend b = MakeBackend(f);
+  bool sd = false;
+  ElemInfo plain = MakeElem("", "button", "Find");
+  ElemInfo del = MakeElem("", "button", "Delete record"); del.identity = "idn-del";
+  ElemInfo camel = MakeElem("btnDelete", "button", "Go");
+  ElemInfo filters = MakeElem("", "button", "Remove filters"); filters.identity = "idn-filters";
+  ElemInfo api = MakeElem("ApiKeyInput", "edit", "API Key"); api.sensitive = true;
+  ElemInfo pw = MakeElem("NameEdit", "edit", "Name"); pw.is_password = true;
+  ElemInfo jp = MakeElem("", "edit", u8"送信先"); jp.identity = "idn-jp";
+  ElemInfo pane = MakeElem("", "pane", u8"送信履歴"); pane.identity = "idn-pane";
+  std::string sid = OpenAndSnap(f, s, b, c, {plain, del, camel, filters, api, pw, jp, pane});
+  const long long rev = s.revision;
+  const auto id = [&](size_t i) { return s.elements[i].id; };
+  f.Reset();
+  CHECK_EQ(Code(adl::HandleRequest(ActReq(sid, id(0), rev, json({{"action", "click"}})), s, b, c, sd)), "OK");
+  CHECK_EQ(Code(adl::HandleRequest(ActReq(sid, id(1), rev, json({{"action", "click"}})), s, b, c, sd)), "E_APPROVAL_REQUIRED");
+  CHECK_EQ(Code(adl::HandleRequest(ActReq(sid, id(2), rev, json({{"action", "click"}})), s, b, c, sd)), "E_APPROVAL_REQUIRED");
+  CHECK_EQ(Code(adl::HandleRequest(ActReq(sid, id(3), rev, json({{"action", "click"}})), s, b, c, sd)), "OK");
+  CHECK_EQ(Code(adl::HandleRequest(ActReq(sid, id(4), rev, json({{"action", "fill"}, {"value", "x"}})), s, b, c, sd)), "E_PRIVACY_BLOCKED");
+  CHECK_EQ(Code(adl::HandleRequest(ActReq(sid, id(5), rev, json({{"action", "fill"}, {"value", "x"}})), s, b, c, sd)), "E_PRIVACY_BLOCKED");
+  CHECK_EQ(Code(adl::HandleRequest(ActReq(sid, id(6), rev, json({{"action", "fill"}, {"value", "x"}})), s, b, c, sd)), "E_APPROVAL_REQUIRED");
+  CHECK_EQ(Code(adl::HandleRequest(ActReq(sid, id(7), rev, json({{"action", "scroll"}, {"direction", "down"}})), s, b, c, sd)), "OK");  // scroll is exempt
+  // The approval field is not a standard-tier input, and the tier is never a protocol input.
+  CHECK_EQ(Code(adl::HandleRequest(ActReq(sid, id(1), rev, json({{"action", "click"}, {"approved", true}})), s, b, c, sd)), "E_BAD_REQUEST");
+  json forged = Parse(ActReq(sid, id(1), rev, json({{"action", "click"}})));
+  forged["operation_mode"] = "ask";
+  CHECK_EQ(Code(adl::HandleRequest(forged.dump(), s, b, c, sd)), "E_BAD_REQUEST");
+  CHECK_EQ(std::to_string(f.n_act), "3");
+  CHECK_EQ(f.acts[0].expected_role, "button");
+  CHECK(!f.acts[0].approved);
+  CHECK(s.open);
+  // Discovery reports the launch-time fact honestly: a tier enables mutations, an empty strict table does not.
+  Fake g; Backend gb = MakeBackend(g); Broker br; bool gsd = false;
+  g.obs = {Obs(0x100, 1000, "r-a", "Same")};
+  CHECK(Parse(HandleRequest(DiscReq(), br, gb, c, gsd)).at("result").at("mutations_enabled").get<bool>());
+  ControlsTable empty; Broker br2;
+  CHECK(!Parse(HandleRequest(DiscReq(), br2, gb, empty, gsd)).at("result").at("mutations_enabled").get<bool>());
+}
+
+void T_ask_tier_honours_one_shot_approval() {
+  g_test = "ask_tier_accepts_approved_true_only_on_the_consequential_gate";
+  ControlsTable c; c.operation_mode = "ask";
+  CHECK(c.tier()); CHECK(c.ask());
+  Fake f; Session s; s.target_id = kTarget;
+  Backend b = MakeBackend(f);
+  bool sd = false;
+  ElemInfo del = MakeElem("", "button", "Delete record");
+  ElemInfo api = MakeElem("ApiKeyInput", "edit", "API Key"); api.sensitive = true;
+  ElemInfo plain = MakeElem("", "button", "Find"); plain.identity = "idn-plain";
+  std::string sid = OpenAndSnap(f, s, b, c, {del, api, plain});
+  const long long rev = s.revision;
+  const std::string del_id = s.elements[0].id, api_id = s.elements[1].id, plain_id = s.elements[2].id;
+  f.Reset();
+  CHECK_EQ(Code(adl::HandleRequest(ActReq(sid, del_id, rev, json({{"action", "click"}})), s, b, c, sd)), "E_APPROVAL_REQUIRED");
+  CHECK_EQ(Code(adl::HandleRequest(ActReq(sid, del_id, rev, json({{"action", "click"}, {"approved", false}})), s, b, c, sd)), "E_BAD_REQUEST");
+  CHECK_EQ(Code(adl::HandleRequest(ActReq(sid, del_id, rev, json({{"action", "click"}, {"approved", "yes"}})), s, b, c, sd)), "E_BAD_REQUEST");
+  CHECK_EQ(Code(adl::HandleRequest(ActReq(sid, api_id, rev, json({{"action", "fill"}, {"value", "x"}, {"approved", true}})), s, b, c, sd)), "E_PRIVACY_BLOCKED");
+  CHECK_EQ(std::to_string(f.n_act), "0");
+  CHECK_EQ(Code(adl::HandleRequest(ActReq(sid, del_id, rev, json({{"action", "click"}, {"approved", true}})), s, b, c, sd)), "OK");
+  CHECK_EQ(Code(adl::HandleRequest(ActReq(sid, plain_id, rev, json({{"action", "click"}})), s, b, c, sd)), "OK");
+  CHECK_EQ(std::to_string(f.n_act), "2");
+  CHECK(f.acts[0].approved);
+  CHECK(!f.acts[1].approved);
+  CHECK_EQ(f.acts[0].expected_role, "button");
+  CHECK(s.open);
+  // The field is honoured per request: the same consequential control is refused again without it.
+  CHECK_EQ(Code(adl::HandleRequest(ActReq(sid, del_id, s.revision, json({{"action", "click"}})), s, b, c, sd)), "E_APPROVAL_REQUIRED");
+  CHECK_EQ(std::to_string(f.n_act), "2");
+}
+
 struct TestCase { const char* name; void (*fn)(); };
 const TestCase kTests[] = {
+    {"standard_tier_permits_ordinary_refuses_consequential_and_sensitive", T_standard_tier_vocabulary_gates},
+    {"ask_tier_accepts_approved_true_only_on_the_consequential_gate", T_ask_tier_honours_one_shot_approval},
     {"lifecycle_without_launch_opt_in_denies_and_never_dispatches", T_lifecycle_opt_out_denies},
     {"lifecycle_status_launch_idempotent_quit_are_sessionless", T_lifecycle_sessionless_results},
     {"lifecycle_missing_nonstring_or_unknown_action_never_dispatches", T_lifecycle_action_validation},
@@ -1042,6 +1120,11 @@ int main() {
   g_test="sensitive_label_boundaries_and_japanese";
   for(const auto* label:{"Shipping address","Author","spinbutton","monkey","Quantity"})CHECK(!IsSensitiveText(label));
   for(const auto* label:{"PIN","auth","api_key","access-token","accessToken","newPassword","ApiKeyInput","apiKey1","password1","accessToken2","dummy@example.com",u8"暗証番号",u8"パスワード",u8"認証コード",u8"ＡＰＩキー",u8"apiキー"})CHECK(IsSensitiveText(label));
+  g_test="consequential_vocabulary_shared_with_the_browser_and_linux_paths";
+  for(const auto* label:{"Delete record","btnDelete","delete_all","delete-row","Submit Form","Log in","login","LogIn","Sign up","sign-in","Remove item","sendMail","Pay now","Checkout","Register","Transfer funds","Confirm","Cancel order","Order",
+                         u8"削除",u8"注文を確定",u8"キャンセル",u8"ログイン",u8"振込",u8"Ｄｅｌｅｔｅ",u8"送信"})CHECK(IsConsequentialText(label));
+  for(const auto* label:{"","Find","Fixture button","Remove filters","Remove filter","Shipping address","Recorder","Payload","Sender","Registered users","Confirmation","Fixture text","FixtureText","Cancelled","Orders list"})
+    { if(IsConsequentialText(label))Fail(__LINE__,"unexpectedly consequential",label); }
   for (const TestCase& t : kTests) {
     int before = g_failures;
     try { t.fn(); } catch(const std::exception& e) { Fail(__LINE__,"uncaught test exception",e.what()); }

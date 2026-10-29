@@ -6,9 +6,22 @@ import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  DEFAULT_NODE_VERSION, SUPPORTED_TARGETS, assertNodeVersion, resolveTarget, assertNativeHost,
-  nodeArchiveNames, parseShasums, findShasumEntry, sha256File, assertSafeRelativePath,
-  fetchBounded, downloadFile, runCommand, acquireLock, requireNonEmptyFile, pathStat,
+  DEFAULT_NODE_VERSION,
+  SUPPORTED_TARGETS,
+  assertNodeVersion,
+  resolveTarget,
+  assertNativeHost,
+  nodeArchiveNames,
+  parseShasums,
+  findShasumEntry,
+  sha256File,
+  assertSafeRelativePath,
+  fetchBounded,
+  downloadFile,
+  runCommand,
+  acquireLock,
+  requireNonEmptyFile,
+  pathStat,
 } from './runtime-utils.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -20,12 +33,15 @@ function readLockedPlaywrightVersion(root) {
   try {
     const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
     if (typeof pkg.dependencies?.playwright === 'string') version = pkg.dependencies.playwright;
-  } catch { /* fall through to lockfile */ }
+  } catch {
+    /* fall through to lockfile */
+  }
   if (!version || !/^\d+\.\d+\.\d+$/.test(version)) {
     const lock = JSON.parse(fs.readFileSync(path.join(root, 'package-lock.json'), 'utf8'));
     version = lock.packages?.['node_modules/playwright']?.version;
   }
-  if (!version || !/^\d+\.\d+\.\d+$/.test(version)) throw new Error(`Cannot determine locked playwright version under ${root}`);
+  if (!version || !/^\d+\.\d+\.\d+$/.test(version))
+    throw new Error(`Cannot determine locked playwright version under ${root}`);
   return version;
 }
 
@@ -33,21 +49,29 @@ async function installNode({ info, nodeVersion, stagingDir, options }) {
   const archive = nodeArchiveNames(nodeVersion, info.platform, info.arch);
   const shasumsUrl = `${options.distBaseUrl}/${nodeVersion}/SHASUMS256.txt`;
   const shasumsText = await fetchBounded(shasumsUrl, {
-    fetchImpl: options.fetchImpl, signal: options.signal, timeoutMs: options.downloadTimeoutMs ?? 120_000,
+    fetchImpl: options.fetchImpl,
+    signal: options.signal,
+    timeoutMs: options.downloadTimeoutMs ?? 120_000,
   });
   const expected = findShasumEntry(parseShasums(shasumsText), archive.file);
   if (!expected) throw new Error(`No SHASUMS256.txt entry exactly matching ${archive.file} in ${shasumsUrl}`);
   const archivePath = path.join(stagingDir, `_download-${archive.file}`);
   try {
     await downloadFile(`${options.distBaseUrl}/${nodeVersion}/${archive.file}`, archivePath, {
-      fetchImpl: options.fetchImpl, signal: options.signal, timeoutMs: options.downloadTimeoutMs ?? 300_000,
+      fetchImpl: options.fetchImpl,
+      signal: options.signal,
+      timeoutMs: options.downloadTimeoutMs ?? 300_000,
     });
     const actual = await sha256File(archivePath);
-    if (actual !== expected) throw new Error(`SHA256 mismatch for ${archive.file}: expected ${expected}, got ${actual}`);
+    if (actual !== expected)
+      throw new Error(`SHA256 mismatch for ${archive.file}: expected ${expected}, got ${actual}`);
     const extractDir = path.join(stagingDir, '_extract');
     await fsp.mkdir(extractDir, { recursive: true });
     try {
-      await options.runCommand(['tar', '-xf', archivePath, '-C', extractDir], { cwd: options.root, signal: options.signal });
+      await options.runCommand(['tar', '-xf', archivePath, '-C', extractDir], {
+        cwd: options.root,
+        signal: options.signal,
+      });
       const nodeRoot = path.join(extractDir, archive.dir);
       const nodeBinary = info.windows ? path.join(nodeRoot, 'node.exe') : path.join(nodeRoot, 'bin', 'node');
       await requireNonEmptyFile(nodeBinary, 'Bundled Node executable inside archive');
@@ -74,7 +98,20 @@ async function installMacHelper({ info, stagingDir, options }) {
   const dest = path.join(stagingDir, 'helper', 'adl-macos-ax-helper');
   await fsp.mkdir(path.dirname(dest), { recursive: true });
   const swiftTarget = info.arch === 'arm64' ? 'arm64-apple-macos14.0' : 'x86_64-apple-macos14.0';
-  await options.runCommand(['swiftc', '-swift-version', '5', '-target', swiftTarget, '-O', ...sources.map(name => path.join(srcDir, name)), '-o', dest], { cwd: options.root, signal: options.signal });
+  await options.runCommand(
+    [
+      'swiftc',
+      '-swift-version',
+      '5',
+      '-target',
+      swiftTarget,
+      '-O',
+      ...sources.map(name => path.join(srcDir, name)),
+      '-o',
+      dest,
+    ],
+    { cwd: options.root, signal: options.signal },
+  );
   await requireNonEmptyFile(dest, 'macOS helper binary');
   await fsp.chmod(dest, 0o755);
   await options.runCommand(['codesign', '--force', '--sign', '-', dest], { cwd: options.root, signal: options.signal });
@@ -85,8 +122,24 @@ async function installWindowsHelper({ info, stagingDir, options }) {
   const projectDir = path.join(options.root, 'native', 'windows-uia-cpp');
   const buildDir = path.join(stagingDir, '_cmake-build');
   try {
-    await options.runCommand(['cmake', '-S', projectDir, '-B', buildDir, '-G', 'Visual Studio 17 2022', '-A', info.arch === 'arm64' ? 'ARM64' : 'x64'], { cwd: options.root, signal: options.signal });
-    await options.runCommand(['cmake', '--build', buildDir, '--config', 'Release', '--target', 'adl-windows-uia-helper', '--parallel'], { cwd: options.root, signal: options.signal });
+    await options.runCommand(
+      [
+        'cmake',
+        '-S',
+        projectDir,
+        '-B',
+        buildDir,
+        '-G',
+        'Visual Studio 17 2022',
+        '-A',
+        info.arch === 'arm64' ? 'ARM64' : 'x64',
+      ],
+      { cwd: options.root, signal: options.signal },
+    );
+    await options.runCommand(
+      ['cmake', '--build', buildDir, '--config', 'Release', '--target', 'adl-windows-uia-helper', '--parallel'],
+      { cwd: options.root, signal: options.signal },
+    );
     // Exact target output only: the project also builds test executables we must never ship.
     const built = path.join(buildDir, 'Release', 'adl-windows-uia-helper.exe');
     await requireNonEmptyFile(built, 'Windows helper build output');
@@ -100,6 +153,17 @@ async function installWindowsHelper({ info, stagingDir, options }) {
     await fsp.rm(buildDir, { recursive: true, force: true });
   }
   return 'helper/adl-windows-uia-helper.exe';
+}
+
+async function installLinuxHelper({ stagingDir, options }) {
+  // The Linux helper is one Python 3 script (python3-gi + gir1.2-atspi-2.0 at runtime): copied, never compiled.
+  const source = path.join(options.root, 'native', 'linux-atspi', 'adl-linux-atspi-helper.py');
+  await requireNonEmptyFile(source, 'Linux AT-SPI helper source');
+  const dest = path.join(stagingDir, 'helper', 'adl-linux-atspi-helper');
+  await fsp.mkdir(path.dirname(dest), { recursive: true });
+  await fsp.copyFile(source, dest);
+  await fsp.chmod(dest, 0o755);
+  return 'helper/adl-linux-atspi-helper';
 }
 
 async function validateStaging({ stagingDir, manifest, windows }) {
@@ -132,18 +196,26 @@ export async function prepareRuntime(options = {}) {
   opts.playwrightVersion = opts.playwrightVersion ?? readLockedPlaywrightVersion(root);
   const runtimeDir = path.resolve(root, opts.runtimeDir ?? 'runtime');
   const relToRoot = path.relative(root, runtimeDir);
-  if (!relToRoot || relToRoot.startsWith('..') || path.isAbsolute(relToRoot)) throw new Error(`runtimeDir must be a directory inside the project root, refusing ${runtimeDir}`);
-  if (runtimeDir !== path.join(root, 'runtime')) throw new Error('runtimeDir must be the reserved runtime directory inside the project root');
+  if (!relToRoot || relToRoot.startsWith('..') || path.isAbsolute(relToRoot))
+    throw new Error(`runtimeDir must be a directory inside the project root, refusing ${runtimeDir}`);
+  if (runtimeDir !== path.join(root, 'runtime'))
+    throw new Error('runtimeDir must be the reserved runtime directory inside the project root');
   const lockFile = opts.lockFile ?? `${runtimeDir}.lock`;
-  const release = await acquireLock(lockFile, { timeoutMs: opts.lockTimeoutMs ?? 30_000, signal:opts.signal });
+  const release = await acquireLock(lockFile, { timeoutMs: opts.lockTimeoutMs ?? 30_000, signal: opts.signal });
   // Staging is always a freshly created mkdtemp sibling: never a user-selected preexisting path.
   let stagingDir;
   let published = false;
   try {
     stagingDir = await fsp.mkdtemp(path.join(path.dirname(runtimeDir), `${path.basename(runtimeDir)}.staging-`));
     const nodeEntry = await installNode({ info, nodeVersion: opts.nodeVersion, stagingDir, options: opts });
-    const helper = info.platform === 'darwin' ? await installMacHelper({ info, stagingDir, options: opts })
-      : info.platform === 'win32' ? await installWindowsHelper({ info, stagingDir, options: opts }) : null;
+    const helper =
+      info.platform === 'darwin'
+        ? await installMacHelper({ info, stagingDir, options: opts })
+        : info.platform === 'win32'
+          ? await installWindowsHelper({ info, stagingDir, options: opts })
+          : info.platform === 'linux'
+            ? await installLinuxHelper({ stagingDir, options: opts })
+            : null;
     const manifest = {
       schemaVersion: 2,
       target: info.target,
@@ -162,7 +234,7 @@ export async function prepareRuntime(options = {}) {
       await fsp.rename(stagingDir, runtimeDir);
       published = true;
     } catch (error) {
-      if (!(await pathStat(runtimeDir)) && await pathStat(backupDir)) await fsp.rename(backupDir, runtimeDir);
+      if (!(await pathStat(runtimeDir)) && (await pathStat(backupDir))) await fsp.rename(backupDir, runtimeDir);
       throw error;
     }
     if (await pathStat(backupDir)) await fsp.rm(backupDir, { recursive: true, force: true });
@@ -192,13 +264,20 @@ function parseArgs(argv) {
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   if (args.help) {
-    console.log(`Usage: node scripts/prepare-runtime.mjs [--node-version v24.22.1] [--target ${SUPPORTED_TARGETS.join('|')}] [--runtime-dir DIR]\nDownloads run at build time only; the target must match this host.`);
+    console.log(
+      `Usage: node scripts/prepare-runtime.mjs [--node-version v24.22.1] [--target ${SUPPORTED_TARGETS.join('|')}] [--runtime-dir DIR]\nDownloads run at build time only; the target must match this host.`,
+    );
     return;
   }
   const result = await prepareRuntime(args);
-  console.log(`runtime prepared: ${result.runtimeDir} (${result.manifest.target}, ${result.manifest.nodeVersion}, playwright ${result.manifest.playwrightVersion})`);
+  console.log(
+    `runtime prepared: ${result.runtimeDir} (${result.manifest.target}, ${result.manifest.nodeVersion}, playwright ${result.manifest.playwrightVersion})`,
+  );
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {
-  main().catch(error => { console.error(error.message ?? error); process.exitCode = 1; });
+  main().catch(error => {
+    console.error(error.message ?? error);
+    process.exitCode = 1;
+  });
 }

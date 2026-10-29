@@ -12,10 +12,10 @@ AgentDeskLink は、AI エージェントとローカルのブラウザ・デス
 
 [はじめる](release-docs/INSTALL.md) · [できること](#できること) · [対応環境](#対応環境) · [リリースガイド](release-docs/README.md) · [MIT License](LICENSE)
 
-> **0.1.6 / ベータ版**\
+> **0.1.7 / ベータ版**\
 > 利用範囲を限定して提供しています。導入前に[対応環境と既知の制限](release-docs/KNOWN_ISSUES.md)を確認してください。
 
-このバージョンでは、ブラウザ操作と承認の安定性を改善し、長文の読み取り、操作直後の差分、読み込み専用の許可元設定を追加しました。[変更点](release-docs/RELEASE_NOTES_ja.md)と[操作設定・承認のガイド](release-docs/OPERATIONS.md)を確認してください。
+このバージョンでは、Linux のデスクトップ操作、デスクトップアプリの権限段階と個別承認を追加し、ブラウザ操作・観測・初期設定を改善しました。[変更点](release-docs/RELEASE_NOTES_ja.md)と[操作設定・承認のガイド](release-docs/OPERATIONS.md)を確認してください。
 
 ## できること
 
@@ -30,7 +30,7 @@ AgentDeskLink は、AI エージェントとローカルのブラウザ・デス
 
 ## VS Code ではじめる
 
-1. 共通パッケージ `agentdesklink-0.1.6.vsix` を取得し、「拡張機能: VSIXからのインストール」で導入します。
+1. 共通パッケージ `agentdesklink-0.1.7.vsix` を取得し、「拡張機能: VSIXからのインストール」で導入します。
 2. フォルダーを開き、ワークスペースを信頼します。
 3. アクティビティバーの **AgentDeskLink** を開きます。
 4. **設定を開く**から、許可するブラウザの origin または対象アプリと必要な操作権限を指定します。
@@ -54,9 +54,11 @@ AgentDeskLink 自体に外部 AI の API キーは不要です。AI の接続・
 | --- | --- |
 | **macOS 14 以上 / Apple silicon** | ブラウザ・デスクトップ。OS のアクセシビリティ権限、画像取得には画面収録権限が必要 |
 | **Windows 11 x64** | ブラウザ・デスクトップ。デスクトップ操作は対象アプリと同じ対話セッションで実行 |
-| **Linux x64（Ubuntu 24.04）** | ブラウザ。Chrome または Chromium の実行に必要な共有ライブラリと OS sandbox が必要 |
+| **Linux x64（Ubuntu 24.04）** | ブラウザ・デスクトップ（AT-SPI2 による意味的操作）。ブラウザには Chrome または Chromium の実行に必要な共有ライブラリと OS sandbox、デスクトップには python3-gi・gir1.2-atspi-2.0・at-spi2-core が必要 |
 
 macOS と Windows では、CLI のポリシーで明示的に許可したアプリの状態確認・起動・通常終了も利用できます。Windows で起動するアプリは専用の Win32 デスクトップに配置します。
+
+Linux のデスクトップ操作はアクセシビリティ API（AT-SPI2）による観測と click / fill / check / select / scroll だけです。物理入力・ウィンドウ画像・アプリの起動／終了は未対応で、`adl_capabilities` の `platform_unsupported` に明示します。アプリ ID には AT-SPI のアプリケーション名、パスには実行ファイルの絶対パス（`readlink /proc/<pid>/exe` の値）を指定します。準備方法と制限は[インストールガイド](release-docs/INSTALL.md#os-ごとの準備)を参照してください。
 
 OS・アプリ・表示構成によって利用できる操作は異なります。詳しくは[対応環境と既知の制限](release-docs/KNOWN_ISSUES.md)を参照してください。
 
@@ -67,11 +69,11 @@ OS・アプリ・表示構成によって利用できる操作は異なります
 - **普段のブラウザと分けて使う。** 人間のプロファイルやログイン状態を共有しません。
 - **物理入力は専用モード。** `interactive_desktop` は実際のマウス・キーボードを使うため、人間の操作と並行して利用しないでください。
 
-操作権限は **読み取り専用 / 通常操作 / 個別承認** から選べます。通常操作では通常の入力・クリックと GET 検索フォームを利用できます。個別承認は対象・入力値・フォーム内容に結び付きます。main document では、無関係な時計の更新だけでは失効せず、対象・フォーム・文書の変更、期限切れ、緊急停止で失効します。open Shadow DOM と同一 origin の iframe にも対応します。閉じた Shadow DOM、別プロセス iframe、ネイティブ操作の個別承認は未対応です。従来の「全操作許可」は明示的に有効にした場合だけ優先されます。
+操作権限は **読み取り専用 / 通常操作 / 個別承認** から選べます。通常操作では通常の入力・クリックと JavaScript 内で処理するフォームを利用できます。実際の GET/POST フォーム送信には個別承認が必要です。個別承認は対象・入力値・フォーム内容に結び付きます。main document では、無関係な時計の更新だけでは失効せず、対象・フォーム・文書の変更、期限切れ、緊急停止で失効します。open Shadow DOM と同一 origin の iframe にも対応します。許可したデスクトップアプリのネイティブ操作にも同じ段階が適用されます（macOS / Windows / Linux）。通常操作では機密・重要でないコントロールだけを操作し、個別承認では削除・送信などの重要なコントロールを対象・名前・観測リビジョンに結び付けて一度ずつ承認します。パスワードなどの機密コントロールは承認でも操作しません。閉じた Shadow DOM、別プロセス iframe の個別承認は未対応です。従来の「全操作許可」は明示的に有効にした場合だけ優先されます。
 
 パネルの許可元を先に設定してください。`browserOrigins` は移動先、`browserResourceOrigins` は CDN などの GET/HEAD 読み込み専用です。localhost には正確な origin と `allowLoopback` の両方が必要です。メール・電話番号などは既定でマスクし、必要な場合にだけ `allowPersonalData` で表示を許可できます。パスワード・トークン・明示保護領域はこの設定でも保護します。
 
-`adl_observe` の `text: {element_id, offset, length}` で長文の続きを取得できます。位置はマスク済みのテキストを基準にします。`adl_act` の `include_diff: true` は操作直後の差分を返します。操作応答の `network_blocked` / `warnings` はサイトの通信が遮断されたことを示し、`ok: true` だけでサイト上の処理完了とは判断できません。未承認の fetch POST は検索用途でも許可しません。
+`adl_observe` の `text: {element_id, offset, length}` で長文の続きを取得できます。位置はマスク済みのテキストを基準にします。`adl_act` の `include_diff: true` は操作直後の差分を返し、ページ遷移後は全量（`reset: true`）に切り替えます。操作応答の `network_blocked` は操作自体の通信が遮断されたことを示し、無関係なサブリソースの遮断は `subresources_blocked` で示します。`ok: true` だけでサイト上の処理完了とは判断できません。未承認の fetch POST は検索用途でも許可しません。
 
 画像やテキスト内の未知の秘密情報を完全に検出する保証はありません。設定パネルやコマンドパレットの「緊急停止」で拡張が管理する操作を停止し、「操作を再開」で再開できます。すでにアプリへ渡った処理は取り消せません。
 
@@ -79,7 +81,7 @@ OS・アプリ・表示構成によって利用できる操作は異なります
 
 同梱 Node は `--use-system-ca` で起動します。プロキシ利用時も接続先の DNS/IP 検査を維持するため、プロキシ側でしか名前解決できない社内ホストは利用できません。DOM API を安全に検証できないページでは `untrusted_dom_api` で停止します。詳しくは[対応環境と既知の制限](release-docs/KNOWN_ISSUES.md)を確認してください。
 
-`adl_observe` は `format: "compact"` で既定値を省略し、`"lines"` で行形式を返せます。既定の JSON・差分・scope・cursor も利用できます。`adl_act` の座標クリックは、最新の保持画像から `point: {frame_id,x,y}` を指定します。画像取得元の CSS ピクセルを使い、位置や対象が変わった場合は再取得が必要です。
+`adl_observe` は `format: "compact"` で既定値を省略し、`"lines"` で行形式を返せます。既定の JSON・差分・scope・cursor も利用できます。`scope` はページ内検索で、`text:"v1.0: fixed"` のような引用、`role:` / `name:` / `id:` の指定ができます（詳しくは [操作設定](release-docs/OPERATIONS.md)）。リンクは `href` を、代替テキスト付きの画像・canvas は `img` として返し、人に見えにくい文字を含む要素には `hidden_text: true` が付きます。`adl_act` の座標クリックは、最新の保持画像から `point: {frame_id,x,y}` を指定します。画像取得元の CSS ピクセルを使い、位置や対象が変わった場合は再取得が必要です。
 
 ブラウザの `data-adl-sensitive`、`data-adl-classification="SECRET"` / `"UNKNOWN"` は子孫にも適用されます。子の `PUBLIC` 指定や `allowAllOperations` でも解除できません。観測では保護対象の内容をマスクし、領域内の操作を拒否します。画像と保持フレームのcropにもマスクを適用します。これらの明示マーカーは自動検出を補うものです。
 
@@ -118,7 +120,7 @@ MCP ホストから、デモ用ポリシーを指定してサーバーを起動�
 }
 ```
 
-サーバーは stdio 接続です。デスクトップをソースから利用する場合は OS 用 helper のビルドと設定も必要です。
+サーバーは stdio 接続です。デスクトップをソースから利用する場合は OS 用 helper のビルドと設定も必要です。Linux の helper は Python スクリプト（`native/linux-atspi/adl-linux-atspi-helper.py`）なのでビルドは不要で、`python3-gi`・`gir1.2-atspi-2.0`・`at-spi2-core` を OS に導入します。
 
 CLI の相対 `auditPath` はポリシー JSON のあるディレクトリから解決します。書き込めない場合は、接続前に標準エラーへ原因コードを出して停止します。
 
@@ -132,6 +134,7 @@ CLI の相対 `auditPath` はポリシー JSON のあるディレクトリから
 | ブラウザの画像取得 | [visual.example.json](config/visual.example.json) |
 | macOS 計算機の操作 | [macos-calculator.example.json](config/macos-calculator.example.json) |
 | Windows 文字コード表の操作 | [windows-character-map.example.json](config/windows-character-map.example.json) |
+| Linux アプリ（AT-SPI2）の標準モード操作 | [linux-atspi.example.json](config/linux-atspi.example.json) |
 
 ## ガイド
 

@@ -1,0 +1,22 @@
+# Generated, vendored or local-only trees
+node_modules/
+dist/
+artifacts/
+runtime/
+runtime.*/
+.runtime-*/
+coverage/
+.claude/
+native/**/build/
+native/**/build-*/
+media/
+# Formatting covers source code only; Markdown, JSON and YAML keep their hand layout.
+*.md
+*.json
+*.jsonc
+*.yml
+*.yaml
+*.html
+*.css
+# C++ fragments (native/windows-uia-cpp) that Prettier would read as HTML
+*.inc

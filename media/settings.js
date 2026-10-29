@@ -59,8 +59,14 @@
     resourceOriginsList: $('resource-origins-list'), resourceOriginInput: $('resource-origin-input'), resourceOriginAdd: $('resource-origin-add'),
     loopbackSuggestion: $('loopback-suggestion'), allowLoopback: $('allow-loopback'), allowPrivateNetwork: $('allow-private-network'), allowPersonalData: $('allow-personal-data'),
     sessionIdleMinutes: $('session-idle-minutes'), browserHeadless: $('browser-headless'), browserProxyServer: $('browser-proxy-server'),
-    sessionIdleEffective: $('session-idle-effective'), runtimeError: $('runtime-settings-error'), operationMode: $('operation-mode'), operationModeError: $('operation-mode-error')
+    sessionIdleEffective: $('session-idle-effective'), runtimeError: $('runtime-settings-error'), operationMode: $('operation-mode'), operationModeError: $('operation-mode-error'),
+    privateNetworkSuggestion: $('private-network-suggestion'), browserProxyConnectHostname: $('browser-proxy-connect-hostname'),
+    browserSetup: $('browser-setup'), browserSetupStatus: $('browser-setup-status'), browserHosts: $('browser-hosts'), browserRetry: $('browser-retry'),
+    browserInstalled: $('browser-installed'), browserInstalledEmpty: $('browser-installed-empty'), browserCompat: $('browser-compat'), browserUseAuto: $('browser-use-auto'),
+    desktopOsHint: $('desktop-os-hint'), desktopAppId: $('desktop-app-id'), desktopAppPath: $('desktop-app-path'), desktopBrowse: $('desktop-browse'), desktopSave: $('desktop-save'),
+    desktopClear: $('desktop-clear'), desktopNotice: $('desktop-notice'), desktopError: $('desktop-error'), allowPhysicalInput: $('allow-physical-input'), allowUnredactedImages: $('allow-unredacted-images')
   };
+  const DESKTOP_CONTROLS = ['desktopAppId', 'desktopAppPath', 'desktopBrowse', 'desktopSave', 'desktopClear', 'allowPhysicalInput', 'allowUnredactedImages'];
 
   const set = (el, text) => setText(el, text);
   if (els.language) {
@@ -85,9 +91,13 @@
   let busy = {};
   let currentOrigins = [];
   let currentResourceOrigins = [];
+  // Desktop inputs are only overwritten from saved state while the user has no unsaved edit.
+  let desktopDirty = false;
+  let pickedNotes = [];
+  let hostDesktopNotice = '';
   function markBusy(key, on) {
     busy[key] = on;
-    const map = { enabled: ['enabled'], auto: ['autoUpdate'], check: ['checkUpdates'], checkNow: ['checkNow'], resume: ['resumeOperations'], clients: ['clientsEnable', 'clientsRefresh'], origins: ['originAdd'], runtime: ['sessionIdleMinutes','browserHeadless','browserProxyServer'], operationMode:['operationMode'] };
+    const map = { enabled: ['enabled'], auto: ['autoUpdate'], check: ['checkUpdates'], checkNow: ['checkNow'], resume: ['resumeOperations'], clients: ['clientsEnable', 'clientsRefresh'], origins: ['originAdd'], runtime: ['sessionIdleMinutes','browserHeadless','browserProxyServer','browserProxyConnectHostname'], operationMode:['operationMode'], desktop: DESKTOP_CONTROLS, browser: ['browserRetry','browserUseAuto'] };
     (map[key] || []).forEach((name) => setBusy(els[name], on));
     // Emergency stop must stay clickable even while the stop itself runs.
     if (key === 'stop' && els.emergencyStop) els.emergencyStop.setAttribute('aria-busy', on ? 'true' : 'false');
@@ -140,16 +150,36 @@
   function renderResourceOrigins(origins) {
     currentResourceOrigins = renderOriginList(els.resourceOriginsList, origins, 'setBrowserResourceOrigins', 'resource origin') || [];
   }
-  function suggestLoopback() {
-    if (!els.loopbackSuggestion) return;
-    let local = false;
+  // Which grant the typed origin would need: only exact http(s) origins count, and a hint disappears once its grant is on.
+  const isPrivateHost = (host) => {
+    const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
+    if (m) { const a = Number(m[1]), b = Number(m[2]); return a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127); }
+    return /^\[f[cd][0-9a-f]{2}:/i.test(host);
+  };
+  // The origin of a string that is exactly an http(s) origin (optional trailing slash); '' otherwise.
+  function exactOrigin(raw) {
     try {
-      const raw = String(els.originInput?.value || '').trim();
       const url = new URL(raw);
-      local = (url.protocol === 'http:' || url.protocol === 'https:') && ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname.toLowerCase()) &&
-        !url.username && !url.password && !url.search && !url.hash && (raw === url.origin || raw === `${url.origin}/`);
-    } catch { local = false; }
-    els.loopbackSuggestion.hidden = !local;
+      if ((url.protocol !== 'http:' && url.protocol !== 'https:') || url.username || url.password || url.search || url.hash || /[?#]/.test(raw)) return '';
+      return /^[a-z][a-z0-9+.-]*:\/\/[^/?#]+\/?$/i.test(raw) ? url.origin : '';
+    } catch { return ''; }
+  }
+  function suggestLoopback() {
+    const raw = String(els.originInput?.value || '').trim();
+    let host = '';
+    try { if (exactOrigin(raw)) host = new URL(raw).hostname.toLowerCase(); } catch { host = ''; }
+    const loopback = ['localhost', '127.0.0.1', '[::1]'].includes(host);
+    if (els.loopbackSuggestion) els.loopbackSuggestion.hidden = !loopback || els.allowLoopback?.checked === true;
+    if (els.privateNetworkSuggestion) els.privateNetworkSuggestion.hidden = loopback || !host || !isPrivateHost(host) || els.allowPrivateNetwork?.checked === true;
+  }
+  // A successful add clears the input; a rejected one keeps it so the text can be corrected.
+  const pendingAdd = { origin: '', resource: '' };
+  function settleAdd(kind, input, origins) {
+    const value = pendingAdd[kind];
+    if (!value || busy.origins === true) return;
+    pendingAdd[kind] = '';
+    const added = exactOrigin(value);
+    if (added && Array.isArray(origins) && origins.includes(added) && input && String(input.value).trim() === value) input.value = '';
   }
 
   const PERMS = [['origins', 'ブラウザの許可元 / Browser origins'], ['app', 'ネイティブアプリ / Native app'], ['operations', '全操作 / All operations'], ['physical', '物理入力 / Physical input'], ['images', '無加工ネイティブ画像 / Unredacted native images'], ['loopback', 'ループバック / Loopback'], ['private', 'プライベート網 / Private network'], ['mode','操作段階 / Operation tier']];
@@ -174,6 +204,85 @@
     const hint = (Array.isArray(p.browserOrigins) && p.browserOrigins.length) || p.desktopAppId ? '許可された範囲のみ利用できます。 / Only granted scopes are usable.' : 'MCP を有効にしても権限は付きません。 / Enabling MCP alone grants nothing.';
     if (els.permissionsHint) setTextParts(els.permissionsHint, [hint, ...(Array.isArray(p.reasons) ? p.reasons : [])]);
   }
+  const HOST_NOTES = { 'cdn.playwright.dev': 'Chromium 本体と補助ファイル / Chromium and helpers', 'playwright.download.prss.microsoft.com': '補助ファイルのミラー / mirror for helper files' };
+  const majorOf = (version) => { const m = /^(\d+)\./.exec(String(version || '')); return m ? m[1] : ''; };
+  // Browser setup failure panel: the hosts the download needs, a retry, and installed browsers that could stand in. Text only.
+  function renderBrowserSetup(b) {
+    if (!els.browserSetup || !b || typeof b !== 'object') return;
+    const using = b.using && typeof b.using === 'object' ? b.using : null;
+    const visible = b.failed === true || !!using;
+    els.browserSetup.hidden = !visible;
+    if (!visible) return;
+    const busyNow = b.preparing === true || busy.browser === true;
+    if (using) setTextParts(els.browserSetupStatus, ['インストール済みのブラウザを使用中: / Using the installed browser:', String(using.label || ''), String(using.version || ''), String(using.path || '')].filter(Boolean));
+    else set(els.browserSetupStatus, b.preparing === true ? 'ブラウザを準備しています… / Preparing the browser…' : 'ブラウザを自動で準備できませんでした。下の接続先に届くか確認して再試行するか、インストール済みのブラウザを使ってください。 / The browser could not be prepared automatically. Check that the hosts below are reachable and retry, or use an installed browser.');
+    if (els.browserHosts) {
+      els.browserHosts.textContent = '';
+      for (const host of Array.isArray(b.hosts) ? b.hosts : []) {
+        if (typeof host !== 'string') continue;
+        const li = document.createElement('li');
+        const name = document.createElement('span'); name.textContent = host;
+        const note = document.createElement('span'); setText(note, HOST_NOTES[host] || 'カスタム取得先 / custom download host');
+        li.appendChild(name); li.appendChild(note); els.browserHosts.appendChild(li);
+      }
+    }
+    setBusy(els.browserRetry, busyNow);
+    if (els.browserUseAuto) { els.browserUseAuto.hidden = !using; setBusy(els.browserUseAuto, busyNow); }
+    const installed = Array.isArray(b.installed) ? b.installed.filter(item => item && typeof item === 'object' && typeof item.id === 'string') : [];
+    if (els.browserInstalledEmpty) els.browserInstalledEmpty.hidden = installed.length > 0 || !!using;
+    const expected = b.expected && typeof b.expected === 'object' ? b.expected : {};
+    if (els.browserInstalled) {
+      els.browserInstalled.textContent = '';
+      for (const item of installed) {
+        const li = document.createElement('li'); li.className = 'browser-item';
+        const head = document.createElement('span'); head.className = 'browser-name'; head.textContent = [item.label, item.version].filter(v => typeof v === 'string' && v).join(' ');
+        const where = document.createElement('span'); where.className = 'browser-path'; where.textContent = String(item.path || '');
+        li.appendChild(head); li.appendChild(where);
+        const expectedMajor = majorOf(expected.chromium), actualMajor = majorOf(item.version);
+        if (item.usable === true && expectedMajor && actualMajor && expectedMajor !== actualMajor) {
+          const warn = document.createElement('span'); warn.className = 'browser-note';
+          setText(warn, `メジャーバージョンが検証版（${expectedMajor}）と異なります。 / Its major version differs from the tested ${expectedMajor}.`);
+          li.appendChild(warn);
+        }
+        if (item.usable === true) {
+          const use = document.createElement('button'); use.type = 'button'; use.className = 'secondary';
+          setText(use, 'このブラウザを使う / Use this browser');
+          use.disabled = busyNow || (!!using && using.id === item.id);
+          use.addEventListener('click', () => send({ type: 'useInstalledBrowser', id: item.id }, 'browser'));
+          li.appendChild(use);
+        } else if (typeof item.note === 'string' && item.note) {
+          const note = document.createElement('span'); note.className = 'browser-note'; setText(note, item.note); li.appendChild(note);
+        }
+        els.browserInstalled.appendChild(li);
+      }
+    }
+    if (els.browserCompat) {
+      const pw = typeof expected.playwright === 'string' && expected.playwright ? expected.playwright : '', chromium = typeof expected.chromium === 'string' ? expected.chromium : '', revision = typeof expected.revision === 'string' ? expected.revision : '';
+      const tested = chromium ? `Chromium ${chromium}${revision ? `（リビジョン ${revision}）` : ''}` : '同梱の Chromium';
+      const testedEn = chromium ? `Chromium ${chromium}${revision ? ` (revision ${revision})` : ''}` : 'the bundled Chromium';
+      set(els.browserCompat, `互換性の注意: AgentDeskLink${pw ? `（Playwright ${pw}）` : ''}は ${tested} で検証しています。インストール済みブラウザは別のバージョンでも動くことが多いものの、保証はなく、メジャーバージョンが大きく違うと起動や操作に失敗することがあります。 / Compatibility: AgentDeskLink${pw ? ` (Playwright ${pw})` : ''} is tested with ${testedEn}. An installed browser of another version often works but is not guaranteed; a very different major version may fail to start or behave differently.`);
+    }
+  }
+  const OS_HINTS = {
+    darwin: 'macOS: アプリ ID は Bundle Identifier（例: com.apple.calculator）、パスは .app の中の Contents/MacOS/<実行ファイル> です。「参照…」で .app を選ぶと自動で解決し、ID も提案します。 / macOS: the app ID is the bundle identifier (for example com.apple.calculator) and the path is Contents/MacOS/<executable> inside the .app. Browse… resolves a selected .app for you and suggests the ID.',
+    win32: 'Windows: アプリ ID は AI に見せる名前（ラベル）で、128 文字以内で自由に付けられます。実際の対象は .exe のフルパスで固定されます。 / Windows: the app ID is the label shown to the AI (up to 128 characters, your choice). The app itself is pinned by the exact path of its .exe.',
+    linux: 'Linux: アプリ ID は AT-SPI のアプリケーション名、パスは実行ファイルの絶対パス（readlink /proc/<pid>/exe の結果。Python 製アプリはインタープリターのパス）です。 / Linux: the app ID is the AT-SPI application name and the path is the absolute path of the executable (the result of readlink /proc/<pid>/exe; for Python apps, the interpreter).'
+  };
+  function renderDesktopNotice() { setTextParts(els.desktopNotice, [hostDesktopNotice, ...(desktopDirty ? pickedNotes : [])].filter(Boolean)); }
+  function renderDesktop(settings, platform) {
+    if (els.desktopOsHint) set(els.desktopOsHint, OS_HINTS[platform] || 'アプリ ID と実行ファイルの絶対パスを指定します。 / Enter the app ID and the absolute path of the executable.');
+    if (settings) {
+      const id = typeof settings.desktopAppId === 'string' ? settings.desktopAppId : '', file = typeof settings.desktopAppPath === 'string' ? settings.desktopAppPath : '';
+      // Saved values win once they equal what is typed; until then an unsaved edit is kept.
+      if (els.desktopAppId && els.desktopAppPath) {
+        if (desktopDirty && els.desktopAppId.value.trim() === id && els.desktopAppPath.value.trim() === file) desktopDirty = false;
+        if (!desktopDirty) { els.desktopAppId.value = id; els.desktopAppPath.value = file; }
+      }
+      if (els.allowPhysicalInput && typeof settings.allowPhysicalInput === 'boolean') els.allowPhysicalInput.checked = settings.allowPhysicalInput;
+      if (els.allowUnredactedImages && typeof settings.allowUnredactedImages === 'boolean') els.allowUnredactedImages.checked = settings.allowUnredactedImages;
+    }
+    renderDesktopNotice();
+  }
   function send(msg, busyKey) { if (busyKey) markBusy(busyKey, true); post(msg); }
 
   // Checkboxes save immediately; text inputs use an explicit Save button.
@@ -191,6 +300,7 @@
   if (els.originAdd) els.originAdd.addEventListener('click', () => {
     const value = String(els.originInput?.value || '').trim();
     if (!value) return;
+    pendingAdd.origin = value;
     send({ type: 'setBrowserOrigins', origins: [...currentOrigins, value] }, 'origins');
   });
   if (els.originInput) {
@@ -200,11 +310,12 @@
   if (els.resourceOriginAdd) els.resourceOriginAdd.addEventListener('click', () => {
     const value = String(els.resourceOriginInput?.value || '').trim();
     if (!value) return;
+    pendingAdd.resource = value;
     send({ type: 'setBrowserResourceOrigins', origins: [...currentResourceOrigins, value] }, 'origins');
   });
   if (els.resourceOriginInput) els.resourceOriginInput.addEventListener('keydown', (event) => { if (event.key === 'Enter') { event.preventDefault(); els.resourceOriginAdd?.click(); } });
-  if (els.allowLoopback) els.allowLoopback.addEventListener('change', () => send({type:'setAllowLoopback',enabled:els.allowLoopback.checked},'origins'));
-  if (els.allowPrivateNetwork) els.allowPrivateNetwork.addEventListener('change', () => send({type:'setAllowPrivateNetwork',enabled:els.allowPrivateNetwork.checked},'origins'));
+  if (els.allowLoopback) els.allowLoopback.addEventListener('change', () => { suggestLoopback(); send({type:'setAllowLoopback',enabled:els.allowLoopback.checked},'origins'); });
+  if (els.allowPrivateNetwork) els.allowPrivateNetwork.addEventListener('change', () => { suggestLoopback(); send({type:'setAllowPrivateNetwork',enabled:els.allowPrivateNetwork.checked},'origins'); });
   if (els.allowPersonalData) els.allowPersonalData.addEventListener('change', () => send({type:'setAllowPersonalData',enabled:els.allowPersonalData.checked},'origins'));
   if (els.sessionIdleMinutes) els.sessionIdleMinutes.addEventListener('change', () => {
     const minutes=Number(els.sessionIdleMinutes.value);
@@ -212,10 +323,35 @@
   });
   if (els.browserHeadless) els.browserHeadless.addEventListener('change', () => send({type:'setBrowserHeadless',enabled:els.browserHeadless.checked},'runtime'));
   if (els.browserProxyServer) els.browserProxyServer.addEventListener('change', () => send({type:'setBrowserProxyServer',proxy:String(els.browserProxyServer.value)},'runtime'));
+  if (els.browserProxyConnectHostname) els.browserProxyConnectHostname.addEventListener('change', () => send({type:'setBrowserProxyConnectByHostname',enabled:els.browserProxyConnectHostname.checked},'runtime'));
+  if (els.allowPhysicalInput) els.allowPhysicalInput.addEventListener('change', () => send({type:'setAllowPhysicalInput',enabled:els.allowPhysicalInput.checked},'desktop'));
+  if (els.allowUnredactedImages) els.allowUnredactedImages.addEventListener('change', () => send({type:'setAllowUnredactedImages',enabled:els.allowUnredactedImages.checked},'desktop'));
+  if (els.browserRetry) els.browserRetry.addEventListener('click', () => send({ type: 'retryBrowserSetup' }, 'browser'));
+  if (els.browserUseAuto) els.browserUseAuto.addEventListener('click', () => send({ type: 'clearInstalledBrowser' }, 'browser'));
+  if (els.desktopBrowse) els.desktopBrowse.addEventListener('click', () => post({ type: 'browseDesktopApp' }));
+  if (els.desktopSave) els.desktopSave.addEventListener('click', () => { pickedNotes = []; send({ type: 'setDesktopApp', appId: String(els.desktopAppId?.value || '').trim(), appPath: String(els.desktopAppPath?.value || '').trim() }, 'desktop'); });
+  if (els.desktopClear) els.desktopClear.addEventListener('click', () => {
+    if (els.desktopAppId) els.desktopAppId.value = '';
+    if (els.desktopAppPath) els.desktopAppPath.value = '';
+    desktopDirty = true; pickedNotes = [];
+    send({ type: 'setDesktopApp', appId: '', appPath: '' }, 'desktop');
+  });
+  for (const input of [els.desktopAppId, els.desktopAppPath]) if (input) {
+    input.addEventListener('input', () => { desktopDirty = true; });
+    input.addEventListener('keydown', (event) => { if (event.key === 'Enter') { event.preventDefault(); els.desktopSave?.click(); } });
+  }
   if (els.operationMode) els.operationMode.addEventListener('change', () => send({type:'setOperationMode',mode:String(els.operationMode.value)},'operationMode'));
 
   window.addEventListener('message', (event) => {
     const s = event.data;
+    if (s && typeof s === 'object' && s.type === 'desktopAppPicked') {
+      // Browse only fills the inputs; the user still presses Save.
+      if (els.desktopAppPath && typeof s.appPath === 'string') els.desktopAppPath.value = s.appPath;
+      if (els.desktopAppId && typeof s.appId === 'string' && s.appId && (s.replaceId === true || !String(els.desktopAppId.value).trim())) els.desktopAppId.value = s.appId;
+      desktopDirty = true; pickedNotes = Array.isArray(s.notes) ? s.notes.filter(note => typeof note === 'string') : [];
+      renderDesktopNotice();
+      return;
+    }
     if (!s || typeof s !== 'object' || s.type !== 'state') return;
     if (s.busy) Object.keys(s.busy).forEach((k) => markBusy(k, !!s.busy[k]));
     if (typeof s.trusted === 'boolean' || typeof s.hasFolder === 'boolean') {
@@ -232,7 +368,9 @@
       if (els.sessionIdleMinutes) { els.sessionIdleMinutes.dataset.locked=workspaceOk?'false':'true'; setBusy(els.sessionIdleMinutes,!!busy.runtime); }
       if (els.browserHeadless) { els.browserHeadless.dataset.locked=workspaceOk?'false':'true'; setBusy(els.browserHeadless,!!busy.runtime); }
       if (els.browserProxyServer) { els.browserProxyServer.dataset.locked=workspaceOk?'false':'true'; setBusy(els.browserProxyServer,!!busy.runtime); }
+      if (els.browserProxyConnectHostname) { els.browserProxyConnectHostname.dataset.locked=workspaceOk?'false':'true'; setBusy(els.browserProxyConnectHostname,!!busy.runtime); }
       if (els.operationMode) { els.operationMode.dataset.locked=workspaceOk?'false':'true'; setBusy(els.operationMode,!!busy.operationMode); }
+      for (const name of DESKTOP_CONTROLS) if (els[name]) { els[name].dataset.locked=workspaceOk?'false':'true'; setBusy(els[name],!!busy.desktop); }
     }
     if (typeof s.stopped === 'boolean') {
       if (els.resumeOperations) els.resumeOperations.hidden = !s.stopped;
@@ -244,6 +382,8 @@
       if (els.checkUpdates && typeof s.settings.checkForUpdates === 'boolean') els.checkUpdates.checked = s.settings.checkForUpdates;
       renderOrigins(s.settings.browserOrigins);
       renderResourceOrigins(s.settings.browserResourceOrigins);
+      settleAdd('origin', els.originInput, s.settings.browserOrigins);
+      settleAdd('resource', els.resourceOriginInput, s.settings.browserResourceOrigins);
       if (els.allowLoopback && typeof s.settings.allowLoopback === 'boolean') els.allowLoopback.checked = s.settings.allowLoopback;
       if (els.allowPrivateNetwork && typeof s.settings.allowPrivateNetwork === 'boolean') els.allowPrivateNetwork.checked = s.settings.allowPrivateNetwork;
       if (els.allowPersonalData && typeof s.settings.allowPersonalData === 'boolean') els.allowPersonalData.checked = s.settings.allowPersonalData;
@@ -253,15 +393,20 @@
       }
       if (els.browserHeadless && typeof s.settings.browserHeadless === 'boolean') els.browserHeadless.checked=s.settings.browserHeadless;
       if (els.browserProxyServer && typeof s.settings.browserProxyServer === 'string') els.browserProxyServer.value=s.settings.browserProxyServer;
+      if (els.browserProxyConnectHostname && typeof s.settings.browserProxyConnectByHostname === 'boolean') els.browserProxyConnectHostname.checked=s.settings.browserProxyConnectByHostname;
       if (els.operationMode && typeof s.settings.operationMode==='string') {
         const effectiveMode=s.permissions?.effective?.operationMode;
         els.operationMode.value=effectiveMode==='all'?'all':s.settings.operationMode;
       }
       if (typeof s.settings.sessionIdleMinutes==='number'&&typeof s.settings.browserHeadless==='boolean') {
-        const proxy=s.settings.browserProxyServer?'Proxy: '+s.settings.browserProxyServer:'Proxy: none';
-        set(els.sessionIdleEffective,`有効値 / Effective: ${s.settings.sessionIdleMinutes} 分 / minutes; ${s.settings.browserHeadless?'headless':'headful'}; ${proxy}`);
+        const m=s.settings.sessionIdleMinutes,headless=s.settings.browserHeadless,proxyUrl=s.settings.browserProxyServer||'',byHost=!!proxyUrl&&s.settings.browserProxyConnectByHostname===true;
+        const ja=`有効値: ${m} 分、${headless?'ヘッドレス':'画面あり'}、プロキシ: ${proxyUrl||'なし'}${byHost?'（CONNECT はホスト名）':''}`;
+        const en=`Effective: ${m} minutes; ${headless?'headless':'headful'}; proxy: ${proxyUrl||'none'}${byHost?' (CONNECT by hostname)':''}`;
+        set(els.sessionIdleEffective,`${ja} / ${en}`);
       }
     }
+    if (s.settings || typeof s.platform === 'string') renderDesktop(s.settings, s.platform);
+    if (s.browser) renderBrowserSetup(s.browser);
     if (s.permissions) renderPermissions(s.permissions);
     if (s.clients) renderClients(s.clients);
     if (s.status) {
@@ -273,6 +418,9 @@
       set(els.runtimeError, s.status.runtimeError || '');
       set(els.operationModeError,s.status.operationModeError||'');
       set(els.globalError, s.status.globalError || '');
+      set(els.desktopError, s.status.desktopError || '');
+      hostDesktopNotice = typeof s.status.desktopNotice === 'string' ? s.status.desktopNotice : '';
+      renderDesktopNotice();
       set(els.mcpError, s.status.mcpError || '');
     }
   });

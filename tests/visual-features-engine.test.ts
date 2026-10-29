@@ -1,74 +1,430 @@
-import {test} from 'node:test';
+import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import {createHash,randomBytes} from 'node:crypto';
-import {createServer} from 'node:http';
+import { createHash, randomBytes } from 'node:crypto';
+import { createServer } from 'node:http';
 import sharp from 'sharp';
-import {Engine} from '../src/core.js';
-import {parsePolicy,assertUrlAllowed} from '../src/policy.js';
-import {BrowserAdapter} from '../src/browser.js';
-import type {Adapter,AdapterSession} from '../src/types.js';
-import {AdlError} from '../src/types.js';
-import type {CapturedImage} from '../src/visual-types.js';
-import {visualFeatureEngine,pixel,dragPoints,swipePoints} from './fixtures/visual-feature.js';
+import { Engine } from '../src/core.js';
+import { parsePolicy, assertUrlAllowed } from '../src/policy.js';
+import { BrowserAdapter } from '../src/browser.js';
+import type { Adapter, AdapterSession } from '../src/types.js';
+import { AdlError } from '../src/types.js';
+import type { CapturedImage } from '../src/visual-types.js';
+import { visualFeatureEngine, pixel, dragPoints, swipePoints } from './fixtures/visual-feature.js';
 
-test('Engine gesture uses trusted mouse input and returns actual changed pixels',{timeout:15000},async()=>{
- const f=await visualFeatureEngine();try{const before=await f.engine.capture(f.session.session_id,{max_dimension:2048});const after=await f.engine.gesture(f.session.session_id,{frame_id:before.metadata.frame_id,expected_revision:before.metadata.revision,surface_id:'board',kind:'drag',points:dragPoints});assert.equal(after.metadata.gesture.released_input,true);assert.equal(after.metadata.gesture.kind,'drag');assert.equal(after.metadata.gesture.verified,'input_sequence_completed');assert.notEqual(after.metadata.frame_id,before.metadata.frame_id);const crop=await f.engine.capture(f.session.session_id,{frame_id:after.metadata.frame_id,region:{x:240,y:100,width:30,height:30}});assert.deepEqual(await pixel(crop.png,5,10),[255,0,0]);assert.ok((await f.engine.observe(f.session.session_id,{token_budget:8000})).elements?.some(e=>e.name==='Drag ended x=230 y=90 trusted=true pointer=mouse'));}finally{await f.close();}
+test('Engine gesture uses trusted mouse input and returns actual changed pixels', { timeout: 15000 }, async () => {
+  const f = await visualFeatureEngine();
+  try {
+    const before = await f.engine.capture(f.session.session_id, { max_dimension: 2048 });
+    const after = await f.engine.gesture(f.session.session_id, {
+      frame_id: before.metadata.frame_id,
+      expected_revision: before.metadata.revision,
+      surface_id: 'board',
+      kind: 'drag',
+      points: dragPoints,
+    });
+    assert.equal(after.metadata.gesture.released_input, true);
+    assert.equal(after.metadata.gesture.kind, 'drag');
+    assert.equal(after.metadata.gesture.verified, 'input_sequence_completed');
+    assert.notEqual(after.metadata.frame_id, before.metadata.frame_id);
+    const crop = await f.engine.capture(f.session.session_id, {
+      frame_id: after.metadata.frame_id,
+      region: { x: 240, y: 100, width: 30, height: 30 },
+    });
+    assert.deepEqual(await pixel(crop.png, 5, 10), [255, 0, 0]);
+    assert.ok(
+      (await f.engine.observe(f.session.session_id, { token_budget: 8000 })).elements?.some(
+        e => e.name === 'Drag ended x=230 y=90 trusted=true pointer=mouse',
+      ),
+    );
+  } finally {
+    await f.close();
+  }
 });
-test('browser gesture accepts a recent frame after five seconds but rejects expired and stale revisions',{timeout:15000},async()=>{
- const realNow=Date.now;let offset=0;Date.now=()=>realNow()+offset;
- let f:Awaited<ReturnType<typeof visualFeatureEngine>>|undefined;
- try{
-  f=await visualFeatureEngine();
-  const frame=await f.engine.capture(f.session.session_id);
-  const plan={frame_id:frame.metadata.frame_id,expected_revision:frame.metadata.revision,surface_id:'board',kind:'drag' as const,points:dragPoints};
-  offset=31000;await assert.rejects(f.engine.gesture(f.session.session_id,plan),{code:'E_STALE_STATE'});
-  offset=6000;await assert.rejects(f.engine.gesture(f.session.session_id,{...plan,expected_revision:plan.expected_revision+1}),{code:'E_STALE_STATE'});
-  const result=await f.engine.gesture(f.session.session_id,plan);
-  assert.equal(result.metadata.gesture.released_input,true);
- }finally{Date.now=realNow;await f?.close();}
+test(
+  'browser gesture accepts a recent frame after five seconds but rejects expired and stale revisions',
+  { timeout: 15000 },
+  async () => {
+    const realNow = Date.now;
+    let offset = 0;
+    Date.now = () => realNow() + offset;
+    let f: Awaited<ReturnType<typeof visualFeatureEngine>> | undefined;
+    try {
+      f = await visualFeatureEngine();
+      const frame = await f.engine.capture(f.session.session_id);
+      const plan = {
+        frame_id: frame.metadata.frame_id,
+        expected_revision: frame.metadata.revision,
+        surface_id: 'board',
+        kind: 'drag' as const,
+        points: dragPoints,
+      };
+      offset = 31000;
+      await assert.rejects(f.engine.gesture(f.session.session_id, plan), { code: 'E_STALE_STATE' });
+      offset = 6000;
+      await assert.rejects(
+        f.engine.gesture(f.session.session_id, { ...plan, expected_revision: plan.expected_revision + 1 }),
+        { code: 'E_STALE_STATE' },
+      );
+      const result = await f.engine.gesture(f.session.session_id, plan);
+      assert.equal(result.metadata.gesture.released_input, true);
+    } finally {
+      Date.now = realNow;
+      await f?.close();
+    }
+  },
+);
+test(
+  'retained browser frame rejects CSS-only surface movement without a semantic revision change',
+  { timeout: 15000 },
+  async () => {
+    let move = false,
+      notifyMoved!: () => void;
+    const moved = new Promise<void>(resolve => {
+      notifyMoved = resolve;
+    });
+    const server = createServer((req, res) => {
+      if (req.url === '/poll') {
+        res.end(move ? 'move' : 'wait');
+        return;
+      }
+      if (req.url === '/moved') {
+        notifyMoved();
+        res.end('ok');
+        return;
+      }
+      res.setHeader('content-type', 'text/html');
+      res.end(
+        '<style>#board{position:absolute;left:10px;top:10px;width:600px;height:250px;touch-action:none}</style><canvas id="board"></canvas><script>let done=false;setInterval(async()=>{if(!done&&(await (await fetch("/poll")).text())==="move"){done=true;document.querySelector("#board").style.left="11px";fetch("/moved")}},50)</script>',
+      );
+    });
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+    const origin = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+    const policy = parsePolicy({
+      allowedOrigins: [origin],
+      allowLoopback: true,
+      browserTargets: [
+        {
+          id: 'fixture',
+          label: 'Fixture',
+          url: origin,
+          classification: 'PUBLIC',
+          visual: { enabled: true },
+          gestures: { enabled: true, surfaces: [{ id: 'board', selector: '#board', kinds: ['drag'] }] },
+        },
+      ],
+    });
+    const engine = new Engine(policy, { browser: new BrowserAdapter(policy, url => assertUrlAllowed(url, policy)) });
+    try {
+      const session = await engine.open((await engine.listTargets()).targets[0]!.target_id);
+      const frame = await engine.capture(session.session_id);
+      move = true;
+      await moved;
+      const observed = await engine.observe(session.session_id);
+      assert.equal(observed.revision, frame.metadata.revision);
+      await assert.rejects(
+        engine.gesture(session.session_id, {
+          frame_id: frame.metadata.frame_id,
+          expected_revision: frame.metadata.revision,
+          surface_id: 'board',
+          kind: 'drag',
+          points: dragPoints,
+        }),
+        { code: 'E_STALE_STATE' },
+      );
+    } finally {
+      await engine.shutdown();
+      server.closeAllConnections();
+      await new Promise<void>(resolve => server.close(() => resolve()));
+    }
+  },
+);
+test('Engine gesture uses real trusted touch swipe rather than a mouse surrogate', { timeout: 15000 }, async () => {
+  const f = await visualFeatureEngine();
+  try {
+    const before = await f.engine.capture(f.session.session_id);
+    const after = await f.engine.gesture(f.session.session_id, {
+      frame_id: before.metadata.frame_id,
+      expected_revision: before.metadata.revision,
+      surface_id: 'board',
+      kind: 'swipe',
+      points: swipePoints,
+    });
+    assert.equal(after.metadata.gesture.released_input, true);
+    assert.equal(after.metadata.gesture.kind, 'swipe');
+    assert.ok(
+      (await f.engine.observe(f.session.session_id, { token_budget: 8000 })).elements?.some(
+        e => e.name === 'Swipe ended x=170 trusted=true touch=true',
+      ),
+    );
+    const crop = await f.engine.capture(f.session.session_id, {
+      frame_id: after.metadata.frame_id,
+      region: { x: 180, y: 30, width: 30, height: 30 },
+    });
+    assert.deepEqual(await pixel(crop.png, 10, 10), [255, 0, 0]);
+  } finally {
+    await f.close();
+  }
 });
-test('retained browser frame rejects CSS-only surface movement without a semantic revision change',{timeout:15000},async()=>{
- let move=false,notifyMoved!:()=>void;const moved=new Promise<void>(resolve=>{notifyMoved=resolve;});
- const server=createServer((req,res)=>{
-  if(req.url==='/poll'){res.end(move?'move':'wait');return;}
-  if(req.url==='/moved'){notifyMoved();res.end('ok');return;}
-  res.setHeader('content-type','text/html');res.end('<style>#board{position:absolute;left:10px;top:10px;width:600px;height:250px;touch-action:none}</style><canvas id="board"></canvas><script>let done=false;setInterval(async()=>{if(!done&&(await (await fetch("/poll")).text())==="move"){done=true;document.querySelector("#board").style.left="11px";fetch("/moved")}},50)</script>');
- });
- await new Promise<void>(resolve=>server.listen(0,'127.0.0.1',resolve));
- const origin=`http://127.0.0.1:${(server.address() as {port:number}).port}`;
- const policy=parsePolicy({allowedOrigins:[origin],allowLoopback:true,browserTargets:[{id:'fixture',label:'Fixture',url:origin,classification:'PUBLIC',visual:{enabled:true},gestures:{enabled:true,surfaces:[{id:'board',selector:'#board',kinds:['drag']}]}}]});
- const engine=new Engine(policy,{browser:new BrowserAdapter(policy,url=>assertUrlAllowed(url,policy))});
- try{
-  const session=await engine.open((await engine.listTargets()).targets[0]!.target_id);
-  const frame=await engine.capture(session.session_id);move=true;await moved;
-  const observed=await engine.observe(session.session_id);assert.equal(observed.revision,frame.metadata.revision);
-  await assert.rejects(engine.gesture(session.session_id,{frame_id:frame.metadata.frame_id,expected_revision:frame.metadata.revision,surface_id:'board',kind:'drag',points:dragPoints}),{code:'E_STALE_STATE'});
- }finally{await engine.shutdown();server.closeAllConnections();await new Promise<void>(resolve=>server.close(()=>resolve()));}
+test(
+  'Engine rejects historical frames, wrong revisions and foreign-session coordinates before input',
+  { timeout: 15000 },
+  async () => {
+    const f = await visualFeatureEngine();
+    try {
+      const first = await f.engine.capture(f.session.session_id),
+        latest = await f.engine.capture(f.session.session_id);
+      const plan = {
+        frame_id: first.metadata.frame_id,
+        expected_revision: first.metadata.revision,
+        surface_id: 'board',
+        kind: 'drag' as const,
+        points: dragPoints,
+      };
+      await assert.rejects(f.engine.gesture(f.session.session_id, plan), { code: 'E_STALE_STATE' });
+      await assert.rejects(
+        f.engine.gesture(f.session.session_id, {
+          ...plan,
+          frame_id: latest.metadata.frame_id,
+          expected_revision: latest.metadata.revision + 1,
+        }),
+        { code: 'E_STALE_STATE' },
+      );
+      const second = await f.engine.open(f.target.target_id);
+      await assert.rejects(f.engine.gesture(second.session_id, { ...plan, frame_id: latest.metadata.frame_id }), {
+        code: 'E_TARGET_NOT_FOUND',
+      });
+      assert.ok(
+        (await f.engine.observe(f.session.session_id, { token_budget: 8000 })).elements?.some(e => e.name === 'Ready'),
+      );
+    } finally {
+      await f.close();
+    }
+  },
+);
+test('Engine rejects a frame whose actual semantic revision changed after capture', { timeout: 15000 }, async () => {
+  const f = await visualFeatureEngine();
+  try {
+    const frame = await f.engine.capture(f.session.session_id);
+    const observed = await f.engine.observe(f.session.session_id, { token_budget: 8000 });
+    const change = observed.elements!.find(e => e.name === 'Change revision')!;
+    const changed = await f.engine.act(
+      f.session.session_id,
+      { action: 'click', element_id: change.id },
+      observed.revision,
+    );
+    assert.notEqual(changed.revision, frame.metadata.revision);
+    await assert.rejects(
+      f.engine.gesture(f.session.session_id, {
+        frame_id: frame.metadata.frame_id,
+        expected_revision: changed.revision,
+        surface_id: 'board',
+        kind: 'drag',
+        points: dragPoints,
+      }),
+      { code: 'E_STALE_STATE' },
+    );
+    assert.ok(
+      (await f.engine.observe(f.session.session_id, { token_budget: 8000 })).elements?.some(
+        e => e.name === 'Revision changed',
+      ),
+    );
+  } finally {
+    await f.close();
+  }
 });
-test('Engine gesture uses real trusted touch swipe rather than a mouse surrogate',{timeout:15000},async()=>{
- const f=await visualFeatureEngine();try{const before=await f.engine.capture(f.session.session_id);const after=await f.engine.gesture(f.session.session_id,{frame_id:before.metadata.frame_id,expected_revision:before.metadata.revision,surface_id:'board',kind:'swipe',points:swipePoints});assert.equal(after.metadata.gesture.released_input,true);assert.equal(after.metadata.gesture.kind,'swipe');assert.ok((await f.engine.observe(f.session.session_id,{token_budget:8000})).elements?.some(e=>e.name==='Swipe ended x=170 trusted=true touch=true'));const crop=await f.engine.capture(f.session.session_id,{frame_id:after.metadata.frame_id,region:{x:180,y:30,width:30,height:30}});assert.deepEqual(await pixel(crop.png,10,10),[255,0,0]);}finally{await f.close();}
+test(
+  'Engine default-disabled gestures and unknown surfaces never move rendered controls',
+  { timeout: 15000 },
+  async () => {
+    const disabled = await visualFeatureEngine(false);
+    try {
+      const frame = await disabled.engine.capture(disabled.session.session_id);
+      await assert.rejects(
+        disabled.engine.gesture(disabled.session.session_id, {
+          frame_id: frame.metadata.frame_id,
+          expected_revision: frame.metadata.revision,
+          surface_id: 'board',
+          kind: 'drag',
+          points: dragPoints,
+        }),
+        (e: unknown) => e instanceof AdlError && ['E_POLICY_DENIED', 'E_UNSUPPORTED_ACTION'].includes(e.code),
+      );
+      assert.ok(
+        (await disabled.engine.observe(disabled.session.session_id, { token_budget: 8000 })).elements?.some(
+          e => e.name === 'Ready',
+        ),
+      );
+    } finally {
+      await disabled.close();
+    }
+    const f = await visualFeatureEngine();
+    try {
+      const frame = await f.engine.capture(f.session.session_id);
+      await assert.rejects(
+        f.engine.gesture(f.session.session_id, {
+          frame_id: frame.metadata.frame_id,
+          expected_revision: frame.metadata.revision,
+          surface_id: 'missing',
+          kind: 'drag',
+          points: dragPoints,
+        }),
+      );
+      assert.ok(
+        (await f.engine.observe(f.session.session_id, { token_budget: 8000 })).elements?.some(e => e.name === 'Ready'),
+      );
+    } finally {
+      await f.close();
+    }
+  },
+);
+test('Engine gesture cancellation invalidates session and retained coordinates', { timeout: 15000 }, async () => {
+  const f = await visualFeatureEngine();
+  const cancel = new AbortController();
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    const frame = await f.engine.capture(f.session.session_id);
+    timer = setTimeout(() => cancel.abort(), 100);
+    await assert.rejects(
+      f.engine.gesture(
+        f.session.session_id,
+        {
+          frame_id: frame.metadata.frame_id,
+          expected_revision: frame.metadata.revision,
+          surface_id: 'board',
+          kind: 'drag',
+          points: [
+            { x: 50, y: 50, t_ms: 0 },
+            { x: 150, y: 70, t_ms: 500 },
+            { x: 260, y: 120, t_ms: 1000 },
+          ],
+        },
+        cancel.signal,
+      ),
+      { code: 'E_CANCELLED' },
+    );
+    await assert.rejects(f.engine.capture(f.session.session_id, { frame_id: frame.metadata.frame_id }), {
+      code: 'E_TARGET_NOT_FOUND',
+    });
+  } finally {
+    if (timer) clearTimeout(timer);
+    await f.close();
+  }
 });
-test('Engine rejects historical frames, wrong revisions and foreign-session coordinates before input',{timeout:15000},async()=>{
- const f=await visualFeatureEngine();try{const first=await f.engine.capture(f.session.session_id),latest=await f.engine.capture(f.session.session_id);const plan={frame_id:first.metadata.frame_id,expected_revision:first.metadata.revision,surface_id:'board',kind:'drag' as const,points:dragPoints};await assert.rejects(f.engine.gesture(f.session.session_id,plan),{code:'E_STALE_STATE'});await assert.rejects(f.engine.gesture(f.session.session_id,{...plan,frame_id:latest.metadata.frame_id,expected_revision:latest.metadata.revision+1}),{code:'E_STALE_STATE'});const second=await f.engine.open(f.target.target_id);await assert.rejects(f.engine.gesture(second.session_id,{...plan,frame_id:latest.metadata.frame_id}),{code:'E_TARGET_NOT_FOUND'});assert.ok((await f.engine.observe(f.session.session_id,{token_budget:8000})).elements?.some(e=>e.name==='Ready'));}finally{await f.close();}
-});
-test('Engine rejects a frame whose actual semantic revision changed after capture',{timeout:15000},async()=>{
- const f=await visualFeatureEngine();try{const frame=await f.engine.capture(f.session.session_id);const observed=await f.engine.observe(f.session.session_id,{token_budget:8000});const change=observed.elements!.find(e=>e.name==='Change revision')!;const changed=await f.engine.act(f.session.session_id,{action:'click',element_id:change.id},observed.revision);assert.notEqual(changed.revision,frame.metadata.revision);await assert.rejects(f.engine.gesture(f.session.session_id,{frame_id:frame.metadata.frame_id,expected_revision:changed.revision,surface_id:'board',kind:'drag',points:dragPoints}),{code:'E_STALE_STATE'});assert.ok((await f.engine.observe(f.session.session_id,{token_budget:8000})).elements?.some(e=>e.name==='Revision changed'));}finally{await f.close();}
-});
-test('Engine default-disabled gestures and unknown surfaces never move rendered controls',{timeout:15000},async()=>{
- const disabled=await visualFeatureEngine(false);try{const frame=await disabled.engine.capture(disabled.session.session_id);await assert.rejects(disabled.engine.gesture(disabled.session.session_id,{frame_id:frame.metadata.frame_id,expected_revision:frame.metadata.revision,surface_id:'board',kind:'drag',points:dragPoints}),(e:unknown)=>e instanceof AdlError&&['E_POLICY_DENIED','E_UNSUPPORTED_ACTION'].includes(e.code));assert.ok((await disabled.engine.observe(disabled.session.session_id,{token_budget:8000})).elements?.some(e=>e.name==='Ready'));}finally{await disabled.close();}
- const f=await visualFeatureEngine();try{const frame=await f.engine.capture(f.session.session_id);await assert.rejects(f.engine.gesture(f.session.session_id,{frame_id:frame.metadata.frame_id,expected_revision:frame.metadata.revision,surface_id:'missing',kind:'drag',points:dragPoints}));assert.ok((await f.engine.observe(f.session.session_id,{token_budget:8000})).elements?.some(e=>e.name==='Ready'));}finally{await f.close();}
-});
-test('Engine gesture cancellation invalidates session and retained coordinates',{timeout:15000},async()=>{
- const f=await visualFeatureEngine();const cancel=new AbortController();let timer:NodeJS.Timeout|undefined;try{const frame=await f.engine.capture(f.session.session_id);timer=setTimeout(()=>cancel.abort(),100);await assert.rejects(f.engine.gesture(f.session.session_id,{frame_id:frame.metadata.frame_id,expected_revision:frame.metadata.revision,surface_id:'board',kind:'drag',points:[{x:50,y:50,t_ms:0},{x:150,y:70,t_ms:500},{x:260,y:120,t_ms:1000}]},cancel.signal),{code:'E_CANCELLED'});await assert.rejects(f.engine.capture(f.session.session_id,{frame_id:frame.metadata.frame_id}),{code:'E_TARGET_NOT_FOUND'});}finally{if(timer)clearTimeout(timer);await f.close();}
-});
-test('Engine records actual decoded video pixels, timestamps, masks and independently retained source crops',{timeout:15000},async()=>{
- const f=await visualFeatureEngine();try{const sequence=await f.engine.record(f.session.session_id,{frame_count:3,interval_ms:450,max_dimension:320,max_pixels:65536});assert.equal(sequence.metadata.encoding,'timestamped_png_sequence');assert.equal(sequence.metadata.audio,false);assert.equal(sequence.metadata.sampling,'discrete_frames_unsampled_intervals');assert.equal(sequence.metadata.requested_interval_ms,450);assert.equal(sequence.frames.length,3);assert.equal(sequence.metadata.frames.length,3);assert.ok(sequence.metadata.elapsed_ms>=800);assert.ok(sequence.frames.reduce((sum,frame)=>sum+frame.png.length,0)<=6*1024*1024);const hashes=[];let elapsed=-1;const ids=new Set<string>();for(let i=0;i<sequence.frames.length;i++){const frame=sequence.frames[i]!,metadata=sequence.metadata.frames[i]!;assert.equal(metadata.frame_id,frame.metadata.frame_id);assert.ok(metadata.elapsed_ms>elapsed);elapsed=metadata.elapsed_ms;assert.ok(Number.isFinite(Date.parse(metadata.captured_at)));ids.add(metadata.frame_id);assert.ok(metadata.output.width*metadata.output.height<=65536);const video=await f.engine.capture(f.session.session_id,{frame_id:metadata.frame_id,region:{x:10,y:280,width:160,height:90},max_dimension:160});assert.equal(video.metadata.frame_id,metadata.frame_id);assert.equal(video.metadata.captured_at,metadata.captured_at);hashes.push(createHash('sha256').update(video.png).digest('hex'));const masked=await f.engine.capture(f.session.session_id,{frame_id:metadata.frame_id,region:{x:650,y:10,width:80,height:30}});assert.deepEqual(await pixel(masked.png,10,10),[0,0,0]);}assert.equal(ids.size,3);assert.ok(new Set(hashes).size>=2,'real playing VP8 content must change between sampled source frames');}finally{await f.close();}
-});
+test(
+  'Engine records actual decoded video pixels, timestamps, masks and independently retained source crops',
+  { timeout: 15000 },
+  async () => {
+    const f = await visualFeatureEngine();
+    try {
+      const sequence = await f.engine.record(f.session.session_id, {
+        frame_count: 3,
+        interval_ms: 450,
+        max_dimension: 320,
+        max_pixels: 65536,
+      });
+      assert.equal(sequence.metadata.encoding, 'timestamped_png_sequence');
+      assert.equal(sequence.metadata.audio, false);
+      assert.equal(sequence.metadata.sampling, 'discrete_frames_unsampled_intervals');
+      assert.equal(sequence.metadata.requested_interval_ms, 450);
+      assert.equal(sequence.frames.length, 3);
+      assert.equal(sequence.metadata.frames.length, 3);
+      assert.ok(sequence.metadata.elapsed_ms >= 800);
+      assert.ok(sequence.frames.reduce((sum, frame) => sum + frame.png.length, 0) <= 6 * 1024 * 1024);
+      const hashes = [];
+      let elapsed = -1;
+      const ids = new Set<string>();
+      for (let i = 0; i < sequence.frames.length; i++) {
+        const frame = sequence.frames[i]!,
+          metadata = sequence.metadata.frames[i]!;
+        assert.equal(metadata.frame_id, frame.metadata.frame_id);
+        assert.ok(metadata.elapsed_ms > elapsed);
+        elapsed = metadata.elapsed_ms;
+        assert.ok(Number.isFinite(Date.parse(metadata.captured_at)));
+        ids.add(metadata.frame_id);
+        assert.ok(metadata.output.width * metadata.output.height <= 65536);
+        const video = await f.engine.capture(f.session.session_id, {
+          frame_id: metadata.frame_id,
+          region: { x: 10, y: 280, width: 160, height: 90 },
+          max_dimension: 160,
+        });
+        assert.equal(video.metadata.frame_id, metadata.frame_id);
+        assert.equal(video.metadata.captured_at, metadata.captured_at);
+        hashes.push(createHash('sha256').update(video.png).digest('hex'));
+        const masked = await f.engine.capture(f.session.session_id, {
+          frame_id: metadata.frame_id,
+          region: { x: 650, y: 10, width: 80, height: 30 },
+        });
+        assert.deepEqual(await pixel(masked.png, 10, 10), [0, 0, 0]);
+      }
+      assert.equal(ids.size, 3);
+      assert.ok(new Set(hashes).size >= 2, 'real playing VP8 content must change between sampled source frames');
+    } finally {
+      await f.close();
+    }
+  },
+);
 class NoiseAdapter implements Adapter {
- captures=0;constructor(private png:Buffer){}
- async open():Promise<AdapterSession>{return {snapshot:async()=>({fingerprint:'same',elements:[],truncated:false}),act:async()=>{},capture:async():Promise<CapturedImage>=>{this.captures++;return {png:this.png,captured_at:new Date().toISOString(),coordinate_space:'viewport_css_pixels',viewport:{width:1024,height:1024,scroll_x:0,scroll_y:0,device_scale_factor:1},redacted:true};},close:async()=>{}};}
- async close(){}
+  captures = 0;
+  constructor(private png: Buffer) {}
+  async open(): Promise<AdapterSession> {
+    return {
+      snapshot: async () => ({ fingerprint: 'same', elements: [], truncated: false }),
+      act: async () => {},
+      capture: async (): Promise<CapturedImage> => {
+        this.captures++;
+        return {
+          png: this.png,
+          captured_at: new Date().toISOString(),
+          coordinate_space: 'viewport_css_pixels',
+          viewport: { width: 1024, height: 1024, scroll_x: 0, scroll_y: 0, device_scale_factor: 1 },
+          redacted: true,
+        };
+      },
+      close: async () => {},
+    };
+  }
+  async close() {}
 }
-test('Engine record validates bounds before capture and rejects aggregate PNG response overflow',{timeout:15000},async()=>{
- const png=await sharp(randomBytes(1024*1024*3),{raw:{width:1024,height:1024,channels:3}}).png().toBuffer();assert.ok(png.length>2*1024*1024);const fake=new NoiseAdapter(png);const policy=parsePolicy({browserTargets:[{id:'noise',label:'Noise',url:'https://example.com',classification:'PUBLIC',visual:{enabled:true}}]});const engine=new Engine(policy,{browser:fake});try{const target=(await engine.listTargets()).targets[0]!;const session=await engine.open(target.target_id);for(const options of [{frame_count:0},{frame_count:17},{interval_ms:0},{max_dimension:4096}])await assert.rejects(engine.record(session.session_id,options),{code:'E_INVALID_ARGUMENT'});assert.equal(fake.captures,0);await assert.rejects(engine.record(session.session_id,{frame_count:3,interval_ms:100,max_dimension:1024,max_pixels:1048576}),{code:'E_RESOURCE_LIMIT'});assert.ok(fake.captures>=2&&fake.captures<=3);assert.equal((await engine.observe(session.session_id)).revision,session.revision);}finally{await engine.shutdown();}
-});
+test(
+  'Engine record validates bounds before capture and rejects aggregate PNG response overflow',
+  { timeout: 15000 },
+  async () => {
+    const png = await sharp(randomBytes(1024 * 1024 * 3), { raw: { width: 1024, height: 1024, channels: 3 } })
+      .png()
+      .toBuffer();
+    assert.ok(png.length > 2 * 1024 * 1024);
+    const fake = new NoiseAdapter(png);
+    const policy = parsePolicy({
+      browserTargets: [
+        {
+          id: 'noise',
+          label: 'Noise',
+          url: 'https://example.com',
+          classification: 'PUBLIC',
+          visual: { enabled: true },
+        },
+      ],
+    });
+    const engine = new Engine(policy, { browser: fake });
+    try {
+      const target = (await engine.listTargets()).targets[0]!;
+      const session = await engine.open(target.target_id);
+      for (const options of [{ frame_count: 0 }, { frame_count: 17 }, { interval_ms: 0 }, { max_dimension: 4096 }])
+        await assert.rejects(engine.record(session.session_id, options), { code: 'E_INVALID_ARGUMENT' });
+      assert.equal(fake.captures, 0);
+      await assert.rejects(
+        engine.record(session.session_id, {
+          frame_count: 3,
+          interval_ms: 100,
+          max_dimension: 1024,
+          max_pixels: 1048576,
+        }),
+        { code: 'E_RESOURCE_LIMIT' },
+      );
+      assert.ok(fake.captures >= 2 && fake.captures <= 3);
+      assert.equal((await engine.observe(session.session_id)).revision, session.revision);
+    } finally {
+      await engine.shutdown();
+    }
+  },
+);

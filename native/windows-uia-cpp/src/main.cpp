@@ -130,6 +130,12 @@ int Run(int argc, char** argv) {
       if (!NextArg(argc,argv,i,interactive_json))return 2;
     } else if (a == "--controls-file") {
       if (!NextArg(argc, argv, i, controls_file)) return 2;
+    } else if (a == "--operation-mode") {
+      if (!NextArg(argc, argv, i, cfg.operation_mode)) return 2;
+      if (cfg.operation_mode != "standard" && cfg.operation_mode != "ask") {
+        std::cout << Fail("E_CONFIG", "--operation-mode must be standard or ask") << std::endl;
+        return 2;
+      }
     } else {
       std::cout << Fail("E_CONFIG", "unknown argument") << std::endl;
       return 2;
@@ -141,6 +147,11 @@ int Run(int argc, char** argv) {
   }
   if (!Absolute(cfg.app_path) || (!controls_file.empty() && !Absolute(controls_file))) {
     std::cout << Fail("E_CONFIG", "--app-path and --controls-file must be absolute paths") << std::endl;
+    return 2;
+  }
+  // A tier is one policy; it never silently overrides or is overridden by an allowlist or --allow-all.
+  if (!cfg.operation_mode.empty() && (cfg.allow_all || !controls_file.empty())) {
+    std::cout << Fail("E_CONFIG", "--operation-mode cannot be combined with --allow-all or --controls-file") << std::endl;
     return 2;
   }
   std::string err;
@@ -162,6 +173,7 @@ int Run(int argc, char** argv) {
     return 2;
   }
   controls.allow_all = cfg.allow_all;
+  controls.operation_mode = cfg.operation_mode;
 
   if(!interactive_json.empty()) {
     if(interactive_json.size()>8192){std::cout<<Fail("E_CONFIG","interactive configuration exceeds bounded inline JSON")<<std::endl;return 2;}
@@ -214,7 +226,7 @@ int wmain(int argc, wchar_t** argv) {
   for(int i=1;i<argc;++i){
     const std::wstring option=argv[i];
     // A configured ID/path/JSON value is data even when it resembles a flag.
-    if(option==L"--app-id"||option==L"--app-path"||option==L"--controls-file"||option==L"--interactive-config"){if(i+1<argc)++i;continue;}
+    if(option==L"--app-id"||option==L"--app-path"||option==L"--controls-file"||option==L"--interactive-config"||option==L"--operation-mode"){if(i+1<argc)++i;continue;}
     if(option==L"--lifecycle-enabled")++lifecycle;if(option==L"--lifecycle-worker")++worker;
   }
   if(lifecycle>1||worker>1||(worker&&(!lifecycle||!adl::OnLifecycleDesktop()))){std::cout<<Fail("E_CONFIG","invalid isolated lifecycle worker")<<std::endl;return 2;}

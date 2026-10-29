@@ -1,8 +1,5 @@
 name: Beta validation
-on:
-  push:
-  pull_request:
-  workflow_dispatch:
+on: [push, pull_request, workflow_dispatch]
 permissions:
   contents: read
 concurrency:
@@ -53,6 +50,7 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run check
+      - run: npm run format:check
       - run: npm run test:unit
       - run: npm run test:extension
       - run: npm run test:package
@@ -180,3 +178,22 @@ jobs:
       - uses: actions/checkout@v4
       - run: native/macos-ax/build.sh
       # Real GUI AX acceptance needs an explicitly permitted interactive Mac.
+  linux-atspi:
+    # Headless accessibility desktop: Xvfb + a private D-Bus session with its own AT-SPI bus and a GTK3 fixture.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: sudo apt-get update -q && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q xvfb at-spi2-core gir1.2-atspi-2.0 python3-gi gir1.2-gtk-3.0 gir1.2-gtk-4.0 dbus-x11 openbox weston xwayland python3-pyqt5
+      - run: npm ci
+      - run: npm run build:tsc
+      - name: Helper protocol and policy tests against the real fixture
+        run: native/linux-atspi/tests/run-xvfb.sh python3 -m unittest -v native/linux-atspi/tests/test_helper.py
+      - name: Scenarios (real window manager, GTK 4, Qt, headless Wayland and XWayland, large tree)
+        run: ADL_WM=openbox native/linux-atspi/tests/run-xvfb.sh python3 -m unittest -v native/linux-atspi/tests/test_scenarios.py
+      - name: MCP end-to-end through Engine, LinuxAdapter, helper and fixture
+        run: native/linux-atspi/tests/run-xvfb.sh node --test --test-timeout=60000 --test-force-exit dist/tests/linux-atspi-e2e.test.js

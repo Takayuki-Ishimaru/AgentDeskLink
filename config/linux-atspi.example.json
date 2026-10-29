@@ -1,0 +1,9 @@
+{
+  "operationMode": "standard",
+  "linux": {
+    "helperPath": "/absolute/path/AgentDeskLink/native/linux-atspi/adl-linux-atspi-helper.py",
+    "appId": "gnome-calculator",
+    "appPath": "/usr/bin/gnome-calculator",
+    "classification": "PUBLIC"
+  }
+}

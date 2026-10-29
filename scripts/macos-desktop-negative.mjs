@@ -1,21 +1,273 @@
-import assert from 'node:assert/strict';import {spawn} from 'node:child_process';import {createInterface} from 'node:readline';import {writeFile,mkdir} from 'node:fs/promises';import {resolve,join} from 'node:path';import {setTimeout as delay} from 'node:timers/promises';import {Client} from '@modelcontextprotocol/client';import {StdioClientTransport} from '@modelcontextprotocol/client/stdio';
-const outAt=process.argv.indexOf('--out');const build=resolve('native/macos-ax/build'),out=resolve(outAt<0?'artifacts':process.argv[outAt+1]);await mkdir(out,{recursive:true});
-function channel(exe,args=[]){const p=spawn(exe,args,{stdio:['pipe','pipe','pipe']});p.stderr.resume();const values=[],pending=[];createInterface({input:p.stdout}).on('line',l=>{const v=JSON.parse(l);pending.length?pending.shift()(v):values.push(v)});return {p,next:()=>values.length?Promise.resolve(values.shift()):Promise.race([new Promise(r=>pending.push(r)),new Promise((_,j)=>setTimeout(()=>j(new Error('fixture timeout')),10000).unref())]),call:async function(v){p.stdin.write(JSON.stringify(v)+'\n');return this.next()}}}
-const checks=[];let f,h,client;const record=name=>{checks.push({name,ok:true});console.log(name)};
-try{
- f=channel(join(build,'ADLFixture.app/Contents/MacOS/ADLFixture'));await f.next();h=channel(join(build,'ADLHuman.app/Contents/MacOS/ADLFixture'),['--foreground']);await h.next();await delay(500);
- const controls=join(out,'macos-negative-controls.json');await writeFile(controls,JSON.stringify({FixtureText:{role:'AXTextField',allowed:['fill']},FixtureButton:{role:'AXButton',allowed:['click']},FixtureCheck:{role:'AXCheckBox',allowed:['check']},FixtureInterference:{role:'AXButton',allowed:['click']},FixtureReadOnly:{role:'AXStaticText',allowed:['fill']}}));
- const config=join(out,'macos-negative-policy.json');await writeFile(config,JSON.stringify({maxSessions:8,macos:{helperPath:join(build,'adl-macos-ax-helper'),appPath:join(build,'ADLFixture.app/Contents/MacOS/ADLFixture'),appId:'local.agentdesklink.fixture',controlsPath:controls,classification:'PUBLIC'}}));
- const connect=async()=>{const c=new Client({name:'adl-mac-negative',version:'1'},{versionNegotiation:{mode:'legacy'}});await c.connect(new StdioClientTransport({command:process.execPath,args:['dist/src/server.js','--config',config],cwd:process.cwd(),stderr:'pipe'}));return c};client=await connect();
- const call=async(name,args={})=>JSON.parse((await client.callTool({name,arguments:args})).content[0].text),ok=async(name,args)=>{const r=await call(name,args);assert.equal(r.ok,true,JSON.stringify(r));return r};
- const ready=async(name,args)=>{for(let i=0;;i++){const r=await call(name,args);if(r.ok)return r;if(i>=30||!['E_TARGET_NOT_FOUND','E_STALE_STATE'].includes(r.error.code))assert.fail(JSON.stringify(r));await delay(50)}};
- let targets=(await ready('adl_targets')).targets;let target=targets.find(t=>t.window.bounds.x===50);let session=await ready('adl_open',{target_id:target.target_id,mode:'background_semantic'});let p=await ready('adl_observe',{session_id:session.session_id,token_budget:8000});const find=(p,n)=>p.elements.find(e=>e.name===n);
- const readonly=await call('adl_act',{session_id:session.session_id,action:'fill',element_id:find(p,'Read only').id,value:'NO',expected_revision:p.revision});assert.equal(readonly.ok,false);assert.ok(['E_POLICY_DENIED','E_UNSUPPORTED_ACTION'].includes(readonly.error.code));record('read-only control cannot be filled even in trusted allowlist');
- session=await ready('adl_open',{target_id:target.target_id,mode:'background_semantic'});p=await ready('adl_observe',{session_id:session.session_id,token_budget:8000});
- const task=await ok('adl_execute',{expected_revisions:{[session.session_id]:p.revision},steps:[{session_id:session.session_id,action:'wait_for',name:'Never',timeout_ms:10000},{session_id:session.session_id,action:'click',element_id:find(p,'Run search').id}]});await delay(100);await ok('adl_task',{task_id:task.task_id,command:'cancel'});let state;for(let i=0;i<200;i++){state=await ok('adl_task',{task_id:task.task_id});if(!['queued','running'].includes(state.status))break;await delay(10)}assert.equal(state.status,'cancelled');assert.equal(state.results[1].status,'not_executed');assert.equal((await f.call({op:'state'})).windows.find(w=>w.index===0).clicks,0);record('cancelled wait executes no suffix action');const available=await call('adl_targets');if(!available.ok){const expired=target.target_id;await client.close();client=await connect();targets=(await ready('adl_targets')).targets;target=targets.find(t=>t.window.bounds.x===50);assert.equal((await call('adl_open',{target_id:expired,mode:'background_semantic'})).error.code,'E_TARGET_NOT_FOUND');record('cancelled native IPC invalidates its epoch, explicit server restart issues fresh handles')}
- session=await ready('adl_open',{target_id:target.target_id,mode:'background_semantic'});p=await ready('adl_observe',{session_id:session.session_id,token_budget:8000});await f.call({op:'minimize',index:0});for(let i=0;i<100;i++){if((await f.call({op:'state'})).windows.find(w=>w.index===0).minimized)break;await delay(50)}await delay(100);const minimized=(await ready('adl_targets')).targets.find(t=>t.target_id===target.target_id);assert.equal(minimized.window.minimized,true);const hidden=await call('adl_observe',{session_id:session.session_id,token_budget:8000});assert.equal(hidden.error.code,'E_UNSUPPORTED_ACTION');const denied=await call('adl_act',{session_id:session.session_id,action:'click',element_id:find(p,'Run search').id,expected_revision:p.revision});assert.equal(denied.error.code,'E_UNSUPPORTED_ACTION');assert.equal((await f.call({op:'state'})).windows.find(w=>w.index===0).minimized,true);record('minimized window denied without restoring it');
- await f.call({op:'restore',index:0});for(let i=0;i<100;i++){if(!(await f.call({op:'state'})).windows.find(w=>w.index===0).minimized)break;await delay(50)}await delay(100);targets=(await ready('adl_targets')).targets;session=await ready('adl_open',{target_id:target.target_id,mode:'background_semantic'});p=await ready('adl_observe',{session_id:session.session_id,token_budget:8000});await f.call({op:'move-control',index:0,to:1});const refresh=await ready('adl_observe',{session_id:session.session_id,token_budget:8000});const foreign=await call('adl_act',{session_id:session.session_id,action:'fill',element_id:find(p,'Reference').id,value:'FORBIDDEN',expected_revision:refresh.revision});assert.equal(foreign.error.code,'E_TARGET_NOT_FOUND');assert.ok(!(await f.call({op:'state'})).windows.some(w=>w.field==='FORBIDDEN'));await ok('adl_close',{session_id:session.session_id});record('reparented retained control cannot mutate a sibling window');
- await f.call({op:'reopen',index:0,screen:0});await delay(100);const changed=(await ready('adl_targets')).targets.find(t=>t.window.bounds.x===50);session=await ready('adl_open',{target_id:changed.target_id,mode:'background_semantic'});const knownButton=find((await ready('adl_observe',{session_id:session.session_id,token_budget:8000})),'Run search').id;await f.call({op:'large-tree',index:0});p=await call('adl_observe',{session_id:session.session_id,token_budget:8000});if(p.ok)assert.equal(p.truncated,true);else assert.ok(['E_TARGET_NOT_FOUND','E_RESOURCE_LIMIT'].includes(p.error.code));const large=await call('adl_act',{session_id:session.session_id,action:'click',element_id:knownButton,expected_revision:p.revision??session.revision});assert.equal(large.ok,false);assert.ok(['E_RESOURCE_LIMIT','E_TARGET_NOT_FOUND','E_STALE_STATE'].includes(large.error.code),JSON.stringify(large));assert.notEqual(large.error.may_have_executed,true);assert.equal((await f.call({op:'state'})).windows.find(w=>w.index===0).clicks,0);record('oversized raw tree cannot dispatch mutation; observation truncates or fails safely');await client.close();client=await connect();
- await f.call({op:'reopen',index:0,screen:0});await delay(100);const current=(await ready('adl_targets')).targets.find(t=>t.window.bounds.x===50);session=await ready('adl_open',{target_id:current.target_id,mode:'background_semantic'});p=await ready('adl_observe',{session_id:session.session_id,token_budget:8000});await h.call({op:'foreground',index:0});await delay(100);const focus=await ok('adl_execute',{expected_revisions:{[session.session_id]:p.revision},steps:[{session_id:session.session_id,action:'click',element_id:find(p,'Interference test').id},{session_id:session.session_id,action:'click',element_id:find(p,'Run search').id}]});for(let i=0;i<200;i++){state=await ok('adl_task',{task_id:focus.task_id});if(!['queued','running'].includes(state.status))break;await delay(10)}await writeFile(join(out,'macos-focus-guard.json'),JSON.stringify({task:state,actual:await f.call({op:'state'})},null,2));assert.equal(state.status,'failed');assert.equal(state.error.code,'E_FOCUS_CHANGED');assert.equal(state.error.may_have_executed,true);assert.equal(state.results[1].status,'not_executed');const actual=(await f.call({op:'state'})).windows.find(w=>w.index===0);assert.equal(actual.status,'Interference invoked');assert.equal(actual.clicks,0);record('deliberate focus theft reports uncertainty and stops the suffix');
- await writeFile(join(out,'macos-negative.json'),JSON.stringify({ok:true,checks},null,2));
-}catch(error){await writeFile(join(out,'macos-negative.json'),JSON.stringify({ok:false,error:String(error),checks},null,2));throw error}finally{await client?.close();f?.p.kill();if(h){h.p.stdin.write('{"op":"quit"}\n');await new Promise(r=>{h.p.once('exit',r);setTimeout(()=>{h.p.kill();r()},1000).unref()})}}
+import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
+import { createInterface } from 'node:readline';
+import { writeFile, mkdir } from 'node:fs/promises';
+import { resolve, join } from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
+import { Client } from '@modelcontextprotocol/client';
+import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
+const outAt = process.argv.indexOf('--out');
+const build = resolve('native/macos-ax/build'),
+  out = resolve(outAt < 0 ? 'artifacts' : process.argv[outAt + 1]);
+await mkdir(out, { recursive: true });
+function channel(exe, args = []) {
+  const p = spawn(exe, args, { stdio: ['pipe', 'pipe', 'pipe'] });
+  p.stderr.resume();
+  const values = [],
+    pending = [];
+  createInterface({ input: p.stdout }).on('line', l => {
+    const v = JSON.parse(l);
+    pending.length ? pending.shift()(v) : values.push(v);
+  });
+  return {
+    p,
+    next: () =>
+      values.length
+        ? Promise.resolve(values.shift())
+        : Promise.race([
+            new Promise(r => pending.push(r)),
+            new Promise((_, j) => setTimeout(() => j(new Error('fixture timeout')), 10000).unref()),
+          ]),
+    call: async function (v) {
+      p.stdin.write(JSON.stringify(v) + '\n');
+      return this.next();
+    },
+  };
+}
+const checks = [];
+let f, h, client;
+const record = name => {
+  checks.push({ name, ok: true });
+  console.log(name);
+};
+try {
+  f = channel(join(build, 'ADLFixture.app/Contents/MacOS/ADLFixture'));
+  await f.next();
+  h = channel(join(build, 'ADLHuman.app/Contents/MacOS/ADLFixture'), ['--foreground']);
+  await h.next();
+  await delay(500);
+  const controls = join(out, 'macos-negative-controls.json');
+  await writeFile(
+    controls,
+    JSON.stringify({
+      FixtureText: { role: 'AXTextField', allowed: ['fill'] },
+      FixtureButton: { role: 'AXButton', allowed: ['click'] },
+      FixtureCheck: { role: 'AXCheckBox', allowed: ['check'] },
+      FixtureInterference: { role: 'AXButton', allowed: ['click'] },
+      FixtureReadOnly: { role: 'AXStaticText', allowed: ['fill'] },
+    }),
+  );
+  const config = join(out, 'macos-negative-policy.json');
+  await writeFile(
+    config,
+    JSON.stringify({
+      maxSessions: 8,
+      macos: {
+        helperPath: join(build, 'adl-macos-ax-helper'),
+        appPath: join(build, 'ADLFixture.app/Contents/MacOS/ADLFixture'),
+        appId: 'local.agentdesklink.fixture',
+        controlsPath: controls,
+        classification: 'PUBLIC',
+      },
+    }),
+  );
+  const connect = async () => {
+    const c = new Client({ name: 'adl-mac-negative', version: '1' }, { versionNegotiation: { mode: 'legacy' } });
+    await c.connect(
+      new StdioClientTransport({
+        command: process.execPath,
+        args: ['dist/src/server.js', '--config', config],
+        cwd: process.cwd(),
+        stderr: 'pipe',
+      }),
+    );
+    return c;
+  };
+  client = await connect();
+  const call = async (name, args = {}) =>
+      JSON.parse((await client.callTool({ name, arguments: args })).content[0].text),
+    ok = async (name, args) => {
+      const r = await call(name, args);
+      assert.equal(r.ok, true, JSON.stringify(r));
+      return r;
+    };
+  const ready = async (name, args) => {
+    for (let i = 0; ; i++) {
+      const r = await call(name, args);
+      if (r.ok) return r;
+      if (i >= 30 || !['E_TARGET_NOT_FOUND', 'E_STALE_STATE'].includes(r.error.code)) assert.fail(JSON.stringify(r));
+      await delay(50);
+    }
+  };
+  let targets = (await ready('adl_targets')).targets;
+  let target = targets.find(t => t.window.bounds.x === 50);
+  let session = await ready('adl_open', { target_id: target.target_id, mode: 'background_semantic' });
+  let p = await ready('adl_observe', { session_id: session.session_id, token_budget: 8000 });
+  const find = (p, n) => p.elements.find(e => e.name === n);
+  const readonly = await call('adl_act', {
+    session_id: session.session_id,
+    action: 'fill',
+    element_id: find(p, 'Read only').id,
+    value: 'NO',
+    expected_revision: p.revision,
+  });
+  assert.equal(readonly.ok, false);
+  assert.ok(['E_POLICY_DENIED', 'E_UNSUPPORTED_ACTION'].includes(readonly.error.code));
+  record('read-only control cannot be filled even in trusted allowlist');
+  session = await ready('adl_open', { target_id: target.target_id, mode: 'background_semantic' });
+  p = await ready('adl_observe', { session_id: session.session_id, token_budget: 8000 });
+  const task = await ok('adl_execute', {
+    expected_revisions: { [session.session_id]: p.revision },
+    steps: [
+      { session_id: session.session_id, action: 'wait_for', name: 'Never', timeout_ms: 10000 },
+      { session_id: session.session_id, action: 'click', element_id: find(p, 'Run search').id },
+    ],
+  });
+  await delay(100);
+  await ok('adl_task', { task_id: task.task_id, command: 'cancel' });
+  let state;
+  for (let i = 0; i < 200; i++) {
+    state = await ok('adl_task', { task_id: task.task_id });
+    if (!['queued', 'running'].includes(state.status)) break;
+    await delay(10);
+  }
+  assert.equal(state.status, 'cancelled');
+  assert.equal(state.results[1].status, 'not_executed');
+  assert.equal((await f.call({ op: 'state' })).windows.find(w => w.index === 0).clicks, 0);
+  record('cancelled wait executes no suffix action');
+  const available = await call('adl_targets');
+  if (!available.ok) {
+    const expired = target.target_id;
+    await client.close();
+    client = await connect();
+    targets = (await ready('adl_targets')).targets;
+    target = targets.find(t => t.window.bounds.x === 50);
+    assert.equal(
+      (await call('adl_open', { target_id: expired, mode: 'background_semantic' })).error.code,
+      'E_TARGET_NOT_FOUND',
+    );
+    record('cancelled native IPC invalidates its epoch, explicit server restart issues fresh handles');
+  }
+  session = await ready('adl_open', { target_id: target.target_id, mode: 'background_semantic' });
+  p = await ready('adl_observe', { session_id: session.session_id, token_budget: 8000 });
+  await f.call({ op: 'minimize', index: 0 });
+  for (let i = 0; i < 100; i++) {
+    if ((await f.call({ op: 'state' })).windows.find(w => w.index === 0).minimized) break;
+    await delay(50);
+  }
+  await delay(100);
+  const minimized = (await ready('adl_targets')).targets.find(t => t.target_id === target.target_id);
+  assert.equal(minimized.window.minimized, true);
+  const hidden = await call('adl_observe', { session_id: session.session_id, token_budget: 8000 });
+  assert.equal(hidden.error.code, 'E_UNSUPPORTED_ACTION');
+  const denied = await call('adl_act', {
+    session_id: session.session_id,
+    action: 'click',
+    element_id: find(p, 'Run search').id,
+    expected_revision: p.revision,
+  });
+  assert.equal(denied.error.code, 'E_UNSUPPORTED_ACTION');
+  assert.equal((await f.call({ op: 'state' })).windows.find(w => w.index === 0).minimized, true);
+  record('minimized window denied without restoring it');
+  await f.call({ op: 'restore', index: 0 });
+  for (let i = 0; i < 100; i++) {
+    if (!(await f.call({ op: 'state' })).windows.find(w => w.index === 0).minimized) break;
+    await delay(50);
+  }
+  await delay(100);
+  targets = (await ready('adl_targets')).targets;
+  session = await ready('adl_open', { target_id: target.target_id, mode: 'background_semantic' });
+  p = await ready('adl_observe', { session_id: session.session_id, token_budget: 8000 });
+  await f.call({ op: 'move-control', index: 0, to: 1 });
+  const refresh = await ready('adl_observe', { session_id: session.session_id, token_budget: 8000 });
+  const foreign = await call('adl_act', {
+    session_id: session.session_id,
+    action: 'fill',
+    element_id: find(p, 'Reference').id,
+    value: 'FORBIDDEN',
+    expected_revision: refresh.revision,
+  });
+  assert.equal(foreign.error.code, 'E_TARGET_NOT_FOUND');
+  assert.ok(!(await f.call({ op: 'state' })).windows.some(w => w.field === 'FORBIDDEN'));
+  await ok('adl_close', { session_id: session.session_id });
+  record('reparented retained control cannot mutate a sibling window');
+  await f.call({ op: 'reopen', index: 0, screen: 0 });
+  await delay(100);
+  const changed = (await ready('adl_targets')).targets.find(t => t.window.bounds.x === 50);
+  session = await ready('adl_open', { target_id: changed.target_id, mode: 'background_semantic' });
+  const knownButton = find(
+    await ready('adl_observe', { session_id: session.session_id, token_budget: 8000 }),
+    'Run search',
+  ).id;
+  await f.call({ op: 'large-tree', index: 0 });
+  p = await call('adl_observe', { session_id: session.session_id, token_budget: 8000 });
+  if (p.ok) assert.equal(p.truncated, true);
+  else assert.ok(['E_TARGET_NOT_FOUND', 'E_RESOURCE_LIMIT'].includes(p.error.code));
+  const large = await call('adl_act', {
+    session_id: session.session_id,
+    action: 'click',
+    element_id: knownButton,
+    expected_revision: p.revision ?? session.revision,
+  });
+  assert.equal(large.ok, false);
+  assert.ok(
+    ['E_RESOURCE_LIMIT', 'E_TARGET_NOT_FOUND', 'E_STALE_STATE'].includes(large.error.code),
+    JSON.stringify(large),
+  );
+  assert.notEqual(large.error.may_have_executed, true);
+  assert.equal((await f.call({ op: 'state' })).windows.find(w => w.index === 0).clicks, 0);
+  record('oversized raw tree cannot dispatch mutation; observation truncates or fails safely');
+  await client.close();
+  client = await connect();
+  await f.call({ op: 'reopen', index: 0, screen: 0 });
+  await delay(100);
+  const current = (await ready('adl_targets')).targets.find(t => t.window.bounds.x === 50);
+  session = await ready('adl_open', { target_id: current.target_id, mode: 'background_semantic' });
+  p = await ready('adl_observe', { session_id: session.session_id, token_budget: 8000 });
+  await h.call({ op: 'foreground', index: 0 });
+  await delay(100);
+  const focus = await ok('adl_execute', {
+    expected_revisions: { [session.session_id]: p.revision },
+    steps: [
+      { session_id: session.session_id, action: 'click', element_id: find(p, 'Interference test').id },
+      { session_id: session.session_id, action: 'click', element_id: find(p, 'Run search').id },
+    ],
+  });
+  for (let i = 0; i < 200; i++) {
+    state = await ok('adl_task', { task_id: focus.task_id });
+    if (!['queued', 'running'].includes(state.status)) break;
+    await delay(10);
+  }
+  await writeFile(
+    join(out, 'macos-focus-guard.json'),
+    JSON.stringify({ task: state, actual: await f.call({ op: 'state' }) }, null, 2),
+  );
+  assert.equal(state.status, 'failed');
+  assert.equal(state.error.code, 'E_FOCUS_CHANGED');
+  assert.equal(state.error.may_have_executed, true);
+  assert.equal(state.results[1].status, 'not_executed');
+  const actual = (await f.call({ op: 'state' })).windows.find(w => w.index === 0);
+  assert.equal(actual.status, 'Interference invoked');
+  assert.equal(actual.clicks, 0);
+  record('deliberate focus theft reports uncertainty and stops the suffix');
+  await writeFile(join(out, 'macos-negative.json'), JSON.stringify({ ok: true, checks }, null, 2));
+} catch (error) {
+  await writeFile(
+    join(out, 'macos-negative.json'),
+    JSON.stringify({ ok: false, error: String(error), checks }, null, 2),
+  );
+  throw error;
+} finally {
+  await client?.close();
+  f?.p.kill();
+  if (h) {
+    h.p.stdin.write('{"op":"quit"}\n');
+    await new Promise(r => {
+      h.p.once('exit', r);
+      setTimeout(() => {
+        h.p.kill();
+        r();
+      }, 1000).unref();
+    });
+  }
+}
