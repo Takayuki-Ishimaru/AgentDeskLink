@@ -49,8 +49,8 @@ test('extension stdio permits explicitly granted origins, controls and POST; fil
     const opened=await call('adl_open',{url:origin});assert.equal(opened.ok,true,JSON.stringify(opened));
     const session=opened.session_id;
     let state=await call('adl_observe',{session_id:session});
-    const password=state.elements.find((e:any)=>e.role==='textbox'&&e.name==='[redacted]');assert.ok(password);
-    let result=await call('adl_act',{session_id:session,expected_revision:state.revision,action:'fill',element_id:password.id,value:'example-pass',expected_target:{role:'textbox',name:'[redacted]'}});assert.equal(result.ok,true,JSON.stringify(result));
+    const password=state.elements.find((e:any)=>e.role==='textbox'&&e.name==='Password');assert.ok(password);
+    let result=await call('adl_act',{session_id:session,expected_revision:state.revision,action:'fill',element_id:password.id,value:'example-pass',expected_target:{role:'textbox',name:'Password'}});assert.equal(result.ok,true,JSON.stringify(result));
     state=await call('adl_observe',{session_id:session});
     const email=state.elements.find((e:any)=>e.role==='textbox'&&e.id!==password.id);assert.ok(email);
     result=await call('adl_act',{session_id:session,expected_revision:state.revision,action:'fill',element_id:email.id,value:'user@example.com'});assert.equal(result.ok,true,JSON.stringify(result));

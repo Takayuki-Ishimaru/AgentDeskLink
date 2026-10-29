@@ -60,7 +60,7 @@ test('explicit protection follows shadow hosts and iframe ancestors even with br
 
 test('overlay preflight failure and denied navigation preserve browser session without execution claim',{timeout:15000},async()=>{
   const f=await fixture('<button type="button" id="plain" style="width:200px;height:100px">Try action</button><div style="position:absolute;inset:0;background:white"></div>');
-  try{const state=await f.engine.observe(f.id);const button=state.elements!.find(e=>e.name==='Try action')!;await assert.rejects(f.engine.act(f.id,{action:'click',element_id:button.id},state.revision),error=>error instanceof AdlError&&error.code==='E_STALE_STATE'&&!error.mayHaveExecuted);await assert.rejects(f.engine.act(f.id,{action:'navigate',url:'https://example.net'},state.revision),error=>error instanceof AdlError&&error.code==='E_POLICY_DENIED'&&!error.mayHaveExecuted);assert.equal((await f.engine.observe(f.id)).revision,state.revision);}finally{await f.close();}
+  try{const state=await f.engine.observe(f.id);const button=state.elements!.find(e=>e.name==='Try action')!;await assert.rejects(f.engine.act(f.id,{action:'click',element_id:button.id},state.revision),error=>error instanceof AdlError&&error.code==='E_NOT_INTERACTABLE'&&error.reason==='occluded'&&!error.mayHaveExecuted);await assert.rejects(f.engine.act(f.id,{action:'navigate',url:'https://example.net'},state.revision),error=>error instanceof AdlError&&error.code==='E_POLICY_DENIED'&&!error.mayHaveExecuted);assert.equal((await f.engine.observe(f.id)).revision,state.revision);}finally{await f.close();}
 });
 
 

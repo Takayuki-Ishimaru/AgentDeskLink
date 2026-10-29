@@ -8,7 +8,7 @@ import {spawn} from 'node:child_process';
 import {writeFileSync, rmSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
-import {pinnedFetch, MAX_BODY} from '../src/browser-network.js';
+import {pinnedFetch, MAX_BODY,PinnedConnectionPool} from '../src/browser-network.js';
 import {AdlError} from '../src/types.js';
 
 // Fixture certificate: self-signed, CA:TRUE, SAN = DNS:test.invalid + IP:127.0.0.1.
@@ -291,6 +291,20 @@ test('https CONNECT tunnel round trip with trusted certificate', {skip: !TRUSTED
   } finally {
     closeAll([targetTrack, proxyTrack]);
   }
+});
+
+test('direct TLS pooling preserves SNI, pinning, certificate verification and socket reuse',{skip:!TRUSTED},async()=>{
+  let connections=0;
+  const target=https.createServer({key:KEY_PEM,cert:CERT_PEM},(req,res)=>res.end(String((req.socket as {servername?:string}).servername)));
+  target.on('connection',()=>connections++);
+  const track=await listen(target),pool=new PinnedConnectionPool();
+  try{
+    const url=new URL(`https://${HOST_NAME}:${track.port}/`);
+    for(let i=0;i<2;i++)assert.equal((await pinnedFetch(url,'127.0.0.1','GET',{},AbortSignal.timeout(4000),undefined,undefined,{pool})).body.toString(),HOST_NAME);
+    assert.equal(connections,1);
+    await assert.rejects(pinnedFetch(new URL(`https://wrong.invalid:${track.port}/`),'127.0.0.1','GET',{},AbortSignal.timeout(4000),undefined,undefined,{pool}),expectCode('E_POLICY_DENIED'));
+    pool.close();await waitClosed([track.sockets]);
+  }finally{pool.close();closeAll([track]);}
 });
 
 test('certificate hostname mismatch is denied', {skip: !TRUSTED}, async () => {

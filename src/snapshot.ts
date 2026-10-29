@@ -15,15 +15,17 @@ export interface ObserveOptions {
   include?: string[];
   representation?: Representation;
   format?:ObservationFormat;
+  text?:{element_id:string;offset?:number;length?:number};
 }
 export interface SnapshotChange { op: 'added' | 'removed' | 'changed'; id: string; element?: Element }
 export interface ObserveResult {
+  text?:{element_id:string;offset:number;content:string;total_length:number;next_offset:number|null;truncated:boolean};
   format?:'compact'|'lines';
   defaults?:{enabled:true;value:''};
   lines?:string[];
   url?:string;
   title?:string;
-  warnings?:{code:string;count:number}[];
+  warnings?:{code:string;count:number;origin?:string}[];
   ok: true;
   session_id: string;
   revision: number;
@@ -38,7 +40,7 @@ export interface ObserveResult {
 
 const MAX_SESSIONS = 32;
 const MAX_REVISIONS = 8;
-const MAX_ELEMENTS = 5_000;
+const MAX_ELEMENTS = 20_000;
 const MAX_CURSORS = 128;
 const CURSOR_TTL_MS = 60_000;
 const MIN_BUDGET = 256;
@@ -46,7 +48,7 @@ const MAX_BUDGET = 8_000;
 const NAME_CAP = 48;
 const VALUE_CAP = 96;
 
-const FIELDS = ['id', 'role', 'name', 'value', 'enabled', 'checked', 'selected', 'expanded', 'options'] as const;
+const FIELDS = ['id', 'role', 'name', 'value', 'enabled', 'checked', 'selected', 'expanded', 'options', 'parent_id','name_truncated','text_length'] as const;
 type Field = (typeof FIELDS)[number];
 const INCLUDE_KEYS = new Map(FIELDS.map((f) => [f.toLowerCase(), f]));
 const SCOPE_KEYS = new Map([
@@ -134,6 +136,7 @@ function row(change:SnapshotChange,delta:boolean):string{
 function cap(element: Element, nameCap: number, valueCap: number): Element {
   const out: Element = { ...element };
   if (typeof out.name === 'string' && out.name.length > nameCap) out.name = `${out.name.slice(0, nameCap)}...`;
+  if (out.name !== element.name) out.name_truncated=true;
   if (typeof out.value === 'string' && out.value.length > valueCap) out.value = `${out.value.slice(0, valueCap)}...`;
   return out;
 }
@@ -143,6 +146,7 @@ function changeKey(change: SnapshotChange): string {
 }
 
 export class SnapshotStore {
+  constructor(private readonly allowPersonalData=false){}
   private readonly sessions = new Map<string, Stored[]>();
   private readonly cursors = new Map<string, Cursor>();
 
@@ -150,12 +154,12 @@ export class SnapshotStore {
     if (typeof sessionId !== 'string' || sessionId.length === 0) deny('E_INVALID_ARGUMENT');
     if (!Number.isInteger(revision) || revision < 0) deny('E_INVALID_ARGUMENT');
     if (!snapshot || !Array.isArray(snapshot.elements)) deny('E_INVALID_ARGUMENT');
-    const elements = snapshot.elements.slice(0, MAX_ELEMENTS).map((e) => redactElement(e) as Element);
+    const elements = snapshot.elements.slice(0, MAX_ELEMENTS).map((e) => redactElement(e,this.allowPersonalData) as Element);
     const redactions=elements.reduce((count,e,i)=>{
       const raw=snapshot.elements[i]!;
       return count+(e.name!==raw.name?1:0)+(e.value!==raw.value?1:0)+(e.options??[]).reduce((n,option,index)=>n+(option.label!==raw.options?.[index]?.label?1:0)+(option.value!==raw.options?.[index]?.value?1:0),0);
     },0);
-    const stored: Stored = { revision, elements, truncated: snapshot.truncated === true || snapshot.elements.length>MAX_ELEMENTS,redactions,metadata:{...(snapshot.url?{url:redactString(snapshot.url).slice(0,512)}:{}),...(snapshot.title?{title:redactString(snapshot.title).slice(0,512)}:{}),...(snapshot.warnings?{warnings:snapshot.warnings.slice(0,4)}:{})} };
+    const stored: Stored = { revision, elements, truncated: snapshot.truncated === true || snapshot.elements.length>MAX_ELEMENTS,redactions,metadata:{...(snapshot.url?{url:redactString(snapshot.url,this.allowPersonalData).slice(0,512)}:{}),...(snapshot.title?{title:redactString(snapshot.title,this.allowPersonalData).slice(0,512)}:{}),...(snapshot.warnings?{warnings:snapshot.warnings.slice(0,8)}:{})} };
     let history = this.sessions.get(sessionId);
     if (!history) {
       if (this.sessions.size >= MAX_SESSIONS) {

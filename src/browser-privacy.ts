@@ -1,5 +1,5 @@
 import {selectors} from 'playwright';
-import {SECRET_LABEL_PATTERN, BROWSER_PRIVACY_RULES,TEXT_REDACTION_RULES} from './privacy.js';
+import {SECRET_LABEL_PATTERN, BROWSER_PRIVACY_RULES,TEXT_REDACTION_RULES,PERSONAL_DATA_REDACTION_RULES} from './privacy.js';
 
 // This engine executes at screenshot mask resolution, in an isolated world.
 // It returns live DOM nodes rather than mutable selectors or observed coordinates.
@@ -47,7 +47,8 @@ function privacyMaskEngine(){
       if(++visited>5000)throw new Error('Privacy mask traversal limit');
       if(node.shadowRoot)roots.push(node.shadowRoot);
       const tag=node.tagName.toLowerCase(),role=node.getAttribute('role')??'';
-      const hints=['aria-label','placeholder','title','autocomplete','id','name'].map(name=>node!.getAttribute(name)??'');
+      const control=/^(input|textarea|select)$/.test(tag)||node.hasAttribute('contenteditable');
+      const hints=['aria-label','placeholder','title','autocomplete','id','name'].map(name=>{const value=node!.getAttribute(name)??'';return !control&&(name==='id'||name==='name')&&/^(?:cookie|key|pin|session)$/i.test(value)?'':value;});
       const references=node.getAttribute('aria-labelledby')??'';
       if(references.length>4096||hints.some(value=>value.length>4096))throw new Error('Privacy mask field limit');
       if(references.trim().split(/\s+/).length>16)hints.push('password');
@@ -57,7 +58,6 @@ function privacyMaskEngine(){
       const labels=(node as HTMLInputElement).labels;
       if(labels){if(labels.length>16)hints.push('password');else for(const label of Array.from(labels))hints.push(textOf(label,true));}
       hints.push(/^(button|a|p|span|legend|h[1-6]|td|li)$/.test(tag)||/^(button|link|status|alert)$/.test(role)?textOf(node):direct(node));
-      const control=/^(input|textarea|select)$/.test(tag)||node.hasAttribute('contenteditable');
       const value=control?(tag==='input'||tag==='textarea'||tag==='select'?(node as HTMLInputElement).value:node.textContent??''):'';
       const selected=tag==='select'?Array.from((node as HTMLSelectElement).selectedOptions).some(option=>secret(option.text)||secretValue(option.value)):false;
       // Labels themselves remain visible; their associated control still
@@ -78,4 +78,5 @@ let registration:Promise<void>|undefined;
 export function ensureBrowserPrivacySelectors():Promise<void>{
   return registration??=selectors.register('adlprivacy',privacyMaskEngine,{contentScript:true});
 }
-export const browserPrivacyMaskSelector=`adlprivacy=${JSON.stringify({pattern:SECRET_LABEL_PATTERN,privacyRules:BROWSER_PRIVACY_RULES,valuePatterns:TEXT_REDACTION_RULES.map(([source])=>source)})}`;
+export function privacyMaskSelector(allowPersonalData=false):string{return `adlprivacy=${JSON.stringify({pattern:SECRET_LABEL_PATTERN,privacyRules:BROWSER_PRIVACY_RULES,valuePatterns:[...TEXT_REDACTION_RULES,...(allowPersonalData?[]:PERSONAL_DATA_REDACTION_RULES)].map(([source])=>source)})}`;}
+export const browserPrivacyMaskSelector=privacyMaskSelector();

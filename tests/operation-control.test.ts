@@ -53,10 +53,10 @@ test('stop cancels running wait, queued mutations and batch suffix across multip
   t.after(async()=>{watches.forEach(w=>w.dispose());await Promise.all(engines.map(e=>e.shutdown()));});
   for(let i=0;i<2;i++){
     let watch:ReturnType<typeof watchOperationControl>|undefined;
-    const engine=new Engine(extensionPolicy(undefined,'linux',{browserOrigins:['https://example.org'],allowAllOperations:true}),{browser:adapter},'linux',()=>watch?.check()??true);
+    const engine=new Engine(extensionPolicy(undefined,'linux',{browserOrigins:['http://127.0.0.1:8123'],allowLoopback:true,allowAllOperations:true}),{browser:adapter},'linux',()=>watch?.check()??true);
     watch=watchOperationControl(file,epoch,()=>{void engine.shutdown();});engines.push(engine);watches.push(watch);
   }
-  const sessions=await Promise.all(engines.map(e=>e.openUrl('https://example.org/')));
+  const sessions=await Promise.all(engines.map(e=>e.openUrl('http://127.0.0.1:8123/')));
   const batch=engines[0]!.execute([{session_id:sessions[0]!.session_id,action:'wait_for',name:'never',timeout_ms:30000},{session_id:sessions[0]!.session_id,action:'click',element_id:'e'}],{[sessions[0]!.session_id]:1});
   const waiting=engines[1]!.wait(sessions[1]!.session_id,{name:'never'},30000);
   const queued=engines[1]!.act(sessions[1]!.session_id,{action:'click',element_id:'e'},1);
@@ -64,6 +64,7 @@ test('stop cancels running wait, queued mutations and batch suffix across multip
   await delay(30);const started=Date.now();writeOperationState(file,true);
   const done=await results;assert.ok(Date.now()-started<1000);
   assert.ok(done.every(r=>r.status==='rejected'&&r.reason.code==='E_CANCELLED'));
+  assert.ok(done.every(r=>r.status==='rejected'&&r.reason.reason==='emergency_stop'));
   for(let i=0;i<100&&engines[0]!.task(batch.task_id).status==='running';i++)await delay(10);
   const status=engines[0]!.task(batch.task_id);assert.equal(status.status,'cancelled');assert.equal(status.results[1]?.status,'not_executed');
   assert.equal(acts,0);assert.ok(closed>=2);
@@ -74,8 +75,8 @@ test('a revoked process cannot admit work in the interval before the poll runs',
   const file=await fixture(t),initial=readOperationState(file)!;let opens=0;
   const adapter:Adapter={open:async()=>{opens++;throw Error('should not open');},close:async()=>{}};
   let watch:ReturnType<typeof watchOperationControl>|undefined;
-  const engine=new Engine(extensionPolicy(undefined,'linux',{browserOrigins:['https://example.org'],allowAllOperations:true}),{browser:adapter},'linux',()=>watch?.check()??true);
+  const engine=new Engine(extensionPolicy(undefined,'linux',{browserOrigins:['http://127.0.0.1:8123'],allowLoopback:true,allowAllOperations:true}),{browser:adapter},'linux',()=>watch?.check()??true);
   watch=watchOperationControl(file,initial.epoch,()=>{void engine.shutdown();});t.after(async()=>{watch?.dispose();await engine.shutdown();});
   writeOperationState(file,true);
-  await assert.rejects(engine.openUrl('https://example.org'),{code:'E_CANCELLED'});assert.equal(opens,0);
+  await assert.rejects(engine.openUrl('http://127.0.0.1:8123'),{code:'E_CANCELLED'});assert.equal(opens,0);
 });

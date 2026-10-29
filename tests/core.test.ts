@@ -32,7 +32,7 @@ test('browser pre-action snapshot timeout preserves the session before any input
 
 test('safe errors describe grant settings and do not recommend retries after uncertain execution',()=>{
  const denied=safeError(new AdlError('E_APPROVAL_REQUIRED','operation_not_granted'));
- assert.equal(denied.policy_setting,'browserTargets[].controls');assert.equal(denied.workspace_setting,'agentdesklink.allowAllOperations');assert.equal(denied.retryable,false);
+ assert.equal(denied.policy_setting,'browserTargets[].controls');assert.equal(denied.workspace_setting,'agentdesklink.operationMode');assert.equal(denied.retryable,false);
  const error=new AdlError('E_STALE_STATE','occluded');error.mayHaveExecuted=true;
  const uncertain=safeError(error);assert.equal(uncertain.retryable,false);assert.equal(uncertain.may_have_executed,true);assert.match(uncertain.safe_message,/may have executed/);assert.ok(!uncertain.safe_message.includes('observe again'));
 });

@@ -25,7 +25,7 @@ test('real Chromium Engine permits ordinary form fill without submitting',{timeo
  const f=await fixture(`<form onsubmit="fetch('/event?submit');return false">${input}<button>Continue</button></form>`);try{await f.act();const observed=await f.engine.observe(f.session.session_id);assert.equal(observed.elements!.find(e=>e.id===f.element.id)?.value,'AI intended text');await delay(40);assert.ok(f.events.every(x=>!x.includes('submit')));}finally{await f.close();}
 });
 test('real Chromium Engine refuses a foreign overlay before sending any input',{timeout:12000},async()=>{
- const f=await fixture(`${input}<div style="position:fixed;inset:0;z-index:50;background:#eee">Cover</div>`);try{await assert.rejects(f.act(),(e:unknown)=>e instanceof AdlError&&e.code==='E_STALE_STATE');await delay(40);assert.equal(f.events.length,0);}finally{await f.close();}
+ const f=await fixture(`${input}<div style="position:fixed;inset:0;z-index:50;background:#eee">Cover</div>`);try{await assert.rejects(f.act(),(e:unknown)=>e instanceof AdlError&&e.code==='E_NOT_INTERACTABLE'&&e.reason==='occluded');await delay(40);assert.equal(f.events.length,0);}finally{await f.close();}
 });
 test('real Chromium Engine catches an overlay created by hover before fill',{timeout:12000},async()=>{
  const f=await fixture(`<input id="target" aria-label="Reference" oninput="fetch('/event?input=target')" onmouseenter="const o=document.createElement('div');o.style='position:fixed;inset:0;z-index:99;background:#eee';document.body.append(o)">`);try{await assert.rejects(f.act());await delay(40);assert.equal(f.events.length,0);}finally{await f.close();}

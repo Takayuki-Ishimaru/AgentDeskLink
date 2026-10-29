@@ -23,6 +23,8 @@ export function parseStartupPolicy(input: unknown, helperPath?: string, platform
 export type OperationMode = 'read_only' | 'standard' | 'ask';
 export interface ExtensionPermissions {
   browserOrigins: string[];
+  browserResourceOrigins?:string[];
+  allowPersonalData?:boolean;
   desktopAppId: string;
   desktopAppPath: string;
   allowAllOperations: boolean;
@@ -33,7 +35,7 @@ export interface ExtensionPermissions {
   allowPrivateNetwork: boolean;
 }
 
-const GRANT_KEYS = ['browserOrigins', 'desktopAppId', 'desktopAppPath', 'allowAllOperations', 'operationMode', 'allowPhysicalInput',
+const GRANT_KEYS = ['browserOrigins', 'browserResourceOrigins','allowPersonalData','desktopAppId', 'desktopAppPath', 'allowAllOperations', 'operationMode', 'allowPhysicalInput',
   'allowUnredactedImages', 'allowLoopback', 'allowPrivateNetwork'] as const;
 
 const MAX_ORIGINS = 64;
@@ -91,6 +93,10 @@ export function normalizePermissions(value: unknown): ExtensionPermissions {
     if (origin === null) invalidGrant('browserOrigins', 'exact http(s) origins without path, query, fragment or credentials, e.g. https://example.com / パス・クエリ・認証情報なしの完全なオリジン');
     if (!origins.includes(origin)) origins.push(origin);
   }
+  const resourceOrigins:string[]=[];
+  const rawResources=p.browserResourceOrigins;
+  if(rawResources!==undefined&&(!Array.isArray(rawResources)||rawResources.length>MAX_ORIGINS))invalidGrant('browserResourceOrigins','an array of at most 64 exact http(s) origins');
+  for(const entry of rawResources??[]){const origin=normalizeOrigin(entry);if(origin===null)invalidGrant('browserResourceOrigins','exact http(s) origins without path, query, fragment or credentials');if(!resourceOrigins.includes(origin))resourceOrigins.push(origin);}
   const appId = text('desktopAppId', 128);
   const appPath = text('desktopAppPath', 4096);
   const rawMode=p.operationMode??'read_only';
@@ -99,6 +105,8 @@ export function normalizePermissions(value: unknown): ExtensionPermissions {
   if (appId !== '' && !isAbsolutePath(appPath)) invalidGrant('desktopAppPath', 'an absolute path paired with desktopAppId / desktopAppIdに対応するアプリの絶対パス');
   return {
     browserOrigins: origins,
+    browserResourceOrigins:resourceOrigins,
+    allowPersonalData:flag('allowPersonalData'),
     // A wildcard application is never a grant: it cannot name one trusted app.
     desktopAppId: appId === '*' ? '' : appId,
     desktopAppPath: appPath,
@@ -112,7 +120,7 @@ export function normalizePermissions(value: unknown): ExtensionPermissions {
 }
 
 const DENY_ALL: ExtensionPermissions = {browserOrigins: [], desktopAppId: '', desktopAppPath: '', allowAllOperations: false,operationMode:'read_only',
-  allowPhysicalInput: false, allowUnredactedImages: false, allowLoopback: false, allowPrivateNetwork: false};
+  browserResourceOrigins:[],allowPersonalData:false,allowPhysicalInput: false, allowUnredactedImages: false, allowLoopback: false, allowPrivateNetwork: false};
 
 // Decodes the MCP environment. Missing, oversized or malformed input denies everything.
 export function parsePermissionsEnv(value: string | undefined): ExtensionPermissions {
@@ -190,6 +198,8 @@ export function extensionPolicy(helperPath?: string, platform: string = process.
     allowAllOperations: grants.allowAllOperations,
     operationMode: grants.operationMode,
     allowedOrigins: grants.browserOrigins,
+    resourceOrigins:grants.browserResourceOrigins??[],
+    allowPersonalData:grants.allowPersonalData===true,
     allowLoopback: grants.allowLoopback,
     allowPrivateNetwork: grants.allowPrivateNetwork,
     browserTargets: targets,
@@ -215,6 +225,7 @@ export function effectivePermissions(permissions: unknown, helperPath?: string, 
   }
   return {
     browserOrigins: policy.allowedOrigins ?? [], desktopAppId: native?.appId ?? '',
+    browserResourceOrigins:policy.resourceOrigins??[],allowPersonalData:policy.allowPersonalData===true,
     allowAllOperations: policy.allowAllOperations === true,
     operationMode:policy.allowAllOperations===true?'all':policy.operationMode??grants.operationMode,
     allowPhysicalInput: native?.interactive?.enabled === true,

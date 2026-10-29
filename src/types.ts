@@ -12,8 +12,13 @@ export interface Element {
   options?: {label:string;value:string;disabled:boolean;selected:boolean}[];
   /** Candidates were omitted by the source or response budget; reobserve this id with a larger budget. */
   options_truncated?: boolean;
+  name_truncated?: boolean;
+  text_length?: number;
+  parent_id?: string;
 }
-export interface RawSnapshot { elements: Element[]; fingerprint: string; truncated: boolean; url?:string; title?:string; warnings?:{code:string;count:number}[]; }
+/** Adapter-private hashes; never projected into public observations. */
+export interface ActionEvidence {navigation:string;elements:Record<string,string>}
+export interface RawSnapshot { elements: Element[]; fingerprint: string; truncated: boolean; url?:string; title?:string; warnings?:{code:string;count:number;origin?:string}[];actionEvidence?:ActionEvidence; }
 export interface TargetWindow {
   bounds: { x: number; y: number; width: number; height: number; coordinate_space: 'desktop_points_top_left' | 'desktop_physical_pixels' };
   display_ids: string[]; minimized: boolean;
@@ -44,6 +49,9 @@ export interface PolicyConfig {
   restrictTargets?:boolean;
   browserHeadless?:boolean;
   browserProxyServer?:string;
+  /** Origins permitted only for GET/HEAD subresources, never navigation. */
+  resourceOrigins?:string[];
+  allowPersonalData?:boolean;
   operationMode?:'read_only'|'standard'|'ask';
   allowedOrigins: string[];
   browserTargets: BrowserTargetConfig[];
@@ -65,9 +73,10 @@ export interface Action {
   role?: string; name?: string;
   expected_target?:ExpectedTarget;
   point?:{frame_id:string;x:number;y:number};
+  include_diff?:boolean;
 }
 export interface Condition { role?: string; name?: string; element_id?: string; state?: 'visible' | 'hidden' | 'enabled'; }
-export interface ActionAuthorization{normalOperations?:boolean;approvalProof?:string;approved?:boolean;expires_at?:number;pointReference?:GestureReference}
+export interface ActionAuthorization{normalOperations?:boolean;approvalProof?:string;approved?:boolean;expires_at?:number;pointReference?:GestureReference;actionEvidence?:{navigation:string;element?:string}}
 export interface AdapterSession {
   capabilities?: string[];
   /** Reports the actual mutation dispatch boundary through act's callback. */
@@ -80,6 +89,7 @@ export interface AdapterSession {
   prepareInput?(request:PrepareInput,reference:GestureReference,signal:AbortSignal):Promise<PreparedInput>;
   commitInput?(confirmation_id:string,value:string|undefined,signal:AbortSignal):Promise<InputExecution>;
   snapshot(signal?: AbortSignal): Promise<RawSnapshot>;
+  readText?(elementId:string,offset:number,length:number,signal:AbortSignal):Promise<{text:string;total_length:number;next_offset:number|null;truncated:boolean}>;
   prepareAction?(action:Action,signal:AbortSignal):Promise<{proof:string;risk:'ordinary'|'consequential'|'credential';role:string;name:string;origin:string;details?:string[]}>;
   act(action: Action, signal: AbortSignal, onDispatch?:()=>void, authorization?:ActionAuthorization): Promise<void>;
   close(): Promise<void>;
@@ -96,6 +106,7 @@ export const ERROR_MESSAGES = {
   E_INTERFERENCE_RISK: 'The requested execution mode is unavailable for this target.',
   E_FOCUS_CHANGED: 'Human input state changed; execution stopped.',
   E_STALE_STATE: 'The target changed; observe it again before acting.',
+  E_NOT_INTERACTABLE: 'The target cannot receive this input.',
   E_TARGET_NOT_FOUND: 'Target or handle is unavailable or expired.',
   E_UNSUPPORTED_ACTION: 'This action is unsupported.',
   E_APPROVAL_REQUIRED: 'This operation requires independent approval.',
@@ -109,12 +120,23 @@ export const ERROR_MESSAGES = {
   E_BACKEND_UNAVAILABLE: 'The backend could not start. Verify its installation and OS sandbox support.'
 } as const;
 export type ErrorCode = keyof typeof ERROR_MESSAGES;
-export type ErrorReason = 'occluded' | 'not_visible' | 'operation_not_granted' | 'consequential_operation';
+export type ErrorReason = 'occluded' | 'not_visible' | 'operation_not_granted' | 'consequential_operation' | 'iframe_action_proof_unavailable' | 'loopback_not_allowed' | 'private_network_not_allowed' | 'origin_not_allowed' | 'redirect_origin_not_allowed' | 'requires_ask_mode' | 'approval_unavailable' | 'emergency_stop' | 'not_editable' | 'dns_resolution_failed' | 'untrusted_dom_api';
 const ERROR_REASON_MESSAGES:Record<ErrorReason,string>={
   occluded:'The target is covered by another element. Remove the obstruction and observe again.',
   not_visible:'The target is not visible at the intended input point. Observe again before acting.',
   operation_not_granted:'No trusted operation grant matches this control. Review the policy controls or workspace operation permissions.',
   consequential_operation:'This consequential operation requires an explicit operation grant.',
+  iframe_action_proof_unavailable:'Semantic actions inside iframes require a frame-scoped isolated proof, which is currently unavailable. Open the allowed frame URL as a separate target.',
+  loopback_not_allowed:'Loopback access is disabled. Enable agentdesklink.allowLoopback in trusted workspace settings and retain the exact origin grant.',
+  private_network_not_allowed:'Private network access is disabled. Enable agentdesklink.allowPrivateNetwork in trusted workspace settings and retain the exact origin grant.',
+  origin_not_allowed:'This origin is not granted. Add its exact origin to agentdesklink.browserOrigins for navigation, or browserResourceOrigins for read-only assets.',
+  redirect_origin_not_allowed:'A redirect tried to leave the permitted origin. Inspect the destination origin and grant/open it separately.',
+  requires_ask_mode:'This action needs individual human approval. Select agentdesklink.operationMode = ask in the trusted host settings.',
+  approval_unavailable:'Individual approval is unavailable. Start this MCP server through the trusted VS Code host with operationMode = ask.',
+  emergency_stop:'Operations are stopped or their permission generation was revoked. Resume operations in AgentDeskLink and reconnect the client.',
+  not_editable:'This element is not an editable text control. Observe again and select an input, textarea or supported editable control.',
+  untrusted_dom_api:'The page overrides DOM APIs that AgentDeskLink cannot verify safely. Use a page without these overrides or a manual handoff.',
+  dns_resolution_failed:'Local DNS resolution failed. Verify local DNS and proxy settings; proxy-only DNS is unsupported because destination IP validation is required.',
 };
 export class AdlError extends Error {
   mayHaveExecuted = false;
@@ -129,5 +151,6 @@ export function safeError(error: unknown) {
   const code = error instanceof AdlError ? error.code : 'E_INTERNAL';
   const reason=error instanceof AdlError?error.reason:undefined;
   const mayHaveExecuted=error instanceof AdlError&&error.mayHaveExecuted;
-  return { code, retryable: (code === 'E_STALE_STATE'||code==='E_APPROVAL_REQUIRED'&&!!(error as AdlError).requestId) && !mayHaveExecuted, safe_message:mayHaveExecuted?'The operation may have executed. Verify the result before retrying; previous session handles may be unavailable.':reason?ERROR_REASON_MESSAGES[reason]:ERROR_MESSAGES[code],...(reason?{reason}:{}),...(error instanceof AdlError&&error.requestId?{request_id:error.requestId}:{}),...(reason==='operation_not_granted'?{policy_setting:'browserTargets[].controls',workspace_setting:'agentdesklink.allowAllOperations'}:{}), ...(mayHaveExecuted?{may_have_executed:true}:{}) };
+  const setting=reason==='loopback_not_allowed'?'allowLoopback':reason==='private_network_not_allowed'?'allowPrivateNetwork':reason==='requires_ask_mode'||reason==='approval_unavailable'?'operationMode':reason==='origin_not_allowed'||reason==='redirect_origin_not_allowed'?'browserOrigins':undefined;
+  return { code, retryable: (code === 'E_STALE_STATE'||code==='E_APPROVAL_REQUIRED'&&!!(error as AdlError).requestId) && !mayHaveExecuted, safe_message:mayHaveExecuted?'The operation may have executed. Verify the result before retrying; previous session handles may be unavailable.':reason?ERROR_REASON_MESSAGES[reason]:ERROR_MESSAGES[code],...(reason?{reason}:{}),...(error instanceof AdlError&&error.requestId?{request_id:error.requestId}:{}),...(reason==='operation_not_granted'?{policy_setting:'browserTargets[].controls',workspace_setting:'agentdesklink.operationMode'}:{}),...(setting?{workspace_setting:'agentdesklink.'+setting}:{}), ...(mayHaveExecuted?{may_have_executed:true}:{}) };
 }

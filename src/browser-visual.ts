@@ -3,8 +3,8 @@ import {randomBytes} from 'node:crypto';
 import {errors,type CDPSession,type Locator,type Page} from 'playwright';
 import {AdlError} from './types.js';
 import type {CapturedImage, VisualPolicy} from './visual-types.js';
-import {TEXT_REDACTION_RULES} from './privacy.js';
-import {browserPrivacyMaskSelector,ensureBrowserPrivacySelectors} from './browser-privacy.js';
+import {TEXT_REDACTION_RULES,PERSONAL_DATA_REDACTION_RULES} from './privacy.js';
+import {privacyMaskSelector,ensureBrowserPrivacySelectors} from './browser-privacy.js';
 
 const MAX_DIMENSION = 4096;
 const MAX_PIXELS = 4194304;
@@ -86,7 +86,7 @@ function assertOrigin(page: Page, origin: string): void {
 }
 
 /** Trusted mask configuration fails closed: a malformed selector must never be dropped silently. */
-function maskSelectors(visual: VisualPolicy): string[] {
+function maskSelectors(visual: VisualPolicy,allowPersonalData=false): string[] {
   const trusted = visual.maskSelectors === undefined ? [] : visual.maskSelectors;
   if (!Array.isArray(trusted)) throw new AdlError('E_PRIVACY_BLOCKED');
   for (const selector of trusted) {
@@ -94,8 +94,8 @@ function maskSelectors(visual: VisualPolicy): string[] {
   }
   // Playwright text locators resolve against the rendered DOM at capture time,
   // including non-form text. They mask the smallest matching element.
-  const textMasks=TEXT_REDACTION_RULES.map(([source])=>`:text-matches(${JSON.stringify(source)}, "i")`);
-  return [...new Set([...BASE_MASK_SELECTORS, ...trusted,browserPrivacyMaskSelector,...textMasks])];
+  const textMasks=[...TEXT_REDACTION_RULES,...(allowPersonalData?[]:PERSONAL_DATA_REDACTION_RULES)].map(([source])=>`:text-matches(${JSON.stringify(source)}, "i")`);
+  return [...new Set([...BASE_MASK_SELECTORS, ...trusted,privacyMaskSelector(allowPersonalData),...textMasks])];
 }
 
 // The isolated world is inaccessible to page scripts. Keep its bounded DOM
@@ -125,7 +125,7 @@ async function domState(cdp:CDPSession,contextId:number,signal:AbortSignal):Prom
 }
 
 export async function captureBrowserImage(
-  page: Page, origin: string, visual: VisualPolicy | undefined, signal: AbortSignal
+  page: Page, origin: string, visual: VisualPolicy | undefined, signal: AbortSignal,allowPersonalData=false
 ): Promise<CapturedImage> {
   assertActive(signal);
   if (visual?.enabled !== true) throw new AdlError('E_PRIVACY_BLOCKED');
@@ -143,7 +143,7 @@ export async function captureBrowserImage(
     const tree=await guarded(()=>cdp!.send('Page.getFrameTree'),signal);
     const world=await guarded(()=>cdp!.send('Page.createIsolatedWorld',{frameId:tree.frameTree.frame.id,worldName:'adl-capture-privacy'}),signal);
     const before=await domState(cdp,world.executionContextId,signal);
-    const image=await captureFrozenBrowserImage(page,origin,visual,signal,marked.length?`[${marker}]`:undefined);
+    const image=await captureFrozenBrowserImage(page,origin,visual,signal,marked.length?`[${marker}]`:undefined,allowPersonalData);
     const after=await domState(cdp,world.executionContextId,signal);
     if(before!==after)throw new AdlError('E_PRIVACY_BLOCKED');
     return image;
@@ -157,10 +157,10 @@ export async function captureBrowserImage(
 }
 
 async function captureFrozenBrowserImage(
-  page: Page, origin: string, visual: VisualPolicy, signal: AbortSignal,additionalMask?:string
+  page: Page, origin: string, visual: VisualPolicy, signal: AbortSignal,additionalMask?:string,allowPersonalData=false
 ): Promise<CapturedImage> {
   await guarded(()=>ensureBrowserPrivacySelectors(),signal);
-  const selectors = [...maskSelectors(visual),...(additionalMask?[additionalMask]:[])];
+  const selectors = [...maskSelectors(visual,allowPersonalData),...(additionalMask?[additionalMask]:[])];
   assertOrigin(page, origin);
 
   const before = validateGeometry(await guarded(() => page.evaluate(GEOMETRY_EXPRESSION), signal));

@@ -4,12 +4,13 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 
-function panel() {
+function panel(language='ja') {
   const elements = new Map(), messages = [], listeners = new Map();
   const make = () => ({ value: '', _text: '', children: [], checked: false, disabled: false, dataset: {}, listeners: new Map(),
     set textContent(value) { this._text=value; this.children=[]; }, get textContent() { return this._text+this.children.map(c=>c.textContent).join(''); },
     appendChild(child) { this.children.push(child); },
     setAttribute(key, value) { this[key]=value; },
+    getAttribute(key) { return typeof this[key] === 'string' ? this[key] : null; },
     addEventListener(type, listener) { this.listeners.set(type,listener); },
     async trigger(type) { await this.listeners.get(type)?.({target:this,preventDefault(){}}); }
   });
@@ -17,10 +18,11 @@ function panel() {
     if (!elements.has(id)) elements.set(id, make());
     return elements.get(id);
   };
-  const document = { getElementById: get, createElement:make, activeElement: null };
+  const document = { getElementById: get, createElement:make, activeElement: null, documentElement: { lang: language },
+    querySelectorAll: () => [...elements.values()].filter(el => ['aria-label','title','placeholder'].some(key => typeof el[key] === 'string')) };
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../../media/settings.js'), 'utf8'), {
     acquireVsCodeApi: () => ({ postMessage: data => messages.push(data), getState: () => ({}), setState() {} }),
-    document, window: { addEventListener: (type, listener) => listeners.set(type, listener) }, console, setTimeout, clearTimeout
+    document, window: { addEventListener: (type, listener) => listeners.set(type, listener) }, URL, console, setTimeout, clearTimeout
   });
   return { get, messages, document, state: data => listeners.get('message')({ data: { type: 'state', ...data } }) };
 }
@@ -28,12 +30,27 @@ function panel() {
 test('permission summary separates target, physical and image grants and displays values as text',()=>{
   const p=panel();
   p.state({permissions:{browserOrigins:[],desktopAppId:'',allowAllOperations:false,allowPhysicalInput:false,allowUnredactedImages:false,allowLoopback:false,allowPrivateNetwork:false}});
-  assert.equal(p.get('permissions').children.length,8);assert.match(p.get('permissions').textContent,/なし \/ none/);assert.match(p.get('permissions-hint').textContent,/grants nothing/);
+  assert.equal(p.get('permissions').children.length,8);assert.match(p.get('permissions').textContent,/なし/);assert.equal(p.get('permissions-hint').textContent,'MCP を有効にしても権限は付きません。');
   const value='<img src=x onerror=alert(1)>';
   p.state({permissions:{browserOrigins:[value],desktopAppId:'test.app',allowAllOperations:true,allowPhysicalInput:false,allowUnredactedImages:true,allowLoopback:false,allowPrivateNetwork:false}});
   const rows=p.get('permissions').children;
   assert.equal(rows[0].children[1].textContent,value);assert.equal(rows[0].children[1].innerHTML,undefined);
-  assert.match(rows[3].children[1].textContent,/off/);assert.match(rows[4].children[1].textContent,/on/);
+  assert.match(rows[3].children[1].textContent,/オフ/);assert.match(rows[4].children[1].textContent,/有効/);
+});
+
+test('language switch selects the host language, translates dynamic text, and posts no host message',async()=>{
+  const p=panel('ja');p.state({status:{mcp:'MCP は無効です。 / MCP is disabled.'}});
+  const selector=p.get('ui-language');assert.equal(selector.value,'ja');assert.equal(p.get('mcp-status').textContent,'MCP は無効です。');
+  const messages=p.messages.length;selector.value='en';await selector.trigger('change');
+  assert.equal(p.document.documentElement.lang,'en');assert.equal(p.get('mcp-status').textContent,'MCP is disabled.');assert.equal(p.messages.length,messages);
+  const en=panel('en');assert.equal(en.get('ui-language').value,'en','non-Japanese host language defaults to English');
+});
+
+test('client counts stay in one language after a local language switch',()=>{
+  const p=panel('ja');p.state({clients:{busy:false,error:'',rows:[{name:'Claude',detected:true,status:'enabled'},{name:'Cursor',detected:true,status:'disabled'}]}});
+  assert.equal(p.get('clients-status').textContent,'2 件を検出 1 件に登録済み');
+  p.get('ui-language').value='en';p.get('ui-language').listeners.get('change')();
+  assert.equal(p.get('clients-status').textContent,'2 detected 1 configured');
 });
 
 test('browser origins can be added and removed using text-only rows',async()=>{
@@ -47,6 +64,25 @@ test('browser origins can be added and removed using text-only rows',async()=>{
   assert.equal(p.messages.at(-1).type,'setBrowserOrigins');assert.deepEqual(Array.from(p.messages.at(-1).origins),['https://example.com','https://second.example']);
 });
 
+test('loopback input only suggests an explicit grant and grant controls stay workspace locked',async()=>{
+  const p=panel();p.state({trusted:true,hasFolder:true,settings:{allowLoopback:false,allowPrivateNetwork:false,allowPersonalData:false}});
+  const input=p.get('origin-input'),hint=p.get('loopback-suggestion'),grant=p.get('allow-loopback');
+  input.value='http://localhost:3000';await input.trigger('input');
+  assert.equal(hint.hidden,false);assert.equal(grant.checked,false,'suggestion does not grant loopback');
+  input.value='http://127.0.0.1:3000/';await input.trigger('input');assert.equal(hint.hidden,false);
+  input.value='http://[::1]:3000';await input.trigger('input');assert.equal(hint.hidden,false);
+  input.value='http://localhost:3000/path';await input.trigger('input');assert.equal(hint.hidden,true,'non-origin URLs do not trigger the loopback hint');
+  input.value='https://example.com';await input.trigger('input');assert.equal(hint.hidden,true);
+  grant.checked=true;await grant.trigger('change');assert.equal(p.messages.at(-1).type,'setAllowLoopback');assert.equal(p.messages.at(-1).enabled,true);
+  p.state({trusted:false,hasFolder:true,settings:{allowLoopback:false,allowPrivateNetwork:false,allowPersonalData:false}});
+  assert.equal(grant.disabled,true);assert.equal(p.get('allow-private-network').disabled,true);assert.equal(p.get('allow-personal-data').disabled,true);
+});
+test('resource origins use a separate text-only list and a distinct message',async()=>{
+  const p=panel();p.state({trusted:true,hasFolder:true,settings:{browserResourceOrigins:['https://cdn.example']}});
+  assert.equal(p.get('resource-origins-list').children[0].children[0].textContent,'https://cdn.example');
+  p.get('resource-origin-input').value='https://other.example';await p.get('resource-origin-add').trigger('click');
+  assert.equal(p.messages.at(-1).type,'setBrowserResourceOrigins');assert.deepEqual(Array.from(p.messages.at(-1).origins),['https://cdn.example','https://other.example']);
+});
 test('session idle timeout control sends whole minutes and stays locked without trust',async()=>{
   const p=panel();p.state({trusted:true,hasFolder:true,settings:{sessionIdleMinutes:15}});
   const input=p.get('session-idle-minutes');assert.equal(input.value,'15');input.value='30';await input.trigger('change');
@@ -177,4 +213,6 @@ test('permission summary renders effective physical denial and missing prerequis
   p.state({permissions:{requested:{allowPhysicalInput:true},effective:{browserOrigins:[],desktopAppId:'',allowAllOperations:false,allowPhysicalInput:false,allowUnredactedImages:false,allowLoopback:false,allowPrivateNetwork:false,reasons:[reason]}}});
   const row=p.get('permissions').children[3];assert.match(row.children[1].textContent,/off|オフ/);assert.doesNotMatch(row.children[1].textContent,/^on$/);
   assert.ok(p.get('permissions-hint').textContent.includes(reason));assert.equal(p.get('permissions-hint').innerHTML,undefined);
+  const physical=p.get('permissions').children[3].children[1];assert.equal(physical.textContent,'オフ（要求 on）');
+  p.get('ui-language').value='en';p.get('ui-language').listeners.get('change')();assert.equal(physical.textContent,'off (requested on)');
 });

@@ -4,7 +4,7 @@ import {dirname} from 'node:path';
 import {setTimeout as delay} from 'node:timers/promises';
 import {AdlError, NativeError, safeError, type Action, type Adapter, type AdapterSession, type Condition, type Mode, type PolicyConfig, type RawSnapshot, type Target, type BrowserTargetConfig} from './types.js';
 import {assertUrlAllowed,authorizeAction,redactElement,redactString} from './policy.js';
-import {SnapshotStore} from './snapshot.js';
+import {SnapshotStore,type ObserveOptions,type ObserveResult} from './snapshot.js';
 import {VisualStore} from './visual.js';
 import {visualRequestSchema} from './visual-request.js';
 import type {VisualRequest,VisualObservation} from './visual-types.js';
@@ -18,16 +18,17 @@ import {ApprovalClient,type ApprovalSummary} from './approval-client.js';
 import {describeApprovalValue} from './approval-summary.js';
 import type {PrepareInputRequest,PreparedObservation,CommitInputRequest,InputExecution} from './physical-input-types.js';
 
-type Session = { id:string; target:Target; adapter:AdapterSession; mode:Mode;revision:number; raw:RawSnapshot; expires:number;latestFrame?:string;paused?:boolean };
+type EvidenceRecord={epoch:number;evidence:NonNullable<RawSnapshot['actionEvidence']>};
+type Session = { id:string; target:Target; adapter:AdapterSession; mode:Mode;revision:number; raw:RawSnapshot; expires:number;latestFrame?:string;paused?:boolean;actionEpoch:number;actionHistory:Map<number,EvidenceRecord> };
 export type Step = Action & {session_id:string; expected_revision?:number; condition?:Condition};
 type Task = {id:string; status:'queued'|'running'|'completed'|'failed'|'cancelled'; controller:AbortController; results:Record<string,unknown>[]; error?:ReturnType<typeof safeError>; created:number};
-type PendingApproval={request_id:string;binding:string;expires_at:number;session_id:string;summary:ApprovalSummary};
+type PendingApproval={request_id:string;binding:string;expires_at:number;session_id:string;summary:ApprovalSummary;baselineRevision?:number};
 function canonical(value:unknown):unknown{if(Array.isArray(value))return value.map(canonical);if(value&&typeof value==='object')return Object.fromEntries(Object.entries(value).filter(([,v])=>v!==undefined).sort(([a],[b])=>a.localeCompare(b)).map(([k,v])=>[k,canonical(v)]));return value;}
 export class Engine {
   private sessions=new Map<string,Session>();
   private targets=new Map<string,Target>();
   private tasks=new Map<string,Task>();
-  private snapshots=new SnapshotStore();
+  private snapshots:SnapshotStore;
   private visuals=new VisualStore();
   private inputProofs=new InputProofStore();
   private readonly approval=ApprovalClient.fromEnv();
@@ -46,6 +47,7 @@ export class Engine {
   private master=new AbortController();
   private timer:NodeJS.Timeout;
   constructor(readonly policy:PolicyConfig,private adapters:{browser:Adapter;desktop?:Adapter},private readonly platform:string=process.platform,private readonly operationAllowed:()=>boolean=()=>true) {
+    this.snapshots=new SnapshotStore(policy.allowPersonalData);
     for(const config of policy.browserTargets) {
       if(config.classification==='SECRET'||config.classification==='UNKNOWN') continue;
       const target:Target={target_id:`t_${randomUUID()}`,surface:'browser',application_id:config.id,label:redactString(config.label),policy_class:config.classification,capabilities:this.browserCapabilities(config)};
@@ -72,10 +74,10 @@ export class Engine {
     const probe=(this.adapters.desktop as {desktopCapabilities?:()=>{available:boolean;mutations:boolean;focus_control?:string;interactive_input?:boolean;gesture_backends?:string[];lifecycle?:boolean}}|undefined)?.desktopCapabilities?.();
     const interactive=this.desktopConfig()?.interactive?.enabled===true;
     const p=this.policy,blanket=p.allowAllOperations===true,app=this.platform==='darwin'?p.macos:this.platform==='win32'?p.windows:undefined;
-    return {ok:true,permissions:{all_operations:blanket,operation_mode:blanket?'all':p.operationMode??'legacy_controls',restricted_targets:p.restrictTargets===true,origins:blanket&&!p.restrictTargets?'all_allowed':p.allowedOrigins.slice(),targets:blanket&&!p.restrictTargets?'all_allowed':p.browserTargets.map(t=>({application_id:t.id,origin:new URL(t.url).origin})),desktop_app:app?.appId??'',physical_input:app?.interactive?.enabled===true,unredacted_images:app?.visual?.allowUnredacted===true,loopback:p.allowLoopback,private_network:p.allowPrivateNetwork},approvals:{available:!!this.approval&&p.operationMode==='ask'&&!blanket,surface:'browser',max_pending:8,expires_ms:120000,requires_visible_main_document_control:true,iframe_and_shadow:false},version:'0.1.5',transport:'stdio',modes:['strict_isolated',...(this.adapters.desktop?['background_semantic',...(interactive?['interactive_desktop']:[])]:[])],
+    return {ok:true,permissions:{all_operations:blanket,operation_mode:blanket?'all':p.operationMode??'legacy_controls',restricted_targets:p.restrictTargets===true,origins:blanket&&!p.restrictTargets?'all_allowed':p.allowedOrigins.slice(),resource_origins:(p.resourceOrigins??[]).slice(),personal_data:p.allowPersonalData===true,targets:blanket&&!p.restrictTargets?'all_allowed':p.browserTargets.map(t=>({application_id:t.id,origin:new URL(t.url).origin})),desktop_app:app?.appId??'',physical_input:app?.interactive?.enabled===true,unredacted_images:app?.visual?.allowUnredacted===true,loopback:p.allowLoopback,private_network:p.allowPrivateNetwork},approvals:{available:!!this.approval&&p.operationMode==='ask'&&!blanket,surface:'browser',max_pending:8,expires_ms:120000,requires_visible_main_document_control:false,requires_visible_control:true,iframe_and_shadow:false,open_shadow:true,same_origin_iframe:true,cross_origin_iframe_approval:false},version:'0.1.6',transport:'stdio',modes:['strict_isolated',...(this.adapters.desktop?['background_semantic',...(interactive?['interactive_desktop']:[])]:[])],
       adapters:{browser:this.policy.browserHeadless===false?'chromium_headful':'chromium_headless',desktop:this.adapters.desktop?(probe?.focus_control==='probe_guarded_semantic'?'macos_ax_probe_required':'windows_uia_probe_required'):'unavailable',...(probe?{desktop_mutations:probe.mutations}:{})},
       lifecycle:{configured:this.policy.macos?.lifecycle?.enabled===true||this.policy.windows?.lifecycle?.enabled===true,available:probe?.lifecycle===true&&this.lifecyclePlatformSupported(),platform_supported:this.lifecyclePlatformSupported(),mode:'background_semantic'},
-      limits:{max_sessions:this.policy.maxSessions,max_batch_steps:this.policy.maxBatchSteps,max_elements:this.policy.maxElements},
+      limits:{max_sessions:this.policy.maxSessions,max_batch_steps:this.policy.maxBatchSteps,max_elements:this.policy.maxElements,retained_elements:20000},
       visual:{browser:true,desktop:!!(this.policy.macos?.visual?.enabled||this.policy.windows?.visual?.enabled),formats:['image/png'],sources:['viewport','exact_window'],max_source_pixels:4194304,max_source_bytes:8388608,max_frames:16,max_retained_bytes:33554432,frame_ttl_ms:60000,max_output_dimension:2048,max_output_pixels:4194304,max_output_bytes:6291456,video:'timestamped_png_sequence',audio:false,gestures:'isolated_browser_and_opt_in_desktop',max_sequence_frames:16,max_sequence_span_ms:6000,gesture_frame_max_age_ms:5000,browser_gesture_frame_max_age_ms:30000},
       physical_input:{configured:interactive,available:probe?.interactive_input===true,backends:probe?.gesture_backends??[],requires_foreground:true,exclusive_lease:true,confirmation_ttl_ms:30000,pre_dispatch_target_check:true},
       limitations:[blanket&&!p.restrictTargets?'Broad policy supplies default browser visuals; native images follow the native visual policy. Sequences sample discrete frames without audio.':'Visuals require trusted per-target opt-in. Native images may need explicit unredacted-pixel permission. Sequences sample discrete frames without audio.',
@@ -102,7 +104,7 @@ export class Engine {
     if(command==='pause')s.paused=true;
     try{
       await this.deadline(sig=>{if(!this.operationAllowed()||cancel?.aborted||command==='pause'&&expires<=Date.now())throw new AdlError('E_POLICY_DENIED');return s.adapter.handoff!(command==='pause',sig,command==='pause'?expires:undefined);},this.policy.actionTimeoutMs,cancel,s);
-      await this.refresh(s,cancel);s.revision++;this.snapshots.record(s.id,s.revision,s.raw);
+      await this.refresh(s,cancel);s.revision++;this.snapshots.record(s.id,s.revision,s.raw);this.recordActionEvidence(s);
     }catch(error){await s.adapter.handoff(false,new AbortController().signal).catch(()=>undefined);throw error;}
     s.paused=command==='pause';
     return {ok:true,session_id:s.id,paused:s.paused,revision:s.revision,...(s.paused?{manual_network_expires_at:new Date(expires).toISOString()}:{}),instructions:s.paused?'Use the visible isolated browser to sign in or finish the manual step. This origin may send requests during the approved manual interval. Resume afterward and observe again.':'Observe again and use the new revision before acting.'};
@@ -126,10 +128,10 @@ export class Engine {
     return this.runQueued(prior,p=>{tail=p;this.desktopLane=p;},fn).finally(()=>{if(tail&&this.desktopLane===tail)this.desktopLane=undefined;});
   }
   private runQueued<T>(chain:Promise<unknown>,bind:(tail:Promise<unknown>)=>void,fn:()=>Promise<T>):Promise<T> {
-    if(this.stopped||!this.operationAllowed())return Promise.reject(new AdlError('E_CANCELLED'));
+    if(this.stopped||!this.operationAllowed())return Promise.reject(new AdlError('E_CANCELLED',this.stopped||!this.operationAllowed()?'emergency_stop':undefined));
     if(this.queued>=64)return Promise.reject(new AdlError('E_RESOURCE_LIMIT'));
     this.queued++;
-    const run=chain.then(()=>{if(this.stopped||!this.operationAllowed())throw new AdlError('E_CANCELLED');return fn();});
+    const run=chain.then(()=>{if(this.stopped||!this.operationAllowed())throw new AdlError('E_CANCELLED',this.stopped||!this.operationAllowed()?'emergency_stop':undefined);return fn();});
     bind(run.catch(()=>{}));return run.finally(()=>{this.queued--;});
   }
   private sessionLane<T>(session_id:string,fn:()=>Promise<T>):Promise<T> {
@@ -167,27 +169,34 @@ export class Engine {
   private async deadline<T>(operation:(signal:AbortSignal)=>Promise<T>, timeout:number, cancel?:AbortSignal, session?:Session):Promise<T> {
     const controller=new AbortController();const signal=AbortSignal.any([controller.signal,this.master.signal,...(cancel?[cancel]:[])]);
     let timedOut=false;
+    const interruption=()=>new AdlError(timedOut?'E_TIMEOUT':'E_CANCELLED',!timedOut&&(this.stopped||!this.operationAllowed())?'emergency_stop':undefined);
     const timer=setTimeout(()=>{timedOut=true;controller.abort();},timeout);
     let listener:()=>void=()=>{};
-    const aborted=new Promise<never>((_,reject)=>{listener=()=>reject(new AdlError(timedOut?'E_TIMEOUT':'E_CANCELLED'));signal.addEventListener('abort',listener,{once:true});if(signal.aborted)listener();});
+    const aborted=new Promise<never>((_,reject)=>{listener=()=>reject(interruption());signal.addEventListener('abort',listener,{once:true});if(signal.aborted)listener();});
     try {return await Promise.race([signal.aborted?aborted:operation(signal),aborted]);}
-    catch(error) {if(signal.aborted && session)await this.destroy(session);if(signal.aborted)throw new AdlError(timedOut?'E_TIMEOUT':'E_CANCELLED');throw error;}
+    catch(error) {if(signal.aborted && session)await this.destroy(session);if(signal.aborted)throw interruption();throw error;}
     finally {clearTimeout(timer);signal.removeEventListener('abort',listener);}
   }
   private async refresh(s:Session,signal?:AbortSignal,preserve=false){
     const raw=this.boundSnapshot(await this.deadline(sig=>s.adapter.snapshot(sig),this.policy.actionTimeoutMs,signal,preserve?undefined:s));
-    if(raw.fingerprint!==s.raw.fingerprint){s.revision++;s.raw=raw;this.snapshots.record(s.id,s.revision,raw);}
+    if(raw.fingerprint!==s.raw.fingerprint||raw.actionEvidence&&s.actionHistory.get(s.revision)?.epoch!==s.actionEpoch){s.revision++;s.raw=raw;this.snapshots.record(s.id,s.revision,raw);this.recordActionEvidence(s);}
     return s.revision;
   }
-  private boundSnapshot(raw:RawSnapshot):RawSnapshot{return {...raw,elements:raw.elements.slice(0,5000),truncated:raw.truncated||raw.elements.length>5000};}
+  private recordActionEvidence(s:Session){
+    if(s.target.surface!=='browser'||!s.raw.actionEvidence)return;
+    s.actionHistory.set(s.revision,{epoch:s.actionEpoch,evidence:s.raw.actionEvidence});
+    const pinned=this.approvalPending.get(s.id)?.baselineRevision;
+    while(s.actionHistory.size>32){const oldest=[...s.actionHistory.keys()].find(revision=>revision!==pinned)!;s.actionHistory.delete(oldest);}
+  }
+  private boundSnapshot(raw:RawSnapshot):RawSnapshot{return {...raw,elements:raw.elements.slice(0,20000),truncated:raw.truncated||raw.elements.length>20000,...(raw.actionEvidence?{actionEvidence:{navigation:raw.actionEvidence.navigation,elements:{...raw.actionEvidence.elements}}}:{})};}
   openUrl(url:string,mode:Mode='strict_isolated',cancel?:AbortSignal){
-    if(this.stopped||!this.operationAllowed()||cancel?.aborted)return Promise.reject(new AdlError('E_CANCELLED'));
+    if(this.stopped||!this.operationAllowed()||cancel?.aborted)return Promise.reject(new AdlError('E_CANCELLED',this.stopped||!this.operationAllowed()?'emergency_stop':undefined));
     let parsed:URL;try{parsed=new URL(url);}catch{return Promise.reject(new AdlError('E_INVALID_ARGUMENT'));}
     if(!['http:','https:'].includes(parsed.protocol)||parsed.username||parsed.password||url.length>2048)return Promise.reject(new AdlError('E_INVALID_ARGUMENT'));
     // Origin and network grants are both checked before any catalogue mutation or open; the
     // extension profile sets restrictTargets so allowAllOperations cannot bypass them.
     return this.deadline(()=>assertUrlAllowed(url,this.policy),this.policy.actionTimeoutMs,cancel).then(()=>this.enqueue(async()=>{
-      if(cancel?.aborted)throw new AdlError('E_CANCELLED');
+      if(cancel?.aborted)throw new AdlError('E_CANCELLED',this.stopped||!this.operationAllowed()?'emergency_stop':undefined);
       return this.openInternal(this.openGranted(parsed),mode,cancel);
     }));
   }
@@ -224,12 +233,12 @@ export class Engine {
     const adapter=target.surface==='browser'?this.adapters.browser:this.adapters.desktop;if(!adapter)throw new AdlError('E_TARGET_NOT_FOUND');
     let instance:AdapterSession|undefined;
     try {
-      instance=await this.deadline(async signal=>{const opened=await adapter.open(target,mode,signal);if(signal.aborted){void this.stopAdapter(opened);throw new AdlError('E_CANCELLED');}return opened;},this.policy.actionTimeoutMs,cancel);
+      instance=await this.deadline(async signal=>{const opened=await adapter.open(target,mode,signal);if(signal.aborted){void this.stopAdapter(opened);throw new AdlError('E_CANCELLED',this.stopped||!this.operationAllowed()?'emergency_stop':undefined);}return opened;},this.policy.actionTimeoutMs,cancel);
       const raw=this.boundSnapshot(await this.deadline(sig=>instance!.snapshot(sig),this.policy.actionTimeoutMs,cancel));
-      const s:Session={id:`s_${randomUUID()}`,target,adapter:instance,mode,revision:1,raw,expires:Date.now()+this.policy.sessionTtlMs};
+      const s:Session={id:`s_${randomUUID()}`,target,adapter:instance,mode,revision:1,raw,expires:Date.now()+this.policy.sessionTtlMs,actionEpoch:0,actionHistory:new Map()};
       await this.audit('open',{session_id:s.id});
-      if(this.stopped||this.master.signal.aborted||cancel?.aborted)throw new AdlError('E_CANCELLED');
-      this.sessions.set(s.id,s);this.snapshots.record(s.id,1,raw);
+      if(this.stopped||this.master.signal.aborted||cancel?.aborted)throw new AdlError('E_CANCELLED',this.stopped||!this.operationAllowed()?'emergency_stop':undefined);
+      this.sessions.set(s.id,s);this.snapshots.record(s.id,1,raw);this.recordActionEvidence(s);
       return {ok:true,session_id:s.id,revision:1,capabilities:instance.capabilities??target.capabilities,mode};
     }catch(error){if(instance)await this.stopAdapter(instance);throw error;}
   }
@@ -238,7 +247,7 @@ export class Engine {
     const parsed=visualRequestSchema.safeParse(options);if(!parsed.success)throw new AdlError('E_INVALID_ARGUMENT');
     this.assertCaptureAllowed(s);
     return this.deadline(async signal=>{
-      if(signal.aborted)throw new AdlError('E_CANCELLED');
+      if(signal.aborted)throw new AdlError('E_CANCELLED',this.stopped||!this.operationAllowed()?'emergency_stop':undefined);
       const {frame_id,...view}=parsed.data;
       if(frame_id)return this.visuals.view(s.id,frame_id,view,signal);
       return this.captureFrame(s,view,signal);
@@ -253,12 +262,12 @@ export class Engine {
   private async captureFrame(s:Session,view:VisualViewOptions,signal:AbortSignal):Promise<VisualObservation>{
     await this.refresh(s,signal);
     const image=await s.adapter.capture!(signal);
-    if(signal.aborted||this.stopped||!this.sessions.has(s.id))throw new AdlError('E_CANCELLED');
+    if(signal.aborted||this.stopped||!this.sessions.has(s.id))throw new AdlError('E_CANCELLED',this.stopped||!this.operationAllowed()?'emergency_stop':undefined);
     const id=await this.visuals.record({session_id:s.id,target_id:s.target.target_id,revision:s.revision},image,signal);
     try{
-      if(signal.aborted||this.stopped||!this.sessions.has(s.id))throw new AdlError('E_CANCELLED');
+      if(signal.aborted||this.stopped||!this.sessions.has(s.id))throw new AdlError('E_CANCELLED',this.stopped||!this.operationAllowed()?'emergency_stop':undefined);
       await this.audit('capture',{session_id:s.id});
-      if(signal.aborted)throw new AdlError('E_CANCELLED');
+      if(signal.aborted)throw new AdlError('E_CANCELLED',this.stopped||!this.operationAllowed()?'emergency_stop':undefined);
       const observation=await this.visuals.view(s.id,id,view,signal);s.latestFrame=id;return observation;
     }catch(error){this.visuals.discard(s.id,id);throw error;}
   }
@@ -323,7 +332,7 @@ export class Engine {
       this.visuals.assertRetained(s.id,frame_id,5000);
       const started_at=performance.now();
       dispatched=true;const prepared=await s.adapter.prepareInput!(plan,reference,signal);
-      if(signal.aborted||!this.sessions.has(s.id))throw new AdlError('E_CANCELLED');
+      if(signal.aborted||!this.sessions.has(s.id))throw new AdlError('E_CANCELLED',this.stopped||!this.operationAllowed()?'emergency_stop':undefined);
       if(prepared.action!==plan.action||prepared.pointer_on_target!==true||!prepared.target.enabled||plan.action==='fill'&&!prepared.target.editable||plan.expected_target?.role!==undefined&&plan.expected_target.role!==prepared.target.role||plan.expected_target?.name!==undefined&&plan.expected_target.name!==prepared.target.name)throw new AdlError('E_STALE_STATE');
       await this.refresh(s,signal);
       let image:VisualObservation|undefined;
@@ -336,7 +345,7 @@ export class Engine {
       }
       const proof=this.inputProofs.issue({session_id:s.id,native_id:prepared.confirmation_id,action:prepared.action,revision:s.revision,target:{role:prepared.target.role,name:prepared.target.name},ttl_ms:Math.min(30000,prepared.expires_in_ms),started_at});
       await this.audit('input_prepared',{session_id:s.id,action:prepared.action});
-      if(signal.aborted){this.inputProofs.invalidateSession(s.id);throw new AdlError('E_CANCELLED');}
+      if(signal.aborted){this.inputProofs.invalidateSession(s.id);throw new AdlError('E_CANCELLED',this.stopped||!this.operationAllowed()?'emergency_stop':undefined);}
       return {metadata:{...prepared,...proof,ok:true as const,session_id:s.id,revision:s.revision},...(image?{image}:{})};
     },this.policy.actionTimeoutMs,cancel,s).catch(async error=>{this.inputProofs.invalidateSession(s.id);if(dispatched&&error instanceof AdlError&&['E_TIMEOUT','E_CANCELLED'].includes(error.code))error.mayHaveExecuted=true;if(error instanceof AdlError&&(error.mayHaveExecuted||['E_TIMEOUT','E_CANCELLED'].includes(error.code)))await this.destroy(s);throw error;});
   });}
@@ -360,10 +369,27 @@ export class Engine {
       return {...image,metadata:{...image.metadata,input:execution}};
     },this.policy.actionTimeoutMs,cancel,s).catch(async error=>{const safe=error instanceof AdlError?error:new AdlError('E_INTERNAL');if(completed||dispatched&&['E_TIMEOUT','E_CANCELLED'].includes(safe.code))safe.mayHaveExecuted=true;if(safe.mayHaveExecuted||['E_TIMEOUT','E_CANCELLED'].includes(safe.code))await this.destroy(s);throw safe;});
   });}
-  observe(session_id:string,options:{token_budget?:number;since_revision?:number;cursor?:string;scope?:string;depth?:number;include?:string[];representation?:'auto'|'full'|'delta';format?:'json'|'compact'|'lines'}={},cancel?:AbortSignal) {return this.sessionLane(session_id,async()=>{
+  observe(session_id:string,options:Omit<ObserveOptions,'token_budget'|'element_limit'>&{token_budget?:number}={},cancel?:AbortSignal):Promise<ObserveResult> {return this.sessionLane(session_id,async()=>{
     const s=this.get(session_id);
     if(options.depth!==undefined){if(s.target.surface!=='browser')throw new AdlError('E_UNSUPPORTED_ACTION');if(!Number.isSafeInteger(options.depth)||options.depth<1||options.depth>12)throw new AdlError('E_INVALID_ARGUMENT');}
     await this.refresh(s,cancel);
+    if(options.text){
+      if(s.target.surface!=='browser'||!s.adapter.readText)throw new AdlError('E_UNSUPPORTED_ACTION');
+      if(options.cursor!==undefined||options.since_revision!==undefined||options.scope!==undefined||options.include!==undefined||options.depth!==undefined||options.format!==undefined||options.representation!==undefined)throw new AdlError('E_INVALID_ARGUMENT');
+      const {element_id,offset=0,length=4096}=options.text,budget=options.token_budget??this.policy.defaultTokenBudget;
+      if(!Number.isInteger(offset)||offset<0||offset>1048576||!Number.isInteger(length)||length<1||length>8192||!Number.isInteger(budget)||budget<256||budget>8000)throw new AdlError('E_INVALID_ARGUMENT');
+      if(!s.raw.elements.some(e=>e.id===element_id))throw new AdlError('E_TARGET_NOT_FOUND');
+      const read=await this.deadline(sig=>s.adapter.readText!(element_id,offset,length,sig),this.policy.actionTimeoutMs,cancel);
+      const chars=Array.from(read.text);
+      const make=(count:number):ObserveResult=>{
+        const content=chars.slice(0,count).join(''),next=offset+content.length<read.total_length?offset+content.length:null;
+        return {ok:true,session_id:s.id,revision:s.revision,redactions:(content.match(/\[redacted\]/g)??[]).length,truncated:read.truncated||next!==null,next_cursor:null,text:{element_id,offset,content,total_length:read.total_length,next_offset:next,truncated:read.truncated||next!==null}};
+      };
+      let lo=0,hi=chars.length;
+      while(lo<hi){const mid=Math.ceil((lo+hi)/2);if(Buffer.byteLength(JSON.stringify(make(mid)),'utf8')<=budget*4)lo=mid;else hi=mid-1;}
+      if(!lo&&chars.length)throw new AdlError('E_RESOURCE_LIMIT');
+      return make(lo);
+    }
     return this.snapshots.observe(s.id,s.revision,{...options,token_budget:options.token_budget??this.policy.defaultTokenBudget,element_limit:this.policy.maxElements});
   });}
   async approvals(requestId?:string){
@@ -376,10 +402,12 @@ export class Engine {
     }
     return {ok:true,requests};
   }
-  private async approvalFor(s:Session,action:Omit<Action,'action'>&{action:string},expected:number,proof:{proof:string;risk:'ordinary'|'credential'|'consequential';role:string;name:string;origin:string;details?:string[]}){
-    if(!this.approval||!this.operationAllowed())throw new AdlError('E_APPROVAL_REQUIRED');
+  private async approvalFor(s:Session,action:Omit<Action,'action'>&{action:string},expected:number,proof:{proof:string;risk:'ordinary'|'credential'|'consequential';role:string;name:string;origin:string;details?:string[]},actionEvidence?:{navigation:string;element?:string}){
+    if(!this.operationAllowed())throw new AdlError('E_CANCELLED','emergency_stop');
+    if(!this.approval)throw new AdlError('E_APPROVAL_REQUIRED','approval_unavailable');
     const existing=this.approvalPending.get(s.id);
-    const binding=createHmac('sha256',this.approvalKey).update(JSON.stringify(canonical({action,session:s.id,target:s.target.target_id,revision:expected,fingerprint:s.raw.fingerprint,proof:proof.proof,epoch:this.approval.epoch,server:this.approvalServerId}))).digest('hex');
+    const freshness=actionEvidence?{actionEvidence,actionEpoch:s.actionEpoch}:{revision:expected,fingerprint:s.raw.fingerprint};
+    const binding=createHmac('sha256',this.approvalKey).update(JSON.stringify(canonical({action,session:s.id,target:s.target.target_id,...freshness,proof:proof.proof,epoch:this.approval.epoch,server:this.approvalServerId}))).digest('hex');
     for(const [key,expires]of this.approvalTerminal)if(expires<=Date.now())this.approvalTerminal.delete(key);
     if(this.approvalTerminal.has(binding))throw new AdlError('E_POLICY_DENIED');
     if(existing){
@@ -399,7 +427,7 @@ export class Engine {
     if(this.approvalPending.size>=8||this.approvalTerminal.size+this.approvalPending.size>=128)throw new AdlError('E_RESOURCE_LIMIT');
     const raw=action.value,value=typeof raw==='string'?describeApprovalValue(raw,proof.risk==='credential'):undefined;
     const summary:ApprovalSummary={action:action.action,surface:s.target.surface,target:redactString(s.target.label).slice(0,128),origin:proof.origin,role:redactString(proof.role).slice(0,100),name:redactString(proof.name).slice(0,128),risk:value?.kind==='secret'||proof.risk==='credential'?'credential':'consequential',...(proof.details?{details:proof.details}:{}),...(value?{value}:{})};
-    const entry:PendingApproval={request_id:randomUUID(),binding,expires_at:Date.now()+120000,session_id:s.id,summary};
+    const entry:PendingApproval={request_id:randomUUID(),binding,expires_at:Date.now()+120000,session_id:s.id,summary,...(actionEvidence?{baselineRevision:expected}:{})};
     this.approvalPending.set(s.id,entry);
     try{const reply=await this.approval.request('POST','/v1/requests',entry,{v:1,request_id:entry.request_id,server_id:this.approvalServerId,control_epoch:this.approval.epoch,binding,expires_at:entry.expires_at,summary});if(reply.status!=='pending')throw new AdlError('E_POLICY_DENIED');}
     catch(error){this.approvalPending.delete(s.id);throw error;}
@@ -408,7 +436,17 @@ export class Engine {
   private async action(s:Session,action:Action,expected:number,signal?:AbortSignal){
     action={...action,...(action.expected_target?{expected_target:{...action.expected_target}}:{}),...(action.point?{point:{...action.point}}:{})};
     this.validateAction(action,s.target.surface);if(!Number.isSafeInteger(expected)||expected<1)throw new AdlError('E_INVALID_ARGUMENT');
-    await this.refresh(s,signal,s.target.surface==='browser');if(!['read_state','wait_for'].includes(action.action)&&s.revision!==expected){await this.invalidateApproval(s.id);throw new AdlError('E_STALE_STATE');}
+    await this.refresh(s,signal,s.target.surface==='browser');
+    let actionEvidence:{navigation:string;element?:string}|undefined;
+    if(s.target.surface==='browser'&&!action.point&&['click','fill','select','check','press','scroll','navigate','back','hover'].includes(action.action)){
+      const prior=s.actionHistory.get(expected),current=s.raw.actionEvidence;
+      const navigationOnly=action.action==='navigate'||action.action==='back';
+      if(prior&&current&&prior.epoch===s.actionEpoch&&prior.evidence.navigation===current.navigation&&
+        (navigationOnly||action.element_id&&prior.evidence.elements[action.element_id]!==undefined&&prior.evidence.elements[action.element_id]===current.elements[action.element_id])){
+        actionEvidence={navigation:current.navigation,...(!navigationOnly?{element:current.elements[action.element_id!]}:{})};
+      }
+    }
+    if(!['read_state','wait_for'].includes(action.action)&&s.revision!==expected&&!actionEvidence){await this.invalidateApproval(s.id);throw new AdlError('E_STALE_STATE');}
     if(action.action==='read_state')return {ok:true,revision:s.revision};
     if(action.action==='wait_for')return this.waitInternal(s,{role:action.role,name:action.name,element_id:action.element_id},action.timeout_ms??this.policy.actionTimeoutMs,signal);
     if(s.paused)throw new AdlError('E_POLICY_DENIED');
@@ -425,7 +463,7 @@ export class Engine {
     }
     const element=action.element_id?s.raw.elements.find(e=>e.id===action.element_id):undefined;
     if(!directPoint&&!['navigate','back'].includes(action.action)&&!element)throw new AdlError('E_TARGET_NOT_FOUND');
-    if(action.expected_target&&(!element||(action.expected_target.role!==undefined&&action.expected_target.role!==element.role)||(action.expected_target.name!==undefined&&action.expected_target.name!==redactElement(element).name)))throw new AdlError('E_STALE_STATE');
+    if(action.expected_target&&(!element||(action.expected_target.role!==undefined&&action.expected_target.role!==element.role)||(action.expected_target.name!==undefined&&action.expected_target.name!==redactElement(element,this.policy.allowPersonalData).name)))throw new AdlError('E_STALE_STATE');
     const modern=!this.policy.allowAllOperations&&['standard','ask'].includes(this.policy.operationMode??'read_only')&&s.target.surface==='browser'&&!['navigate','back','scroll'].includes(action.action);
     let liveProof:{proof:string;risk:'ordinary'|'credential'|'consequential';role:string;name:string;origin:string;details?:string[]}|undefined;
     let approved=false,approvalExpires:number|undefined;
@@ -435,18 +473,22 @@ export class Engine {
       liveProof=await s.adapter.prepareAction(action,signal??this.master.signal);
       if(element?.sensitive)liveProof={...liveProof,risk:'credential'};
       const sensitiveValue=typeof action.value==='string'&&describeApprovalValue(action.value).kind==='secret';
-      if(liveProof.risk!=='ordinary'||sensitiveValue){if(this.policy.operationMode!=='ask')throw new AdlError('E_APPROVAL_REQUIRED');approvalExpires=await this.approvalFor(s,action,expected,liveProof);approved=true;}
+      if(liveProof.risk!=='ordinary'||sensitiveValue){if(this.policy.operationMode!=='ask')throw new AdlError('E_APPROVAL_REQUIRED','requires_ask_mode');approvalExpires=await this.approvalFor(s,action,expected,liveProof,actionEvidence);approved=true;}
     }else if(!directPoint)authorizeAction(action,element,this.policy.allowAllOperations);
     this.inputProofs.invalidateSession(s.id);
     await this.audit('action_started',{session_id:s.id,action:action.action});
     let acknowledged=false,dispatched=false;
+    const beforeRevision=s.revision,beforeBlocks=(s.raw.warnings??[]).reduce((n,w)=>n+w.count,0);
     try {
-      await this.deadline(sig=>{const dispatch=()=>{if(sig.aborted||!this.operationAllowed()||approvalExpires!==undefined&&approvalExpires<=Date.now())throw new AdlError('E_POLICY_DENIED');dispatched=true;};if(!s.adapter.tracksDispatch)dispatch();if(directPoint)return s.adapter.clickPoint!(action.point!,pointReference!,sig,dispatch);return s.adapter.act(action,sig,dispatch,liveProof||pointReference?{...(liveProof?{normalOperations:true,approvalProof:liveProof.proof,approved,...(approvalExpires!==undefined?{expires_at:approvalExpires}:{})}:{}),...(pointReference?{pointReference}:{})}:undefined);},Math.min(action.timeout_ms??this.policy.actionTimeoutMs,this.policy.actionTimeoutMs),signal);
+      await this.deadline(sig=>{const dispatch=()=>{if(sig.aborted||!this.operationAllowed()||approvalExpires!==undefined&&approvalExpires<=Date.now())throw new AdlError('E_POLICY_DENIED');if(!dispatched)s.actionEpoch++;dispatched=true;};if(!s.adapter.tracksDispatch)dispatch();if(directPoint)return s.adapter.clickPoint!(action.point!,pointReference!,sig,dispatch);return s.adapter.act(action,sig,dispatch,liveProof||pointReference||actionEvidence?{...(liveProof?{normalOperations:true,approvalProof:liveProof.proof,approved,...(approvalExpires!==undefined?{expires_at:approvalExpires}:{})}:{}),...(pointReference?{pointReference}:{}),...(actionEvidence?{actionEvidence}:{})}:undefined);},Math.min(action.timeout_ms??this.policy.actionTimeoutMs,this.policy.actionTimeoutMs),signal);
       acknowledged=true;
       delete s.latestFrame;
       await this.refresh(s,signal);
       const audit_id=await this.audit('action_completed',{session_id:s.id,action:action.action});
-      return {ok:true,session_id:s.id,revision:s.revision,audit_id};
+      const warnings=s.raw.warnings??[],networkBlocked=warnings.reduce((n,w)=>n+w.count,0)>beforeBlocks;
+      let observation:ObserveResult|undefined,observation_error:ReturnType<typeof safeError>|undefined;
+      if(action.include_diff){try{observation=this.snapshots.observe(s.id,s.revision,{token_budget:this.policy.defaultTokenBudget,since_revision:beforeRevision,element_limit:this.policy.maxElements,representation:'delta'});}catch(error){observation_error=safeError(error);}}
+      return {ok:true,session_id:s.id,revision:s.revision,audit_id,...(networkBlocked?{network_blocked:true}:{}),...(warnings.length?{warnings}:{}),...(observation?{observation}:{}),...(observation_error?{observation_error}:{})};
     }catch(error){const safe=error instanceof AdlError?error:new AdlError('E_INTERNAL');if(acknowledged||dispatched&&!(error instanceof NativeError)&&(safe.code==='E_TIMEOUT'||safe.code==='E_CANCELLED'||!(error instanceof AdlError)))safe.mayHaveExecuted=true;if(safe.mayHaveExecuted)await this.destroy(s);throw safe;}
   }
   act(session_id:string,action:Action,expected_revision:number,cancel?:AbortSignal){const captured={...action,...(action.expected_target?{expected_target:{...action.expected_target}}:{}),...(action.point?{point:{...action.point}}:{})};return this.sessionLane(session_id,()=>this.action(this.get(session_id),captured,expected_revision,cancel));}
@@ -455,7 +497,7 @@ export class Engine {
     return this.deadline(async signal=>{
       while(true){
         await this.refresh(s,signal,true);
-        const element=s.raw.elements.map(redactElement).find(e=>(!condition.element_id||e.id===condition.element_id)&&(!condition.role||e.role===condition.role)&&(!condition.name||e.name.includes(condition.name)));
+        const element=s.raw.elements.map(e=>redactElement(e,this.policy.allowPersonalData)).find(e=>(!condition.element_id||e.id===condition.element_id)&&(!condition.role||e.role===condition.role)&&(!condition.name||e.name.includes(condition.name)));
         const matched=condition.state==='hidden'?!element:condition.state==='enabled'?!!element?.enabled:!!element;
         if(matched)return {ok:true,session_id:s.id,revision:s.revision,matched:true};
         await delay(50,undefined,{signal});
@@ -464,6 +506,7 @@ export class Engine {
   }
   wait(session_id:string,condition:Condition,timeout_ms:number,cancel?:AbortSignal){return this.sessionLane(session_id,()=>this.waitInternal(this.get(session_id),condition,timeout_ms,cancel));}
   private validateAction(action:Action,surface:'browser'|'desktop'){
+    if(action.include_diff!==undefined&&typeof action.include_diff!=='boolean')throw new AdlError('E_INVALID_ARGUMENT');
     if(!['click','fill','select','check','scroll','navigate','read_state','wait_for','press','back','hover'].includes(action.action))throw new AdlError('E_INVALID_ARGUMENT');
     if(['press','back','hover'].includes(action.action)&&surface!=='browser')throw new AdlError('E_UNSUPPORTED_ACTION');
     if(action.action==='press'&&!['Enter','Escape','Tab','ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Home','End','PageUp','PageDown','Space'].includes(action.value??''))throw new AdlError('E_INVALID_ARGUMENT');
@@ -479,7 +522,7 @@ export class Engine {
     if(action.expected_target&&!expectedTargetSchema.safeParse(action.expected_target).success)throw new AdlError('E_INVALID_ARGUMENT');
   }
   execute(steps:Step[],expected_revisions:Record<string,number>) {
-    if(this.stopped||!this.operationAllowed())throw new AdlError('E_CANCELLED');
+    if(this.stopped||!this.operationAllowed())throw new AdlError('E_CANCELLED',this.stopped||!this.operationAllowed()?'emergency_stop':undefined);
     if(!steps.length||steps.length>this.policy.maxBatchSteps)throw new AdlError('E_INVALID_ARGUMENT');
     // Validation and asynchronous execution must use the same caller-independent plan.
     steps=steps.map(step=>({...step,...(step.expected_target?{expected_target:{...step.expected_target}}:{}),...(step.point?{point:{...step.point}}:{}),...(step.condition?{condition:{...step.condition}}:{})}));
@@ -492,10 +535,10 @@ export class Engine {
     if(this.tasks.size>=128){const done=[...this.tasks.values()].find(t=>!['queued','running'].includes(t.status));if(done)this.tasks.delete(done.id);else throw new AdlError('E_RESOURCE_LIMIT');}
     const task:Task={id:`task_${randomUUID()}`,status:'queued',controller:new AbortController(),results:[],created:Date.now()};this.tasks.set(task.id,task);
     void Promise.resolve().then(async()=>{
-      if(task.controller.signal.aborted)throw new AdlError('E_CANCELLED');
+      if(task.controller.signal.aborted)throw new AdlError('E_CANCELLED',this.stopped||!this.operationAllowed()?'emergency_stop':undefined);
       task.status='running';const expected={...expected_revisions};
       for(const [step_index,step] of steps.entries()){
-        if(task.controller.signal.aborted)throw new AdlError('E_CANCELLED');
+        if(task.controller.signal.aborted)throw new AdlError('E_CANCELLED',this.stopped||!this.operationAllowed()?'emergency_stop':undefined);
         try{
           const result=await this.sessionLane(step.session_id,async()=>{const s=this.get(step.session_id);const outcome=await this.action(s,step,step.expected_revision??expected[s.id]!,task.controller.signal);expected[s.id]=s.revision;return outcome;});
           task.results.push({step_index,status:'completed',...result});
@@ -526,7 +569,7 @@ export class Engine {
     return {ok:true,applications:[{application_id:config.appId,capabilities:['status','launch','quit'],mode:'background_semantic'}]};
   });}
   application(application_id:string,action:'status'|'launch'|'quit',cancel?:AbortSignal){return this.enqueue(()=>this.enqueueDesktop(async()=>{
-    if(this.stopped||!this.operationAllowed())throw new AdlError('E_CANCELLED');
+    if(this.stopped||!this.operationAllowed())throw new AdlError('E_CANCELLED',this.stopped||!this.operationAllowed()?'emergency_stop':undefined);
     const adapter=this.lifecycleAdapter();
     if(!adapter||action!=='status'&&action!=='launch'&&action!=='quit')throw new AdlError('E_POLICY_DENIED');
     if(!this.lifecyclePlatformSupported())throw new AdlError('E_UNSUPPORTED_ACTION');

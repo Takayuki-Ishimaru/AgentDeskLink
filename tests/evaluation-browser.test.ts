@@ -52,7 +52,7 @@ test('Japanese labels and hidden lower-priority security hints protect neutral-i
     const p=await f.engine.observe(f.id,{token_budget:8000});
     assert.ok(!JSON.stringify(p).includes('CANARY_'));
     const fields=p.elements!.filter(e=>e.role==='textbox');assert.equal(fields.length,5);
-    for(const e of fields){assert.equal(e.name,'[redacted]');await assert.rejects(f.engine.act(f.id,{action:'fill',element_id:e.id,value:'blocked'},p.revision),{code:'E_PRIVACY_BLOCKED'});}
+    for(const e of fields){assert.equal(e.value,'[redacted]');await assert.rejects(f.engine.act(f.id,{action:'fill',element_id:e.id,value:'blocked'},p.revision),{code:'E_PRIVACY_BLOCKED'});}
   }finally{await f.close();}
 });
 
@@ -87,13 +87,15 @@ test('body email text is blacked out before retention and remains masked in crop
 });
 
 test('public navigation and long prose stay visible in screenshots while sensitive content is masked',{timeout:20000},async()=>{
-  const f=await fixture('<nav style="position:absolute;left:20px;top:200px;background:#00ff00;width:600px;height:30px"><a href="/one">Documentation</a><a href="/two">Community</a><a href="/three">Resources</a><a href="/four">Downloads</a></nav><p style="position:absolute;left:20px;top:250px;margin:0;background:#00ff00;width:600px;height:80px">'+('This is ordinary public documentation about the project and its features. '.repeat(10))+'</p><p style="position:absolute;left:20px;top:350px;margin:0;background:#00ff00;width:300px;height:30px">password: PRIVATE_CANARY</p>');
+  const publicButtons=['Cookie recipes','Key features','Pin to top','Session schedule'].map((label,i)=>`<button id="${['cookie','key','pin','session'][i]}" style="position:absolute;left:${20+i*140}px;top:420px;margin:0;width:120px;height:35px;background:#00ff00">${label}</button>`).join('');
+  const f=await fixture(publicButtons+'<nav style="position:absolute;left:20px;top:200px;background:#00ff00;width:600px;height:30px"><a href="/one">Documentation</a><a href="/two">Community</a><a href="/three">Resources</a><a href="/four">Downloads</a></nav><p style="position:absolute;left:20px;top:250px;margin:0;background:#00ff00;width:600px;height:80px">'+('This is ordinary public documentation about the project and its features. '.repeat(10))+'</p><p style="position:absolute;left:20px;top:350px;margin:0;background:#00ff00;width:300px;height:30px">password: PRIVATE_CANARY</p>');
   try{
     const frame=await f.engine.capture(f.id,{max_dimension:2048,max_pixels:4194304});
     for(const top of [205,255]){
       const pixel=await sharp(frame.png).extract({left:610,top,width:1,height:1}).removeAlpha().raw().toBuffer();
       assert.deepEqual([...pixel],[0,255,0],`public content at ${top} must remain visible`);
     }
+    for(let i=0;i<4;i++)assert.deepEqual([...await sharp(frame.png).extract({left:125+i*140,top:425,width:1,height:1}).removeAlpha().raw().toBuffer()],[0,255,0]);
     const secret=await sharp(frame.png).extract({left:25,top:355,width:1,height:1}).removeAlpha().raw().toBuffer();
     assert.deepEqual([...secret],[0,0,0]);
   }finally{await f.close();}
@@ -112,7 +114,7 @@ test('mixed nested labels and numeric identifiers never expose values or authori
   try{
     const p=await f.engine.observe(f.id,{token_budget:8000});assert.ok(!JSON.stringify(p).includes('CANARY_'));
     for(const e of p.elements!.filter(e=>e.role==='textbox')){
-      assert.equal(e.name,'[redacted]');await assert.rejects(f.engine.act(f.id,{action:'fill',element_id:e.id,value:'blocked'},p.revision),{code:'E_PRIVACY_BLOCKED'});
+      assert.equal(e.value,'[redacted]');await assert.rejects(f.engine.act(f.id,{action:'fill',element_id:e.id,value:'blocked'},p.revision),{code:'E_PRIVACY_BLOCKED'});
     }
     const button=p.elements!.find(e=>e.role==='button')!;assert.equal(button.name,'Search now');
     await f.engine.act(f.id,{action:'click',element_id:button.id,expected_target:{role:'button',name:'Search now'}},p.revision);
