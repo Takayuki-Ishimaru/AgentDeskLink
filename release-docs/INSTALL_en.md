@@ -2,12 +2,12 @@
 
 [日本語](INSTALL.md) | **English**
 
-Target version: `0.1.5` (beta)
+Target version: `0.1.6` (beta)
 
 ## Requirements
 
 - VS Code 1.101 or newer.
-- The common `agentdesklink-0.1.5.vsix` package. Check the [supported environments and known limitations](KNOWN_ISSUES_en.md).
+- The common `agentdesklink-0.1.6.vsix` package. Check the [supported environments and known limitations](KNOWN_ISSUES_en.md).
 - A network connection for the first Chromium download if Chrome is not installed.
 
 One VSIX bundles Node.js and image-processing libraries for macOS / Apple silicon, Windows x64 and Linux x64. It also includes the macOS and Windows desktop helpers. It selects the matching runtime at startup, so no separate build is needed.
@@ -16,12 +16,12 @@ The distribution file is shared across these operating systems. This common VSIX
 
 ## Installation
 
-1. Download `agentdesklink-0.1.5.vsix` and `SHA256SUMS` from the release page.
+1. Download `agentdesklink-0.1.6.vsix` and `SHA256SUMS` from the release page.
 2. Compute the SHA-256 using the [update guide](UPDATES_en.md) and confirm it matches the list.
 3. In the VS Code Command Palette, choose “Extensions: Install from VSIX...” and select the VSIX.
 4. Open the folder you want to use, review its contents and trust the workspace.
 5. Open **AgentDeskLink** in the activity bar on the left.
-6. Choose “Open Settings” in the panel and configure the browser origins or desktop app and the operation permissions you need. See “Initial settings and scope” below.
+6. Configure browser origins and operation permissions near the top of the panel. Use “Open Settings” for the desktop app and other settings. The Language selector switches between Japanese and English. See “Initial settings and scope” below.
 7. Turn on “Enable the AgentDeskLink MCP server for this workspace”.
 8. Approve the server start in the VS Code MCP management view.
 
@@ -42,6 +42,8 @@ MCP is disabled by default for every workspace. Enabling it grants no target acc
 | Setting | What to configure |
 | --- | --- |
 | `agentdesklink.browserOrigins` | Exact allowed `http(s)` origins, such as `https://example.com`, without paths or wildcards |
+| `agentdesklink.browserResourceOrigins` | Origins permitted only for GET/HEAD subresources such as CDN assets, separately from navigation grants |
+| `agentdesklink.allowPersonalData` | Reveals personal data such as email and phone numbers. Defaults to off; credentials and protected regions remain protected |
 | `agentdesklink.desktopAppId` / `agentdesklink.desktopAppPath` | The ID and absolute executable path of one allowed app |
 | `agentdesklink.operationMode` | `read_only` (default), `standard` or `ask`, matching Read only, Standard and Ask each time in the panel |
 | `agentdesklink.allowAllOperations` | Legacy all-operations grant. Defaults to off and takes precedence over the tier when enabled. Selecting Allow all in the panel requires confirmation |
@@ -57,10 +59,10 @@ Check “Current permissions” in the panel to see the effective grants. Observ
 ### Permission tiers and one-shot approvals
 
 - **Read only**: observe, navigate and scroll.
-- **Standard**: ordinary browser inputs and clicks; consequential actions such as submission or credential entry are denied.
+- **Standard**: ordinary browser inputs, clicks and GET search forms; consequential actions such as purchase, deletion or credential entry are denied.
 - **Ask each time**: standard actions plus inspected consequential actions approved once in a VS Code dialog. Review the target and contents, then approve or deny. The AI cannot decide the approval. After approval, it retries the same operation.
 
-Approvals cover the browser main document. Escalation is unavailable for native apps, iframe and Shadow DOM controls, generic AJAX/DELETE or file uploads. Changed contents, expiry and emergency stop invalidate approvals. Unavailable approval dialogs do not authorize consequential operations. Secret values are not sent to the dialog.
+Approvals cover inspected controls in the main document, open Shadow DOM and same-origin iframes. Closed shadow roots, out-of-process iframe proofs, native apps, generic AJAX/DELETE and file uploads remain unsupported. Changed contents, expiry and emergency stop invalidate approvals. Unavailable approval dialogs do not authorize consequential operations. Secret values are not sent to the dialog.
 
 An existing `allowAllOperations: true` still takes precedence after updating. To use a permission tier, select Read only, Standard or Ask each time in the panel. Reconnect external clients after changing settings when needed.
 

@@ -1,3 +1,4 @@
+import {browserRuntimeEnv} from './browser-runtime-env.js';
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {mkdtemp,writeFile,rm,readFile,symlink,mkdir} from 'node:fs/promises';
@@ -15,7 +16,7 @@ test('stdio resolves and initializes auditPath relative to its config, and repor
  try{
   await mkdir(join(dir,'settings'));await mkdir(join(dir,'host'));
   const config=join(dir,'settings','policy.json');await writeFile(config,JSON.stringify({auditPath:'../logs/audit.jsonl'}));
-  await client.connect(new StdioClientTransport({command:process.execPath,args:[entry,'--config',config],cwd:join(dir,'host'),stderr:'pipe',env:{CHROME_DEVEL_SANDBOX:process.env.CHROME_DEVEL_SANDBOX??''}}));
+  await client.connect(new StdioClientTransport({command:process.execPath,args:[entry,'--config',config],cwd:join(dir,'host'),stderr:'pipe',env:browserRuntimeEnv()}));
   assert.equal(payload(await client.callTool({name:'adl_targets',arguments:{}})).ok,true);
   assert.equal(await readFile(join(dir,'logs','audit.jsonl'),'utf8'),'');
   await client.close();
@@ -29,7 +30,7 @@ test('stdio resolves and initializes auditPath relative to its config, and repor
  }finally{await client.close();await rm(dir,{recursive:true,force:true});}
 });
 const runClient=async(mode:'legacy'|'modern',config?:string)=>{
- const transport=new StdioClientTransport({command:process.execPath,args:['dist/src/server.js',...(config?['--config',config]:[])],cwd:process.cwd(),stderr:'pipe',env:{CHROME_DEVEL_SANDBOX:process.env.CHROME_DEVEL_SANDBOX??''}});
+ const transport=new StdioClientTransport({command:process.execPath,args:['dist/src/server.js',...(config?['--config',config]:[])],cwd:process.cwd(),stderr:'pipe',env:browserRuntimeEnv()});
  const client=new Client({name:`adl-${mode}-integration`,version:'1.0.0'},{versionNegotiation:{mode:mode==='legacy'?'legacy':{pin:'2026-07-28'}}});
  await client.connect(transport);transport.stderr?.on('data',()=>{});return {client,transport};
 };
@@ -65,4 +66,4 @@ test('stdio browser workflow, deltas, privacy, audit and cross-process ownership
  }finally{await a?.close();await b?.close();await new Promise<void>(r=>http.close(()=>r()));await rm(dir,{recursive:true,force:true});}
 });
 
-test('stdio starts through an absolute symlink or Windows junction entrypoint',async()=>{const dir=await mkdtemp(join(tmpdir(),'adl-entry-'));let client:Client|undefined;try{const entry=join(dir,'entry');await symlink(resolve('dist/src'),entry,process.platform==='win32'?'junction':'dir');client=new Client({name:'adl-symlink-entry',version:'1.0.0'},{versionNegotiation:{mode:'legacy'}});await client.connect(new StdioClientTransport({command:process.execPath,args:[join(entry,'server.js')],cwd:dir,stderr:'pipe',env:{CHROME_DEVEL_SANDBOX:process.env.CHROME_DEVEL_SANDBOX??''}}));const targets=payload(await client.callTool({name:'adl_targets',arguments:{}}));assert.equal(targets.ok,true);assert.deepEqual(targets.targets,[]);}finally{await client?.close();await rm(dir,{recursive:true,force:true})}});
+test('stdio starts through an absolute symlink or Windows junction entrypoint',async()=>{const dir=await mkdtemp(join(tmpdir(),'adl-entry-'));let client:Client|undefined;try{const entry=join(dir,'entry');await symlink(resolve('dist/src'),entry,process.platform==='win32'?'junction':'dir');client=new Client({name:'adl-symlink-entry',version:'1.0.0'},{versionNegotiation:{mode:'legacy'}});await client.connect(new StdioClientTransport({command:process.execPath,args:[join(entry,'server.js')],cwd:dir,stderr:'pipe',env:browserRuntimeEnv()}));const targets=payload(await client.callTool({name:'adl_targets',arguments:{}}));assert.equal(targets.ok,true);assert.deepEqual(targets.targets,[]);}finally{await client?.close();await rm(dir,{recursive:true,force:true})}});

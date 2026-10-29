@@ -13,6 +13,8 @@ export interface Settings {
   browserProxyServer: string;
   operationMode: OperationMode;
   browserOrigins: string[];
+  browserResourceOrigins: string[];
+  allowPersonalData: boolean;
   desktopAppId: string; desktopAppPath: string;
   allowAllOperations: boolean; allowPhysicalInput: boolean; allowUnredactedImages: boolean;
   allowLoopback: boolean; allowPrivateNetwork: boolean;
@@ -30,6 +32,8 @@ export function readSettings(): Settings {
     browserProxyServer: c.get<string>('browserProxyServer', ''),
     operationMode: c.get<OperationMode>('operationMode', 'read_only'),
     browserOrigins: c.get<string[]>('browserOrigins', []),
+    browserResourceOrigins: c.get<string[]>('browserResourceOrigins', []),
+    allowPersonalData: c.get<boolean>('allowPersonalData', false),
     desktopAppId: c.get<string>('desktopAppId', ''),
     desktopAppPath: c.get<string>('desktopAppPath', ''),
     allowAllOperations: c.get<boolean>('allowAllOperations', false),
@@ -43,7 +47,8 @@ export function readSettings(): Settings {
 // Pick only grants: connection and update settings never become permissions.
 function grantInput(s: Settings): ExtensionPermissions {
   return {
-    browserOrigins: s.browserOrigins, desktopAppId: s.desktopAppId, desktopAppPath: s.desktopAppPath,
+    browserOrigins: s.browserOrigins, browserResourceOrigins:s.browserResourceOrigins, allowPersonalData:s.allowPersonalData,
+    desktopAppId: s.desktopAppId, desktopAppPath: s.desktopAppPath,
     allowAllOperations: s.allowAllOperations, operationMode:s.operationMode, allowPhysicalInput: s.allowPhysicalInput,
     allowUnredactedImages: s.allowUnredactedImages, allowLoopback: s.allowLoopback,
     allowPrivateNetwork: s.allowPrivateNetwork,

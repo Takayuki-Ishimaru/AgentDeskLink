@@ -72,7 +72,8 @@ async function writeFixtureFile(root, rel, contents, { executable = false } = {}
   if (executable) await fsp.chmod(target, 0o755);
 }
 
-test('npm pack payload keeps runtime/dist/docs/config/media and excludes internal engineering artifacts', async t => {
+// npm has its own 30s child bound; allow it to settle and run cleanup on slow Windows hosts.
+test('npm pack payload keeps runtime/dist/docs/config/media and excludes internal engineering artifacts', {timeout:35_000}, async t => {
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'adl-release-pack-'));
   t.after(() => fsp.rm(root, { recursive: true, force: true }));
 

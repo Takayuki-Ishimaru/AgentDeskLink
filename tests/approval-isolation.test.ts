@@ -19,7 +19,7 @@ test('approval proof reads real form values and protected ancestors in an isolat
   });
   const action={action:'click' as const,element_id:'retained'};
   const first=await inspectBrowserAction(send,action);
-  assert.equal(first.risk,'consequential');assert.ok(first.details?.some(x=>x.includes('[secret, 13 characters]')));
+  assert.equal(first.risk,'credential');assert.ok(first.details?.some(x=>x.includes('[secret, 13 characters]')));
   assert.ok(!JSON.stringify(first.details).includes('ACTUAL_SECRET'));
   assert.equal((await inspectBrowserAction(apiKey,{action:'fill',element_id:'retained',value:'example'})).risk,'credential');
   await assert.rejects(inspectBrowserAction(privateButton,action));

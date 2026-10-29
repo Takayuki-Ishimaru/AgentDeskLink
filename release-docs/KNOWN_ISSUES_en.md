@@ -2,7 +2,7 @@
 
 [日本語](KNOWN_ISSUES.md) | **English**
 
-Target version: `0.1.5`
+Target version: `0.1.6`
 
 This beta is provided for a limited range of use. It is not guaranteed to work with every application or operating system configuration.
 
@@ -28,7 +28,7 @@ Ubuntu's user-namespace restrictions may require additional sandbox setup for au
 - Background semantic operation does not guarantee complete non-interference, including delayed actions by the application itself.
 - Select `interactive_desktop` mode to use physical input. It uses the same mouse and keyboard as the person, so do not use it while someone is working on the desktop.
 - Desktop swipes are implemented as scrolling; they do not provide real operating system touch points.
-- MCP enablement, target grants, permission tiers, physical input and unredacted images are separate settings. One-shot approval covers inspected controls in the browser main document; native apps, iframe and Shadow DOM controls cannot be escalated. Existing `allowAllOperations: true` takes precedence over the tier. CLI restrictions follow the supplied policy.
+- MCP enablement, target grants, permission tiers, physical input and unredacted images are separate settings. One-shot approval covers inspected controls in the main document, open Shadow DOM and same-origin iframes. Closed shadow roots, out-of-process iframe proofs and native app approvals remain unsupported. Same-origin iframe actions still require reobservation after page updates. Existing `allowAllOperations: true` takes precedence over the tier. CLI restrictions follow the supplied policy.
 - If helper communication is cancelled or interrupted by a timeout, the session may become invalid. Restart the MCP server explicitly and start again from obtaining the target.
 
 - Emergency stop applies to extension-managed servers and cannot undo processing already dispatched to an application. Stop manually launched servers through their MCP host.
@@ -42,9 +42,17 @@ Ubuntu's user-namespace restrictions may require additional sandbox setup for au
 
 See [operation settings and approvals](OPERATIONS.md).
 
+## Browser networking and reading
+
+- `browserOrigins` grants navigation; `browserResourceOrigins` grants only GET/HEAD subresource loading. Resource grants do not permit navigation or form submission. Unapproved fetch POST is blocked even for search.
+- Check `network_blocked` / `warnings`. An action response with `ok: true` acknowledges input and does not guarantee application success. `include_diff: true` returns immediate changes. If only the observation fails, inspect `observation_error`, observe again and avoid repeating the action.
+- Pages whose DOM APIs cannot be verified safely stop with `untrusted_dom_api`. Ordinary Web Components are supported where verification is possible.
+- Bundled Node uses OS-trusted certificates. Destination DNS/IP checks remain local and TLS verification remains enforced through proxies. Hosts resolvable only by the proxy are unsupported.
+- Use `text` in `adl_observe` to read beyond a clipped name. Offsets refer to redacted text. Visibility and protection checks may prevent reading. Observation and image collection have limits; check truncation flags.
+
 ## Images and privacy
 
-Extension browser capture is limited to permitted origins; native capture requires separate permission. For the CLI, allow capture in the policy. Browser masks cover iframes, closed Shadow DOM, explicit protected regions, detected sensitive labels and secret text patterns. Ordinary inputs and checkboxes remain visible. `redacted: true` records masking, not complete secret detection; inspect `redaction.scope` and `redaction.methods` for its scope. Unknown secrets in images or text cannot be detected completely. Information returned over MCP is passed to the AI host, so check which targets you allow to be captured.
+Extension browser capture is limited to permitted origins; native capture requires separate permission. For the CLI, allow capture in the policy. Browser masks cover iframes, closed Shadow DOM, explicit protected regions, detected sensitive labels and secret text patterns. Ordinary inputs and checkboxes remain visible. Personal data such as email and phone numbers is masked by default; `allowPersonalData` explicitly permits revealing it. Credentials and protected regions remain protected. `redacted: true` records masking, not complete secret detection; inspect `redaction.scope` and `redaction.methods` for its scope. Unknown secrets in images or text cannot be detected completely. Information returned over MCP is passed to the AI host, so check which targets you allow to be captured.
 
 Frame sequences can be captured, but audio, encoded video and automatic periodic capture are not supported.
 

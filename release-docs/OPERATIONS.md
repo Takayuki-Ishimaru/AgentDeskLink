@@ -1,6 +1,6 @@
 # 操作設定と承認 / Operation Settings and Approvals
 
-対象バージョン / Target version: `0.1.5`（ベータ版 / beta）
+対象バージョン / Target version: `0.1.6`（ベータ版 / beta）
 
 [インストールとはじめ方](INSTALL.md) | [Installation and first steps](INSTALL_en.md)
 
@@ -9,25 +9,32 @@
 | `agentdesklink.operationMode` | 動作 / Behavior |
 | --- | --- |
 | `read_only`（既定 / default） | 観測・移動・スクロール / Observe, navigate and scroll |
-| `standard` | 通常のブラウザ入力・クリック。重要操作は拒否 / Ordinary browser inputs and clicks; consequential operations denied |
+| `standard` | 通常のブラウザ入力・クリックと GET 検索フォーム。重要操作は拒否 / Ordinary browser inputs, clicks and GET search forms; consequential operations denied |
 | `ask` | 通常操作に加え、検査可能な重要操作を VS Code の確認画面で一度ずつ承認 / Ordinary inputs plus native VS Code approval for inspected consequential operations |
 
 パネルで「すべて許可」を選ぶと VS Code の確認画面が表示されます。既存の `agentdesklink.allowAllOperations: true` は更新後も優先されるため、段階的な権限を利用するときはパネルで読み取り専用・標準・都度承認を選び直してください。どの段階でも origin・アプリの許可と明示保護領域の制限は維持されます。
 Selecting Allow all in the panel requires a VS Code confirmation. An existing `agentdesklink.allowAllOperations: true` still takes precedence after updating; choose Read only, Standard or Ask each time in the panel to switch to a permission tier. Origin/app grants and explicit protected regions remain enforced.
 
-個別承認はブラウザの main document が対象です。対象・入力値・フォーム内容・revision を結び付け、変更・失効・停止後の再利用を拒否します。秘密値は確認画面にも送信しません。AI は承認を決定できません。承認後は同じ操作を再要求します。
-One-shot approvals cover inspected controls in the browser's main document. They bind the target, exact input, form contents and revision. Changes, expiry or stop invalidate them. Secret values are not sent to the dialog. The AI cannot approve its own request; after approval it retries the same operation.
+個別承認は main document、open Shadow DOM、同一 origin の iframe の検査可能な対象に対応します。対象・入力値・フォーム内容を結び付け、変更・失効・停止後の再利用を拒否します。main document では無関係な時計の更新を許容します。同一 origin の iframe ではページ更新後に観測し直してください。認証情報・隠しフォーム値は確認画面へ送りません。AI が指定したメールなどの個人情報は、入力内容を人間が確認できるよう表示される場合があります。AI は承認を決定できません。承認後は同じ操作を再要求します。
+One-shot approvals cover inspected controls in the main document, open Shadow DOM and same-origin iframes. They bind the target, exact input and form contents. Changes, expiry or stop invalidate them. Unrelated clock updates in the main document are tolerated; reobserve after page updates for same-origin iframe actions. Credentials and hidden form values are not sent to the dialog. Personal data supplied by the AI, such as an email address, may appear so the person can review the exact input. The AI cannot approve its own request; after approval it retries the same operation.
 
-native・iframe・Shadow DOM 内への承認による昇格は未対応です。通信の許可は検査済み URL encoded フォーム POST 1 回で、multipart・ファイル・一般的な AJAX/DELETE は対象外です。VS Code に接続できない場合や確認画面自体をネイティブ操作できる設定では、承認を許可しません。
-Approval escalation is unavailable for native apps, iframe and Shadow DOM controls. Network permits cover one inspected URL-encoded form POST, excluding multipart, files and generic AJAX/DELETE. A disconnected broker or a native setup that could control the approval host cannot authorize requests.
+閉じた Shadow DOM、別プロセスの iframe、ネイティブアプリの個別承認は未対応です。通信の許可は検査済み URL encoded フォーム POST 1 回で、multipart・ファイル・一般的な AJAX/DELETE は対象外です。VS Code に接続できない場合や確認画面自体をネイティブ操作できる設定では、承認を許可しません。
+Closed shadow roots, out-of-process iframe proofs and native app approvals remain unsupported. Network permits cover one inspected URL-encoded form POST, excluding multipart, files and generic AJAX/DELETE. A disconnected broker or a native setup that could control the approval host cannot authorize requests.
 
 ## ブラウザ / Browser
 
 | 設定 / Setting | 既定値・内容 / Default and meaning |
 | --- | --- |
+| `agentdesklink.browserOrigins` | 移動を許可する完全な http(s) origin / Exact origins permitted for navigation |
+| `agentdesklink.browserResourceOrigins` | CDN など GET/HEAD のサブリソース専用。移動・送信の許可にはなりません / GET/HEAD subresources only; grants neither navigation nor submission |
+| `agentdesklink.allowLoopback` / `agentdesklink.allowPrivateNetwork` | 既定はオフ。接続先の正確な origin の許可も必要 / Off by default; exact destination origin grants are also required |
+| `agentdesklink.allowPersonalData` | 既定はオフ。個人情報の表示を許可。認証情報と明示保護は維持 / Off by default; reveals personal data while keeping credentials and protected regions protected |
 | `agentdesklink.browserHeadless` | `true`。`false` で可視起動 / Set false for a visible browser |
 | `agentdesklink.sessionIdleMinutes` | `15`。1〜60 分、利用中は延長 / 1–60 minutes, renewed on use |
 | `agentdesklink.browserProxyServer` | 空 / empty。認証・パス・クエリのない http(s) proxy origin / HTTP(S) proxy origin without credentials, path or query |
+
+許可元はパネル上部で設定します。localhost を追加してもループバック許可は自動で有効になりません。表示言語は日英を切り替えられ、初期値は VS Code の言語に従います。可視起動・アイドル期限・プロキシは「詳細設定」にあります。
+Configure grants near the top of the panel. Adding localhost does not enable loopback permission automatically. Switch Japanese/English at the top; the initial language follows VS Code. Visible launch, idle timeout and proxy settings are under Advanced settings.
 
 可視ブラウザの手動ログインは `adl_handoff` の `pause` / `resume` を使用します。`ask` では、同じ origin のサイトスクリプト・フォーム通信を最大 120 秒許す専用確認が必要です。自動操作は停止したまま、再開または期限で通信許可を終了します。再開後は再観測し、新しい revision を使用してください。`standard` / `read_only` はこの通信許可を取得できません。
 For a manual login use `adl_handoff` with `pause` / `resume` in a visible browser. Ask requires separate approval for same-origin website scripts and forms to send requests for up to 120 seconds. Automation stays paused; resume or expiry ends the grant. Observe again and use the new revision after resuming. Standard and read-only modes cannot obtain this grant.
@@ -35,18 +42,41 @@ For a manual login use `adl_handoff` with `pause` / `resume` in a visible browse
 この期間は人間のクリック前にもサイト処理が送信・変更・削除を行えます。再開・失効は新しい通信の送出を止めますが、送出済み処理は取り消せません。
 Website scripts may send, change or delete before a human click during this interval. Resume or expiry prevents new dispatch; requests already dispatched cannot be rolled back.
 
-普段のブラウザとは別のプロファイルを使います。プロキシ利用時も接続先 IP と TLS 証明書を検査します。
-The browser uses a separate profile. Target IP and TLS certificate checks remain enforced through the proxy.
+普段のブラウザとは別のプロファイルを使います。同梱 Node は OS の信頼済み証明書を利用します。プロキシ経由でも接続先のローカル DNS/IP 検査と TLS 検証を行うため、プロキシ側でしか名前解決できないホストは利用できません。
+The browser uses a separate profile. Bundled Node uses OS-trusted certificates. Destination DNS/IP checks remain local and TLS verification stays enforced through proxies; hosts resolvable only by the proxy are unsupported.
 
 ## MCP
 
 - `adl_observe`: `format: "json"`（既定）、`"compact"`（既定値を省略）、`"lines"`（エスケープした行形式）。差分・scope・cursor は全形式で利用できます。Compact and lines declare their omitted defaults; diff, scope and cursor work in every format.
 - `adl_act`: `press` / `back` / `hover`、および `click` の `point: {frame_id,x,y}`。座標は最新画像の取得元 CSS ピクセル、30 秒以内・同じ位置と対象が必要です。Coordinate clicks require the latest retained frame, source CSS pixels, unchanged geometry and a frame age under 30 seconds.
+- `adl_observe` の `text: {element_id, offset, length}`: 省略された長文の続きを取得します。`name_truncated` / `text_length` を確認し、`next_offset` で続きを読みます。位置はマスク済みテキストの UTF-16 単位で、絵文字の途中は指定できません / Reads beyond a clipped name. Use `name_truncated` / `text_length` and continue with `next_offset`. Offsets are UTF-16 positions in redacted text and cannot split an emoji.
+- `adl_act` の `include_diff: true`: 操作直後の差分を返します。差分取得だけが失敗した場合は `observation_error` を確認し、操作を繰り返す前に観測してください / Returns immediate changes. If only observation fails, inspect `observation_error` and observe before repeating the action.
 - `adl_sessions`: 開いているセッション・revision・アイドル期限・停止状態を確認します。Lists sessions, revisions, idle deadlines and pause state.
 - `adl_approvals`: `ask` の要求状態を確認します。承認を決定するツールではありません。Reports Ask request status; it cannot approve a request.
 
-閉じた Shadow DOM は意味的観測の対象外で、画像では iframe とともにマスクします。観測の収集上限は 5,000 件です。通常の入力欄や checkbox は画像で確認できますが、既知の秘密形式と明示保護は隠します。未知の秘密を完全に検出する保証はありません。
-Closed Shadow DOM is not semantically observed and is masked with iframes in images. Collection is capped at 5,000 elements. Ordinary inputs and checkboxes remain visible; known secret patterns and explicit protected regions are masked. Unknown secret detection is not guaranteed.
+閉じた Shadow DOM は意味的観測の対象外で、画像では iframe とともにマスクします。取得には上限があるため省略フラグを確認してください。通常の入力欄や checkbox は画像で確認できますが、既知の秘密形式と明示保護は隠します。未知の秘密を完全に検出する保証はありません。
+Closed Shadow DOM is not semantically observed and is masked with iframes in images. Collection has limits; check truncation flags. Ordinary inputs and checkboxes remain visible; known secret patterns and explicit protected regions are masked. Unknown secret detection is not guaranteed.
+
+長文取得の例 / Long-text example (`adl_observe`):
+
+```json
+{"session_id":"<session_id>","text":{"element_id":"<element_id>","offset":0,"length":4096}}
+```
+
+操作直後の差分 / Immediate action diff (`adl_act`):
+
+```json
+{"session_id":"<session_id>","expected_revision":12,"action":"click","element_id":"<element_id>","include_diff":true}
+```
+
+操作応答や観測の `network_blocked` / `warnings` を確認してください。`ok: true` は入力の受領を示し、サイトの処理完了を保証しません。未承認の fetch POST は検索用途でも遮断します。`expected_target` は対象の追加確認で、鮮度検査や承認を省略しません。
+Check `network_blocked` / `warnings` in action responses and observations. `ok: true` acknowledges input and does not guarantee application success. Unapproved fetch POST remains blocked even for search. `expected_target` adds a target check and does not bypass freshness or approval checks.
+
+遮蔽された対象には `E_NOT_INTERACTABLE` / `occluded` が返る場合があります。障害物を取り除いて観測し直してください。安全に DOM API を検証できないページは `untrusted_dom_api` で停止します。
+An obscured target may return `E_NOT_INTERACTABLE` / `occluded`; remove the obstruction and observe again. Pages whose DOM APIs cannot be verified safely stop with `untrusted_dom_api`.
+
+CLI の読み込み専用許可元は `resourceOrigins`、個人情報の表示許可は `allowPersonalData` です。
+For the CLI, use `resourceOrigins` for resource-loading grants and `allowPersonalData` to reveal personal data.
 
 CLI で `operationMode` を省略すると既存の `controls` 許可を維持します。明示的な `read_only` は操作を拒否します。CLI のランタイム設定は `browserHeadless`、`browserProxyServer`、`sessionTtlMs` です。
 Omitting `operationMode` in a CLI policy preserves legacy control grants; explicit read-only denies mutations. CLI runtime settings are `browserHeadless`, `browserProxyServer` and `sessionTtlMs`.

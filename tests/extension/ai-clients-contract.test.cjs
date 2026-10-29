@@ -108,3 +108,10 @@ test('a concurrent editor changing the file during temporary write wins without 
  try{assert.equal(f.configureClient(c,registration,true).status,'error');assert.equal(fs.readFileSync(c.configPath,'utf8'),'{"concurrent":true}');}
  finally{fs.writeFileSync=write;syncBuiltinESMExports();}
 });
+
+test('Claude config over 2 MiB stays editable up to the 16 MiB bound and keeps JSONC comments',async()=>{
+ const f=await setup();const body='{\n// preserve large config\n\"payload\":\"'+('x'.repeat(3*1024*1024))+'\",\n\"mcpServers\":{}\n}';const c=f.put('claude-code',body);
+ assert.equal(f.configureClient(c,registration,true).status,'enabled');const updated=fs.readFileSync(c.configPath,'utf8');
+ assert.ok(updated.length>2*1024*1024);assert.match(updated,/preserve large config/);assert.match(updated,/agentdesklink/);
+ assert.equal(f.configureClient(c,registration,false).status,'disabled');assert.match(fs.readFileSync(c.configPath,'utf8'),/preserve large config/);
+});

@@ -3,13 +3,13 @@ import ipaddr from 'ipaddr.js';
 import {isIP} from 'node:net';
 import { z } from 'zod';
 import { AdlError, type Action, type ActionName, type Element, type PolicyConfig } from './types.js';
-import {isSensitiveLabel, TEXT_REDACTION_RULES,BROWSER_PRIVACY_RULES} from './privacy.js';
+import {isSensitiveLabel, TEXT_REDACTION_RULES,PERSONAL_DATA_REDACTION_RULES,BROWSER_PRIVACY_RULES} from './privacy.js';
 
 const MAX_BATCH_STEPS = 20;
 const MAX_TEXT = 512;
 const REDACTED = '[redacted]';
 const SUPPORTED_ACTIONS: ActionName[] = ['click', 'fill', 'select', 'check', 'scroll', 'navigate', 'read_state', 'wait_for', 'press', 'back', 'hover'];
-const CONSEQUENTIAL = /(?:delete|remove|upload|send|submit|purchase|checkout|pay|payment|login|log\s*in|sign\s*in|sign\s*up|register|withdraw|transfer)/i;
+const CONSEQUENTIAL = /\b(?:delete|remove(?!\s+filters?\b)|upload|send|submit|purchase|checkout|pay|payment|login|log\s*in|sign\s*in|sign\s*up|register|withdraw|transfer)\b|削除|購入|注文|決済|支払|送信|申込|申し込|登録|解約|振込|送金|確定|ログイン/iu;
 
 const origin = z.string().refine(isExactOrigin, 'allowedOrigins entries must be exact http(s) origins without path, query, fragment or credentials');
 const targetUrl = z.string().refine(isHttpUrl, 'browserTargets url must be a full http(s) URL');
@@ -40,6 +40,8 @@ const policySchema = z.object({
   browserProxyServer:z.string().max(2048).refine(v=>v===''||!/[?#]/.test(v)&&isExactOrigin(v)).default(''),
   operationMode:z.enum(['read_only','standard','ask']).optional(),
   allowedOrigins: z.array(origin).max(64).default([]),
+  resourceOrigins:z.array(origin).max(64).default([]),
+  allowPersonalData:z.boolean().default(false),
   browserTargets: z.array(z.object({
     id: z.string().min(1).max(128),
     label: z.string().min(1).max(200),
@@ -103,6 +105,8 @@ export function parsePolicy(input: unknown): PolicyConfig {
   }
   return {
     ...value,
+    allowedOrigins:[...new Set(value.allowedOrigins.map(o=>new URL(o).origin))],
+    resourceOrigins:[...new Set((value.resourceOrigins??[]).map(o=>new URL(o).origin))],
     browserTargets: value.browserTargets.filter((t) => t.classification === 'PUBLIC' || t.classification === 'INTERNAL'),
   };
 }
@@ -141,7 +145,7 @@ async function defaultResolver(hostname: string): Promise<string[]> {
 
 function deny(): never { throw new AdlError('E_POLICY_DENIED'); }
 
-export async function resolveAllowedAddresses(url: string, policy: PolicyConfig, resolver?: Resolver): Promise<string[]> {
+export async function resolveAllowedAddresses(url: string, policy: PolicyConfig, resolver?: Resolver, purpose:'navigation'|'resource'='navigation'): Promise<string[]> {
   let parsed: URL;
   try { parsed = new URL(url); } catch { deny(); }
   if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') deny();
@@ -149,8 +153,8 @@ export async function resolveAllowedAddresses(url: string, policy: PolicyConfig,
   let hostname = parsed.hostname;
   if (hostname.endsWith('.') && hostname.slice(0, -1) !== '') hostname = hostname.slice(0, -1);
   if (hostname === '') deny();
-  const allowed = new Set(policy.allowedOrigins.map((o) => originKey(new URL(o))));
-  if ((!policy.allowAllOperations||policy.restrictTargets)&&!allowed.has(originKey(parsed))) deny();
+  const allowed = new Set([...policy.allowedOrigins,...(purpose==='resource'?policy.resourceOrigins??[]:[])].map((o) => originKey(new URL(o))));
+  if ((!policy.allowAllOperations||policy.restrictTargets)&&!allowed.has(originKey(parsed))) throw new AdlError('E_POLICY_DENIED','origin_not_allowed');
 
   const literal = normalizeAddress(hostname);
   if (hostname.startsWith('[') && literal === null) deny();
@@ -165,46 +169,66 @@ export async function resolveAllowedAddresses(url: string, policy: PolicyConfig,
         Promise.resolve(active(hostname)).then((found) => (Array.isArray(found) ? found : [])),
         new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new AdlError('E_POLICY_DENIED')), DNS_TIMEOUT_MS); }),
       ]);
-    } catch { deny(); } finally { if (timer !== undefined) clearTimeout(timer); }
+    } catch { throw new AdlError('E_POLICY_DENIED','dns_resolution_failed'); } finally { if (timer !== undefined) clearTimeout(timer); }
   }
   if (resolved.length === 0) deny();
   const addresses: string[] = [];
   for (const raw of resolved) {
     const address = normalizeAddress(raw);
     if (address === null) deny();
-    if (!isAddressAllowed(address, policy)) deny();
+    if (!isAddressAllowed(address, policy)) {
+      const range=ipaddr.parse(address).range();
+      throw new AdlError('E_POLICY_DENIED',range==='loopback'?'loopback_not_allowed':PRIVATE_RANGES.has(range)?'private_network_not_allowed':undefined);
+    }
     addresses.push(address);
   }
   return addresses;
 }
 
-export async function assertUrlAllowed(url: string, policy: PolicyConfig, resolver?: Resolver): Promise<void> {
-  await resolveAllowedAddresses(url, policy, resolver);
+export async function assertUrlAllowed(url: string, policy: PolicyConfig, resolver?: Resolver,purpose:'navigation'|'resource'='navigation'): Promise<void> {
+  await resolveAllowedAddresses(url, policy, resolver,purpose);
 }
 
 const SAFE_ROLES=new Set(['alert','article','blockquote','button','caption','cell','checkbox','code','columnheader','combobox','dialog','figure','generic','grid','gridcell','heading','img','link','list','listbox','listitem','menu','menuitem','navigation','option','paragraph','progressbar','radio','region','row','rowgroup','rowheader','searchbox','slider','spinbutton','status','switch','tab','table','tablist','tabpanel','text','textbox','time','toolbar','tree','treeitem','window']);
 
-export function redactString(text: string): string {
-  let out = typeof text === 'string' ? text.slice(0, MAX_TEXT) : '';
+export function redactText(text:string,allowPersonalData=false):string {
+  let out=typeof text==='string'?text:'';
   for (const [source, replacement] of TEXT_REDACTION_RULES) out = out.replace(new RegExp(source, 'gi'), replacement);
-  return out.slice(0, MAX_TEXT);
+  if(!allowPersonalData)for(const [source,replacement]of PERSONAL_DATA_REDACTION_RULES)out=out.replace(new RegExp(source,'gi'),replacement);
+  return out;
+}
+export function redactString(text:string,allowPersonalData=false):string {
+  // Redact before clipping: a credential crossing the field boundary must not leak a prefix.
+  return redactText(text,allowPersonalData).slice(0,MAX_TEXT);
 }
 
-export function redactElement(element: Element): Omit<Element, 'sensitive'> {
+/** Preserve known public navigation parameters while withholding opaque query payloads. */
+export function redactUrl(value:string,allowPersonalData=false):string {
+  let url:URL;try{url=new URL(value);}catch{return redactString(value,allowPersonalData);}
+  url.hash='';
+  const publicKeys=/^(?:q|query|search|page|limit|offset|sort|order|category|filter|lang|locale)$/i;
+  for(const key of [...url.searchParams.keys()]){
+    const values=url.searchParams.getAll(key);url.searchParams.delete(key);
+    for(const entry of values)url.searchParams.append(key,publicKeys.test(key)?redactText(entry,allowPersonalData):'[redacted]');
+  }
+  return redactString(url.href,allowPersonalData);
+}
+
+export function redactElement(element: Element,allowPersonalData=false): Omit<Element, 'sensitive'> {
   const { sensitive, ...safe } = element;
   safe.role=SAFE_ROLES.has(safe.role)?safe.role:'generic';
   const isText=BROWSER_PRIVACY_RULES.textRoles.some(role=>role===safe.role);
   const secret = sensitive === true || isSensitiveLabel(safe.id) || !isText&&isSensitiveLabel(safe.name);
   if (secret) {
-    if (safe.name) safe.name = REDACTED;
-    if (safe.value !== undefined) safe.value = REDACTED;
+    safe.name = safe.protected||isText?REDACTED:redactString(safe.name,allowPersonalData);
+    if (safe.value !== undefined && safe.value!=='') safe.value = REDACTED;
   } else {
-    safe.name = redactString(safe.name);
-    if (safe.value !== undefined) safe.value = redactString(safe.value);
+    safe.name = redactString(safe.name,allowPersonalData);
+    if (safe.value !== undefined) safe.value = redactString(safe.value,allowPersonalData);
   }
   if (safe.options) safe.options = safe.options.map(option => {
     const hidden=secret||isSensitiveLabel(option.label);
-    return {...option,label:hidden?REDACTED:redactString(option.label),value:hidden?REDACTED:redactString(option.value)};
+    return {...option,label:hidden?REDACTED:redactString(option.label,allowPersonalData),value:hidden&&option.value!==''?REDACTED:redactString(option.value,allowPersonalData)};
   });
   return safe;
 }

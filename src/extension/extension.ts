@@ -99,7 +99,7 @@ class McpProvider {
       return current() ? deny(err instanceof Error ? err.message : String(err)) : [];
     } finally { this.pendingSetups--; }
     if (!current()) return [];
-    const args = [this.serverPath];
+    const args = ['--use-system-ca', this.serverPath];
     const cwd = wsFolders[0]!.uri;
     const command = runtime.nodePath;
     const approvalEnv=this.approvalEnabled()?await (await this.approvalBroker).env(control.epoch):{};
@@ -265,12 +265,12 @@ export function activate(context: vscode.ExtensionContext): void {
     if (!e.affectsConfiguration('agentdesklink')) return;
     if (['autoUpdate', 'checkForUpdates'].some(k => e.affectsConfiguration(`agentdesklink.${k}`))) updater.cancel();
     if (['enabled', 'sessionIdleMinutes', 'browserHeadless', 'browserProxyServer', 'operationMode', 'browserOrigins', 'desktopAppId', 'desktopAppPath', 'allowAllOperations',
-      'allowPhysicalInput',
+      'allowPhysicalInput', 'browserResourceOrigins', 'allowPersonalData',
       'allowUnredactedImages', 'allowLoopback', 'allowPrivateNetwork'].some(k => e.affectsConfiguration(`agentdesklink.${k}`))) {
       void revokePolicy();
     }
     if (!bulkChanging && ['enabled', 'syncClients', 'sessionIdleMinutes', 'browserHeadless', 'browserProxyServer', 'operationMode', 'browserOrigins', 'desktopAppId', 'desktopAppPath', 'allowAllOperations',
-      'allowPhysicalInput', 'allowUnredactedImages', 'allowLoopback', 'allowPrivateNetwork'].some(k => e.affectsConfiguration(`agentdesklink.${k}`))) {
+      'allowPhysicalInput', 'browserResourceOrigins', 'allowPersonalData', 'allowUnredactedImages', 'allowLoopback', 'allowPrivateNetwork'].some(k => e.affectsConfiguration(`agentdesklink.${k}`))) {
       if (readSettings().syncClients) void syncClients();
       else if (clients.owner() === owner) void clients.sync(false);
     }

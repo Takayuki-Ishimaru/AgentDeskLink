@@ -2,7 +2,7 @@
   "name": "agentdesklink",
   "displayName": "AgentDeskLink",
   "description": "Local-first semantic browser and desktop control over MCP, with a per-workspace AgentDeskLink sidebar for VS Code.",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "publisher": "agentdesklink",
   "license": "MIT",
   "private": true,
@@ -198,6 +198,21 @@
           "default": false,
           "scope": "window",
           "description": "プライベートネットワークへのアクセスを許可 / Allow private network access."
+        },
+        "agentdesklink.browserResourceOrigins": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "scope": "window",
+          "description": "信頼できるワークスペース設定: サブリソース読み込みだけを許可する完全な http(s) origin / Trusted per-workspace exact origins for subresource loading only; separate from navigable origins."
+        },
+        "agentdesklink.allowPersonalData": {
+          "type": "boolean",
+          "default": false,
+          "scope": "window",
+          "description": "信頼できるワークスペース設定: メールや電話番号など個人データの表示を許可（既定は拒否）/ Trusted per-workspace permission to reveal personal data such as email or phone numbers (default false)."
         },
         "agentdesklink.syncClients": {
           "type": "boolean",

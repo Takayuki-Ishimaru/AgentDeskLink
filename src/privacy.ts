@@ -8,7 +8,7 @@ export const BROWSER_PRIVACY_RULES = {
 } as const;
 
 // Keep these data-only patterns usable by both Node policy and isolated page probes.
-export const SECRET_LABEL_PATTERN = '(?:^|[^a-z0-9])(?:password|passwd|pwd|passcode|secret|token|api[ _-]*key|access[ _-]*(?:key|token)|refresh[ _-]*token|private[ _-]*key|key|credentials?|authorization|auth|bearer|otp|cvv|cvc|session(?:[ _-]*id)?(?![ _-]*(?:length|duration)\\b)|cookie(?![ _-]*(?:settings|preferences|policy)\\b)|pin|ssn|one[ _-]*time(?:[ _-]*(?:password|code))?|credit[ _-]*card|card[ _-]*number|cc[ _-]*(?:number|csc))(?=$|[^a-z0-9])|パスワード|暗証番号|認証(?:コード|情報|トークン|キー)|ワンタイム(?:パスワード|コード)|秘密鍵|秘密キー|シークレット|アクセストークン|APIキー';
+export const SECRET_LABEL_PATTERN = '(?:^|[^a-z0-9])(?:password|passwd|pwd|passcode|secret|token|api[ _-]*key|access[ _-]*(?:key|token)|refresh[ _-]*token|private[ _-]*key|credentials?|authorization|auth|bearer|otp|cvv|cvc|session[ _-]*(?:id|token|key|cookie)|ssn|one[ _-]*time(?:[ _-]*(?:password|code))?|credit[ _-]*card|card[ _-]*number|cc[ _-]*(?:number|csc))(?=$|[^a-z0-9])|^(?:key|cookie|session|pin)(?:[ _-]*(?:id|value))?$|パスワード|暗証番号|認証(?:コード|情報|トークン|キー)|ワンタイム(?:パスワード|コード)|秘密鍵|秘密キー|シークレット|アクセストークン|APIキー';
 
 export function isSensitiveLabel(...labels: (string | undefined)[]): boolean {
   const pattern = new RegExp(SECRET_LABEL_PATTERN, 'iu');
@@ -23,9 +23,14 @@ export const TEXT_REDACTION_RULES: ReadonlyArray<readonly [string, string]> = [
   ['([?&](?:[a-z0-9]+[_.-])*(?:(?:access|refresh|api|private|client|session)[_-]?)?(?:token|key|secret|password|passwd|pwd|signature|sig|code|auth|session|cookie))=[^&\\s"\'<>]*', '$1=[redacted]'],
   ['\\b((?:[a-z0-9]+[_.-])*(?:(?:access|refresh|api|private|client|session)[_.-]?)?(?:password|passwd|pwd|passcode|secret|token|key|credentials?|authorization|auth|bearer|session|cookie|otp|cvv|pin)(?:[_.-]?(?:id|value))?)(\\s*[=:]\\s*)([^\\s,;&]{2,})', '$1$2[redacted]'],
   ['(?:パスワード|暗証番号|認証コード|秘密鍵|アクセストークン)(\\s*[:：=]\\s*)[^\\s,;&]+', '[redacted]'],
-  ['[a-z0-9._%+-]+@[a-z0-9.-]+\\.[a-z]{2,}', '[redacted]'],
-  ['\\b(?:employee|emp|staff|user|member)[_-]?(?:id|no|number)\\s*[:=]\\s*[^\\s,;&]+', '[redacted]'],
   ['\\b(?:sk|pk|rk|ak|ghp|gho|ghu|ghs|xox[baps])[-_][a-z0-9_-]{12,}\\b', '[redacted]'],
   // JWTs have a recognizable structure; length alone also matches URLs and prose.
   ['\\beyJ[a-z0-9_-]+\\.eyJ[a-z0-9_-]+\\.[a-z0-9_-]+\\b', '[redacted]'],
+];
+
+/** Personal data is independent from credentials and may be revealed by a trusted opt-in. */
+export const PERSONAL_DATA_REDACTION_RULES: ReadonlyArray<readonly [string,string]> = [
+  ['[a-z0-9._%+-]+@[a-z0-9.-]+\\.[a-z]{2,}', '[redacted]'],
+  ['\\b(?:employee|emp|staff|user|member)[ _-]?(?:id|no|number)\\s*[:=]\\s*[^\\s,;&]+', '[redacted]'],
+  ['(?<![a-z0-9])(?:\\+\\d{1,3}[ -]?)?(?:\\(\\d{2,4}\\)|\\d{2,4})[ -]\\d{2,4}[ -]\\d{3,4}(?!\\d)', '[redacted]'],
 ];

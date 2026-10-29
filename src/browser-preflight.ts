@@ -1,6 +1,7 @@
 import type {ElementHandle, Page} from 'playwright';
 import {AdlError, type Action, type ErrorCode,type ErrorReason} from './types.js';
 import {SECRET_LABEL_PATTERN, BROWSER_PRIVACY_RULES} from './privacy.js';
+import type {BrowserIntegrity} from './browser-integrity.js';
 
 export interface PreflightResult {
   target: {role: string; name: string; enabled: boolean};
@@ -17,7 +18,7 @@ interface Probe {
 interface ProbeArgs {
   secretLabelPattern:string; privacyRules:typeof BROWSER_PRIVACY_RULES;
   allowAllOperations?:boolean;selector: string; action: 'click' | 'fill' | 'press' | 'hover';
-  expectRole?: string; expectName?: string; requireHit: boolean; key?:string;
+  expectRole?: string; expectName?: string; requireHit: boolean; key?:string;integrityKey?:string;
 }
 
 function guard(signal: AbortSignal, assertCurrent: () => void): void {
@@ -29,6 +30,7 @@ function guard(signal: AbortSignal, assertCurrent: () => void): void {
 function probe(el: Element, a: ProbeArgs): Probe {
   const deny = (code: ErrorCode,reason?:ErrorReason): Probe => ({ok: false, code,...(reason?{reason}:{})});
   try {
+    if(a.integrityKey&&!(window as unknown as Record<string,BrowserIntegrity>)[a.integrityKey]?.check())return deny('E_PRIVACY_BLOCKED','untrusted_dom_api');
     const CONSEQUENTIAL = /(delete|remove|upload|send|submit|purchase|checkout|pay|payment|login|log in|sign in|sign up|register|withdraw|transfer)/i;
     const sensitiveLabel=(text:string)=>new RegExp(a.secretLabelPattern,'iu').test(text.normalize('NFKC').replace(/([A-Z])([A-Z][a-z])/g,'$1 $2').replace(/([a-z0-9])([A-Z])/g,'$1 $2').replace(/([A-Za-z])([0-9])/g,'$1 $2').replace(/([0-9])([A-Za-z])/g,'$1 $2'));
     if (!el || typeof el !== 'object' || el.isConnected !== true) return deny('E_STALE_STATE');
@@ -108,13 +110,18 @@ function probe(el: Element, a: ProbeArgs): Probe {
       && cx >= 0 && cy >= 0 && cx < win.innerWidth && cy < win.innerHeight;
     let hit = false;
     if (inViewport) {
-      // Only the topmost element at the center counts: an underlying target beneath a foreign overlay is stale.
-      const deep = el.getRootNode() as Document & {elementsFromPoint?: (x: number, y: number) => Element[] | null};
-      let stack: Element[] | null = null;
-      try { stack = typeof deep.elementsFromPoint === 'function' ? deep.elementsFromPoint(cx, cy) : null; } catch { stack = null; }
-      if (!stack || stack.length === 0) { const one = doc.elementFromPoint(cx, cy); stack = one ? [one] : []; }
-      const top = stack[0];
-      hit = !!top && (top === el || el.contains(top));
+      // Every shadow host must itself be the topmost hit in its parent root.
+      // Checking only the inner root misses overlays covering the host.
+      let current:Element=el;
+      for(let depth=0;depth<128;depth++){
+        const root=current.getRootNode() as Document|ShadowRoot;
+        const stack=typeof root.elementsFromPoint==='function'?root.elementsFromPoint(cx,cy):[];
+        const top=stack[0]??root.elementFromPoint(cx,cy);
+        if(!top||!(top===current||current.contains(top))){hit=false;break;}
+        if(root===doc){hit=true;break;}
+        if(!(root instanceof ShadowRoot)||root.mode!=='open'){hit=false;break;}
+        current=root.host;
+      }
     }
     const autocomplete = e.getAttribute('autocomplete') || '';
     if (autocomplete.length > 512) return deny('E_RESOURCE_LIMIT');
@@ -135,10 +142,11 @@ function probe(el: Element, a: ProbeArgs): Probe {
     if (!a.allowAllOperations&&consequential) return deny('E_APPROVAL_REQUIRED','consequential_operation');
     if(!a.allowAllOperations&&a.action==='press'&&a.key==='Enter'&&form)return deny('E_APPROVAL_REQUIRED','consequential_operation');
     if (!a.allowAllOperations&&submitsForm) return deny('E_POLICY_DENIED');
-    if (a.action === 'fill' && (!editable || readonly)) return deny('E_POLICY_DENIED');
+    if (a.action === 'fill' && (!editable || readonly)) return deny('E_NOT_INTERACTABLE','not_editable');
     if (!enabled) return deny('E_STALE_STATE');
     if (!visible || a.requireHit&&!inViewport) return deny('E_STALE_STATE','not_visible');
-    if(a.requireHit&&!hit)return deny('E_STALE_STATE','occluded');
+    if(a.requireHit&&!hit)return deny('E_NOT_INTERACTABLE','occluded');
+    if(a.integrityKey&&!(window as unknown as Record<string,BrowserIntegrity>)[a.integrityKey]?.check())return deny('E_PRIVACY_BLOCKED','untrusted_dom_api');
     return {ok: true, role, name, enabled, unique: true, visible, inViewport, hit};
   } catch { return deny('E_STALE_STATE'); }
 }
@@ -150,7 +158,7 @@ function assertProbe(p: Probe, requireHit = true): void {
 
 export async function preflightBrowserInput(
   page: Page, el: ElementHandle, action: Action, selector: string,
-  signal: AbortSignal, assertCurrent: () => void, allowAllOperations=false,onHover?:()=>void,
+  signal: AbortSignal, assertCurrent: () => void, allowAllOperations=false,onHover?:()=>void,integrityKey?:string,
 ): Promise<PreflightResult> {
   guard(signal, assertCurrent);
   if (!['click','fill','press','hover'].includes(action.action)) throw new AdlError('E_UNSUPPORTED_ACTION');
@@ -158,7 +166,7 @@ export async function preflightBrowserInput(
   const explicit = {...action.expected_target};
   if(allowAllOperations&&explicit.name?.includes('[redacted]'))delete explicit.name;
   if (page.isClosed()) throw new AdlError('E_STALE_STATE');
-  const args = (expectRole?: string, expectName?: string, requireHit = true): ProbeArgs => ({secretLabelPattern:SECRET_LABEL_PATTERN,privacyRules:BROWSER_PRIVACY_RULES,allowAllOperations,selector, action: action.action as 'click' | 'fill' | 'press' | 'hover', expectRole, expectName, requireHit,key:action.value});
+  const args = (expectRole?: string, expectName?: string, requireHit = true): ProbeArgs => ({secretLabelPattern:SECRET_LABEL_PATTERN,privacyRules:BROWSER_PRIVACY_RULES,allowAllOperations,selector, action: action.action as 'click' | 'fill' | 'press' | 'hover', expectRole, expectName, requireHit,key:action.value,integrityKey});
   const runProbe = async (expectRole?: string, expectName?: string, requireHit = true): Promise<Probe> => {
     guard(signal, assertCurrent);
     const p = await el.evaluate(probe as never, args(expectRole, expectName, requireHit)) as unknown as Probe;
@@ -191,7 +199,7 @@ export async function preflightBrowserInput(
     guard(signal, assertCurrent);
     // Focus may redirect: activeElement must be exactly the intended target before any input.
     guard(signal, assertCurrent);
-    const active = await el.evaluate((e) => (e.getRootNode() as Document|ShadowRoot).activeElement === e) as boolean;
+    const active = await el.evaluate((e,key) => {if(key&&!(window as unknown as Record<string,BrowserIntegrity>)[key]?.check())throw new Error('ADL_UNTRUSTED_DOM');return (e.getRootNode() as Document|ShadowRoot).activeElement===e;},integrityKey) as boolean;
     guard(signal, assertCurrent);
     if (!active) throw new AdlError('E_FOCUS_CHANGED');
     assertProbe(await runProbe(anchorRole, anchorName));

@@ -52,13 +52,15 @@ export class SettingsPanelProvider implements vscode.WebviewViewProvider {
     const css = webview.asWebviewUri(vscode.Uri.joinPath(this.extUri, 'media', 'settings.css'));
     const js = webview.asWebviewUri(vscode.Uri.joinPath(this.extUri, 'media', 'settings.js'));
     const brand = webview.asWebviewUri(vscode.Uri.joinPath(this.extUri, 'media', 'brand-mark.png'));
-    return `<!DOCTYPE html><html lang="en"><head>
+    const language = /^ja(?:-|$)/i.test(vscode.env.language) ? 'ja' : 'en';
+    const options: string[] = [];
+    const html = `<!DOCTYPE html><html lang="${language}"><head>
 <meta charset="UTF-8">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource}; script-src 'nonce-${nonce}'; img-src ${webview.cspSource};">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <link rel="stylesheet" href="${css}">
 <title>AgentDeskLink</title></head><body>
-<header class="header-row"><div class="title-group"><img class="brand-mark" src="${brand}" alt="" width="32" height="32"><h2>AgentDeskLink</h2></div><span class="version" id="version"></span></header>
+<header class="header-row"><div class="title-group"><img class="brand-mark" src="${brand}" alt="" width="32" height="32"><h2>AgentDeskLink</h2></div><label class="language-control" for="ui-language"><span data-i18n-ja>表示言語</span><span data-i18n-en>Language</span><select id="ui-language" aria-label="表示言語 / UI language"><option value="ja">日本語</option><option value="en">English</option></select></label><span class="version" id="version"></span></header>
 <p class="hint intro">ブラウザとデスクトップを、必要な範囲で。 / Control your browser and desktop within explicit grants.</p>
 <p class="hint">Node と helper を同梱しています。Chrome を検出し、必要な場合は専用 Chromium を取得します。 / Node and helpers are bundled. Chrome is detected, with dedicated Chromium downloaded when needed.</p>
 <section class="section" aria-labelledby="workspace-title">
@@ -67,12 +69,28 @@ export class SettingsPanelProvider implements vscode.WebviewViewProvider {
   <p class="status" id="stopped-status" role="status" hidden>緊急停止中です。再開するには「操作を再開」を押してください。 / Operations are stopped. Select Resume operations to continue.</p>
   <div class="row"><label class="check"><input type="checkbox" id="enabled"><span>このワークスペースで MCP を有効にする / Enable MCP in this workspace</span></label></div>
   <p class="hint" id="enabled-hint">変更はこのワークスペースに保存されます。 / Changes are saved to this workspace.</p>
+  <h4 class="perm-title">許可する範囲 / Trusted grants</h4>
+  <p class="hint">権限はワークスペース単位です。空の許可リストはアクセスを許可しません。 / Grants apply to this workspace; empty lists allow no access.</p>
+  <div class="row"><label class="check"><input type="checkbox" id="allow-loopback"><span>ループバックを許可 / Allow loopback (localhost)</span></label></div>
+  <div class="row"><label class="check"><input type="checkbox" id="allow-private-network"><span>プライベートネットワークを許可 / Allow private network</span></label></div>
+  <div class="row"><label class="check"><input type="checkbox" id="allow-personal-data"><span>メール・電話番号などの個人データを表示 / Allow revealing email and phone numbers</span></label></div>
+  <h4 class="perm-title">ブラウザ移動を許可する origin / Navigable browser origins</h4>
+  <p class="hint">完全な http(s) origin を追加します。localhost はループバック許可を手動で有効にした場合のみ利用できます。 / Add exact http(s) origins. Localhost requires manually enabling the loopback grant.</p>
+  <ul class="client-list" id="origins-list" aria-label="Navigable browser origins"></ul>
+  <div class="actions"><input id="origin-input" type="text" inputmode="url" placeholder="https://example.com" aria-label="Origin to allow"><button id="origin-add">追加 / Add</button></div>
+  <p class="hint" id="loopback-suggestion" hidden>この origin はループバックです。必要な場合だけ上の許可を手動で有効にしてください。 / This is a loopback origin. Enable the grant above manually only if needed.</p>
+  <h4 class="perm-title">サブリソースを許可する origin / Resource origins</h4>
+  <p class="hint">画像などの読み込み専用です。ブラウザ移動は許可されません。完全な http(s) origin が必要です。 / Allows subresource loading only, not navigation; exact http(s) origins required.</p>
+  <ul class="client-list" id="resource-origins-list" aria-label="Resource origins"></ul>
+  <div class="actions"><input id="resource-origin-input" type="text" inputmode="url" placeholder="https://cdn.example.com" aria-label="Resource origin to allow"><button id="resource-origin-add">追加 / Add</button></div>
+  <p class="error" id="origins-error" role="alert"></p>
   <h4 class="perm-title">現在の実効権限 / Effective permissions</h4>
   <ul class="permissions" id="permissions"></ul>
   <div class="row"><label for="operation-mode">操作の権限段階 / Operation permission tier</label><select id="operation-mode" aria-label="Operation permission tier"><option value="read_only">読み取り専用 / Read only</option><option value="standard">標準 / Standard</option><option value="ask">都度承認 / Ask each time</option><option value="all">すべて許可 / Allow all (legacy)</option></select></div>
   <p class="hint">都度承認はブラウザー操作に適用されます。Allow all はネイティブ確認後に有効になり、従来の広範な許可を維持します。 / Ask applies to browser actions. Allow all requires native confirmation and preserves the legacy broad-operation grant.</p>
   <p class="error" id="operation-mode-error" role="alert"></p>
   <p class="hint" id="permissions-hint"></p>
+  <details class="advanced-settings"><summary>詳細設定 / Advanced settings</summary>
   <div class="row runtime-row"><label for="session-idle-minutes">セッションのアイドル期限 / Session idle timeout</label><input id="session-idle-minutes" type="number" min="1" max="60" step="1" aria-label="分 / Minutes"><span>分 / minutes</span></div>
   <div class="row"><label class="check"><input id="browser-headless" type="checkbox"><span>ヘッドレスで起動 / Run headless</span></label></div>
   <label class="field-label" for="browser-proxy-server">公開プロキシ origin / Public proxy origin</label>
@@ -80,11 +98,7 @@ export class SettingsPanelProvider implements vscode.WebviewViewProvider {
   <p class="hint">操作がないセッションを自動終了します（1〜60 分）。 / Automatically closes idle sessions (1–60 minutes).</p>
   <p class="status" id="session-idle-effective" role="status"></p>
   <p class="error" id="runtime-settings-error" role="alert"></p>
-  <h4 class="perm-title">ブラウザの許可元 / Browser origins</h4>
-  <p class="hint">アクセスを許可する完全な http(s) オリジンを追加します。 / Add exact http(s) origins that may be accessed.</p>
-  <ul class="client-list" id="origins-list" aria-label="ブラウザの許可元 / Browser origins"></ul>
-  <div class="actions"><input id="origin-input" type="text" inputmode="url" placeholder="https://example.com" aria-label="許可する origin / Origin to allow"><button id="origin-add">追加 / Add</button></div>
-  <p class="error" id="origins-error" role="alert"></p>
+  </details>
   <p class="error" id="enabled-error" role="alert"></p>
   <p class="status" id="mcp-status" role="status"></p>
   <p class="error" id="mcp-error" role="alert"></p>
@@ -107,13 +121,17 @@ export class SettingsPanelProvider implements vscode.WebviewViewProvider {
   <p class="status" id="update-status" role="status"></p>
   <div class="actions"><button id="check-now" class="secondary">今すぐ確認 / Check now</button></div>
 </section>
-<p class="hint">更新元は GitHub の公式リポジトリ（<span id="update-source">Takayuki-Ishimaru/AgentDeskLink</span>）に固定されています。設定は不要です。 / Updates use the official GitHub repository; no source configuration is needed.</p>
+<p class="hint"><span data-i18n-ja>更新元は GitHub の公式リポジトリ（<span id="update-source">Takayuki-Ishimaru/AgentDeskLink</span>）に固定されています。設定は不要です。</span><span data-i18n-en>Updates use the official GitHub repository; no source configuration is needed.</span></p>
 <section class="section support">
   <div class="actions"><button id="open-logs" class="secondary">ログを開く / Open logs</button><button id="open-settings" class="secondary">設定を開く / Open Settings</button></div>
   <p class="error" id="global-error" role="alert"></p>
 </section>
 <script nonce="${nonce}" src="${js}"></script>
 </body></html>`;
+    return html
+      .replace(/<option\b[\s\S]*?<\/option>/g, (option) => `__ADL_OPTION_${options.push(option) - 1}__`)
+      .replace(/>([^<>]*?) \/ ([^<>]*?)</g, '><span data-i18n-ja>$1</span><span data-i18n-en>$2</span><')
+      .replace(/__ADL_OPTION_(\d+)__/g, (_match, index: string) => options[Number(index)]!);
   }
 
   private isPlainObject(v: unknown): v is Record<string, unknown> {
@@ -137,6 +155,16 @@ export class SettingsPanelProvider implements vscode.WebviewViewProvider {
       case 'setBrowserOrigins':
         if (Array.isArray(m.origins) && m.origins.every(value => typeof value === 'string')) return this.saveOrigins(m.origins as string[]);
         return Promise.resolve();
+      case 'setBrowserResourceOrigins':
+        if (Array.isArray(m.origins) && m.origins.every(value => typeof value === 'string')) return this.saveGrantSetting('browserResourceOrigins', m.origins as string[]);
+        return Promise.resolve();
+      case 'setAllowLoopback':
+      case 'setAllowPrivateNetwork':
+      case 'setAllowPersonalData': {
+        if (typeof m.enabled !== 'boolean') return Promise.resolve();
+        const key = m.type === 'setAllowLoopback' ? 'allowLoopback' : m.type === 'setAllowPrivateNetwork' ? 'allowPrivateNetwork' : 'allowPersonalData';
+        return this.saveGrantSetting(key, m.enabled);
+      }
       case 'setSessionIdleMinutes':
         if (typeof m.minutes === 'number') return this.saveRuntimeSetting(m.minutes);
         return Promise.resolve();
@@ -187,6 +215,7 @@ export class SettingsPanelProvider implements vscode.WebviewViewProvider {
         const current = readSettings();
         const grants = { browserOrigins: origins, desktopAppId: current.desktopAppId, desktopAppPath: current.desktopAppPath,
           allowAllOperations: current.allowAllOperations, allowPhysicalInput: current.allowPhysicalInput,
+          browserResourceOrigins: current.browserResourceOrigins, allowPersonalData: current.allowPersonalData,
           allowUnredactedImages: current.allowUnredactedImages, allowLoopback: current.allowLoopback, allowPrivateNetwork: current.allowPrivateNetwork };
         const normalized = normalizePermissions(grants).browserOrigins;
         const candidate = normalizePermissions({ ...grants, browserOrigins: normalized });
@@ -202,6 +231,37 @@ export class SettingsPanelProvider implements vscode.WebviewViewProvider {
     });
     this.saves = saved.catch(() => {});
     return saved;
+  }
+
+  private saveGrantSetting(key: 'browserResourceOrigins' | 'allowLoopback' | 'allowPrivateNetwork' | 'allowPersonalData', value: string[] | boolean): Promise<void> {
+    const saved = this.saves.then(async () => {
+      this.errors.originsError = undefined;
+      if (!vscode.workspace.isTrusted || !vscode.workspace.workspaceFolders?.length) {
+        this.errors.originsError = 'Open a trusted workspace to save grants.';
+        await this.postState(); return;
+      }
+      try {
+        const current = readSettings();
+        const candidate = normalizePermissions({
+          browserOrigins: current.browserOrigins,
+          browserResourceOrigins: key === 'browserResourceOrigins' ? value : current.browserResourceOrigins,
+          allowPersonalData: key === 'allowPersonalData' ? value : current.allowPersonalData,
+          desktopAppId: current.desktopAppId, desktopAppPath: current.desktopAppPath, allowAllOperations: current.allowAllOperations,
+          operationMode: current.operationMode, allowPhysicalInput: current.allowPhysicalInput, allowUnredactedImages: current.allowUnredactedImages,
+          allowLoopback: key === 'allowLoopback' ? value : current.allowLoopback,
+          allowPrivateNetwork: key === 'allowPrivateNetwork' ? value : current.allowPrivateNetwork,
+        });
+        if (Buffer.byteLength(JSON.stringify(candidate), 'utf8') > 65_536) throw new Error('permission settings exceed 65536 bytes');
+        this.busy.add('origins'); await this.postState();
+        const persisted = key === 'browserResourceOrigins' ? candidate.browserResourceOrigins : value;
+        await vscode.workspace.getConfiguration('agentdesklink').update(key, persisted, vscode.ConfigurationTarget.Workspace);
+      } catch (error) {
+        this.errors.originsError = `${describePermissionError(error)} / Failed to save ${key}: ${error instanceof Error ? error.message : String(error)}`;
+        log.line(`save failed ${key}: ${String(error)}`);
+      } finally { this.busy.delete('origins'); }
+      await this.postState();
+    });
+    this.saves = saved.catch(() => {}); return saved;
   }
 
   private saveRuntimeSetting(update: number | {browserHeadless:boolean} | {browserProxyServer:string}): Promise<void> {
@@ -327,6 +387,8 @@ export class SettingsPanelProvider implements vscode.WebviewViewProvider {
         autoUpdate: settings.autoUpdate,
         checkForUpdates: settings.checkForUpdates,
         browserOrigins: settings.browserOrigins,
+        browserResourceOrigins: settings.browserResourceOrigins,
+        allowLoopback: settings.allowLoopback, allowPrivateNetwork: settings.allowPrivateNetwork, allowPersonalData: settings.allowPersonalData,
         sessionIdleMinutes: runtime.sessionTtlMs / 60_000,
         browserHeadless: runtime.browserHeadless,
         // Normalize first: credentials or malformed URL components are never sent to the webview.

@@ -52,7 +52,7 @@ test('real browser exposes public controls while masking secrets in frames and c
   assert.equal(crop.metadata.frame_id,full.metadata.frame_id);assert.equal(crop.metadata.captured_at,full.metadata.captured_at);assert.deepEqual(await pixel(crop.png,10,10),[0,0,255]);
   const semantic=await f.engine.observe(f.session.session_id);const button=semantic.elements!.find(e=>e.name==='Repaint')!;
   await f.engine.act(f.session.session_id,{action:'click',element_id:button.id},semantic.revision);
-  const fresh=await f.engine.capture(f.session.session_id,{max_dimension:2048});assert.notEqual(fresh.metadata.frame_id,full.metadata.frame_id);assert.equal(fresh.metadata.revision,full.metadata.revision);assert.deepEqual(await pixel(fresh.png,20,20),[0,255,0]);
+  const fresh=await f.engine.capture(f.session.session_id,{max_dimension:2048});assert.notEqual(fresh.metadata.frame_id,full.metadata.frame_id);assert.ok(fresh.metadata.revision>full.metadata.revision);assert.deepEqual(await pixel(fresh.png,20,20),[0,255,0]);
   const historical=await f.engine.capture(f.session.session_id,{frame_id:full.metadata.frame_id,region:{x:0,y:0,width:40,height:40}});assert.deepEqual(await pixel(historical.png,10,10),[255,0,0]);
  }finally{await f.close();}
 });

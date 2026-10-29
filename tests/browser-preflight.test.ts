@@ -30,7 +30,7 @@ test('browser preflight verifies actual hovered target and intended role/name be
  const f=fixture();const p=await preflightBrowserInput(f.page,f.handle,f.request,'#target',f.signal,()=>{});assert.equal(p.pointer_on_target,true);assert.equal(p.target.name,'Reference');assert.equal(p.target.role,'button');assert.ok(f.state.events.includes('hover'));assert.ok(!f.state.events.includes('focus'));
 });
 test('browser preflight rejects an overlay even when the intended element remains lower in the hit stack',async()=>{
- const f=fixture();f.state.occludedStack=true;await assert.rejects(preflightBrowserInput(f.page,f.handle,f.request,'#target',f.signal,()=>{}),{code:'E_STALE_STATE',reason:'occluded'});assert.equal(f.state.events.length,0);
+ const f=fixture();f.state.occludedStack=true;await assert.rejects(preflightBrowserInput(f.page,f.handle,f.request,'#target',f.signal,()=>{}),{code:'E_NOT_INTERACTABLE',reason:'occluded'});assert.equal(f.state.events.length,0);
 });
 test('browser preflight stops before hover when cancellation arrives during the target probe',async()=>{
  const f=fixture(),abort=new AbortController();f.state.onEvaluate=()=>abort.abort();await assert.rejects(preflightBrowserInput(f.page,f.handle,f.request,'#target',abort.signal,()=>{}),{code:'E_CANCELLED'});assert.equal(f.state.events.length,0);

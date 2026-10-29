@@ -69,7 +69,7 @@ function harness(initial = {}, options = {}) {
     ConfigurationTarget: { Global: 1, Workspace: 2, WorkspaceFolder: 3 },
     McpStdioServerDefinition: class { constructor(label, command, args, env, version) { Object.assign(this, { label, command, args, env, version }); } },
     RelativePattern: class { constructor(base, pattern) { Object.assign(this, { base, pattern }); } },
-    env: { language: 'ja', openExternal: async () => true, clipboard: { writeText: async () => {} } },
+    env: { language: options.language ?? 'ja', openExternal: async () => true, clipboard: { writeText: async () => {} } },
     workspace: {
       isTrusted: options.trusted !== false,
       workspaceFolders: options.empty ? undefined : [{ name: 'Example', uri: uri(temp), index: 0 }],
@@ -143,10 +143,12 @@ test('manifest contributes the sidebar, workspace switch and application update 
   const props = pkg.contributes.configuration.properties;
   assert.equal(props['agentdesklink.enabled'].default, false);
   assert.equal(props['agentdesklink.enabled'].scope, 'window');
-  for(const key of ['allowAllOperations','allowPhysicalInput','allowUnredactedImages','allowLoopback','allowPrivateNetwork']){
+  for(const key of ['allowAllOperations','allowPhysicalInput','allowUnredactedImages','allowLoopback','allowPrivateNetwork','allowPersonalData']){
     assert.equal(props[`agentdesklink.${key}`].default,false);assert.equal(props[`agentdesklink.${key}`].scope,'window');
   }
   assert.deepEqual(props['agentdesklink.browserOrigins'].default,[]);
+  assert.deepEqual(props['agentdesklink.browserResourceOrigins'].default,[]);assert.equal(props['agentdesklink.browserResourceOrigins'].scope,'window');
+  assert.equal(props['agentdesklink.allowPersonalData'].default,false);assert.equal(props['agentdesklink.allowPersonalData'].scope,'window');
   assert.equal(props['agentdesklink.sessionIdleMinutes'].default,15);
   assert.equal(props['agentdesklink.sessionIdleMinutes'].scope,'window');
   assert.equal(props['agentdesklink.sessionIdleMinutes'].minimum,1);assert.equal(props['agentdesklink.sessionIdleMinutes'].maximum,60);
@@ -171,8 +173,8 @@ test('enabled MCP uses bundled Node with default-deny permissions and no legacy 
   const h=harness({enabled:true,nodePath:'/invalid/old/node',configPath:'missing-policy.json'});await h.ready;
   const p=h.providers.get('agentdesklink.mcp'),[definition]=await p.provideMcpServerDefinitions();
   assert.equal(definition.command,path.join(h.extensionRoot,'runtime',process.platform==='win32'?'node.exe':'node'));
-  assert.deepEqual(Array.from(definition.args),[path.join(h.extensionRoot,'dist/src/server.js')]);
-  assert.equal(definition.env.ADL_ALLOW_ALL_OPERATIONS,undefined);assert.deepEqual(JSON.parse(definition.env.ADL_MCP_PERMISSIONS),{browserOrigins:[],desktopAppId:'',desktopAppPath:'',allowAllOperations:false,operationMode:'read_only',allowPhysicalInput:false,allowUnredactedImages:false,allowLoopback:false,allowPrivateNetwork:false});assert.ok(definition.env.ADL_OPERATION_CONTROL);assert.ok(definition.env.ADL_OPERATION_EPOCH);
+  assert.deepEqual(Array.from(definition.args),['--use-system-ca',path.join(h.extensionRoot,'dist/src/server.js')]);
+  assert.equal(definition.env.ADL_ALLOW_ALL_OPERATIONS,undefined);assert.deepEqual(JSON.parse(definition.env.ADL_MCP_PERMISSIONS),{browserOrigins:[],browserResourceOrigins:[],allowPersonalData:false,desktopAppId:'',desktopAppPath:'',allowAllOperations:false,operationMode:'read_only',allowPhysicalInput:false,allowUnredactedImages:false,allowLoopback:false,allowPrivateNetwork:false});assert.ok(definition.env.ADL_OPERATION_CONTROL);assert.ok(definition.env.ADL_OPERATION_EPOCH);
   assert.match(definition.env.ADL_APPROVAL_URL,/^http:\/\/127\.0\.0\.1:\d+$/);assert.match(definition.env.ADL_APPROVAL_TOKEN,/^[A-Za-z0-9_-]{43}$/);assert.equal(definition.env.ADL_APPROVAL_EPOCH,definition.env.ADL_OPERATION_EPOCH);
   let refreshed=0;p.onDidChangeMcpServerDefinitions(()=>refreshed++);
   h.config.enabled=false;h.changes.fire({affectsConfiguration:name=>name.startsWith('agentdesklink')});
@@ -247,8 +249,15 @@ test('panel saves workspace and user scopes, validates messages and provides CSP
   await panel.send({ type: 'checkForUpdates' });
   assert.equal(h.posts.at(-1).busy.checkNow, false);
   const count = h.writes.length;
-  for (const value of [null, [], { type: 'setEnabled', enabled: 'false' }, { type: 'setAutoUpdate', enabled: 1 }, { type: 'unknown' }]) await panel.send(value);
+  for (const value of [null, [], { type: 'setEnabled', enabled: 'false' }, { type: 'setAutoUpdate', enabled: 1 }, { type: 'setAllowLoopback', enabled: 'true' }, { type: 'setBrowserResourceOrigins', origins: [null] }, { type: 'unknown' }]) await panel.send(value);
   assert.equal(h.writes.length, count);
+});
+test('language picker starts from vscode.env.language and keeps the nonce CSP',async()=>{
+  for(const [language,expected] of [['ja-JP','ja'],['en-US','en']]){
+    const h=harness({}, {language}),panel=await h.panel();
+    assert.match(panel.view.webview.html,new RegExp(`<html lang=\"${expected}\">`));
+    assert.match(panel.view.webview.html,/id=\"ui-language\"/);assert.match(panel.view.webview.html,/data-i18n-ja/);assert.match(panel.view.webview.html,/data-i18n-en/);assert.ok([...panel.view.webview.html.matchAll(/<option[^>]*>(.*?)<\/option>/gs)].every(([,body])=>!body.includes('<span')));assert.match(panel.view.webview.html,/script-src 'nonce-[^']+'/);
+  }
 });
 test('panel saves normalized browser origins through workspace permission validation', async () => {
   const h=harness({browserOrigins:[]}),panel=await h.panel();
@@ -260,6 +269,24 @@ test('panel saves normalized browser origins through workspace permission valida
   await panel.send({type:'setBrowserOrigins',origins:['https://example.com/path']});
   assert.equal(h.writes.length,count,'invalid origin is rejected before persistence');
   assert.match(h.posts.at(-1).status.originsError,/browserOrigins|Browser origins/);
+});
+test('panel saves exact resource origins and trusted boolean grants with default-deny env transport', async () => {
+  const h=harness({enabled:true,browserOrigins:[],browserResourceOrigins:[],allowLoopback:false,allowPrivateNetwork:false,allowPersonalData:false}),panel=await h.panel();
+  await panel.send({type:'setBrowserResourceOrigins',origins:['https://CDN.example/','https://cdn.example']});
+  assert.deepEqual(Array.from(h.writes.find(x=>x.key==='browserResourceOrigins').value),['https://cdn.example']);
+  const writes=h.writes.length;
+  await panel.send({type:'setBrowserResourceOrigins',origins:['https://cdn.example/path']});
+  assert.equal(h.writes.length,writes,'paths are rejected before persistence');
+  await panel.send({type:'setAllowLoopback',enabled:true});
+  await panel.send({type:'setAllowPrivateNetwork',enabled:true});
+  await panel.send({type:'setAllowPersonalData',enabled:true});
+  assert.ok(h.writes.some(x=>x.key==='allowLoopback'&&x.value===true&&x.target===2));
+  assert.ok(h.writes.some(x=>x.key==='allowPrivateNetwork'&&x.value===true&&x.target===2));
+  assert.ok(h.writes.some(x=>x.key==='allowPersonalData'&&x.value===true&&x.target===2));
+  const [definition]=await h.providers.get('agentdesklink.mcp').provideMcpServerDefinitions();
+  const permissions=JSON.parse(definition.env.ADL_MCP_PERMISSIONS);
+  assert.deepEqual(permissions.browserResourceOrigins,['https://cdn.example']);
+  assert.equal(permissions.allowLoopback,true);assert.equal(permissions.allowPrivateNetwork,true);assert.equal(permissions.allowPersonalData,true);
 });
 test('panel saves the bounded session idle timeout as a workspace runtime setting', async () => {
   const h=harness({sessionIdleMinutes:15}),panel=await h.panel();

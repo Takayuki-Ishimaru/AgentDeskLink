@@ -58,7 +58,7 @@ test('read-only browser follows only vetted same-origin redirects and loads comp
     assert.equal(observed.url,`${origin}/folder/page`);
     assert.equal(relativeHits,1);
     assert.equal(outsideHits,0);
-    assert.ok(observed.warnings?.some(w=>w.code==='origin_denied'&&w.count>=1));
+    assert.ok(observed.warnings?.some(w=>w.code==='redirect_origin_not_allowed'&&w.count>=1));
     assert.ok(!JSON.stringify(observed).includes('DO_NOT_EXPOSE'));
     const link=observed.elements!.find(e=>e.name==='Next')!;
     await engine.act(session.session_id,{action:'click',element_id:link.id},observed.revision);

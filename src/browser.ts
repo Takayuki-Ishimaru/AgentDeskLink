@@ -1,13 +1,15 @@
 import * as crypto from 'node:crypto';
-import {chromium, type Browser, type BrowserContext, type JSHandle, type Frame, type Page, type Route,type Request} from 'playwright';
-import {resolveAllowedAddresses,redactString} from './policy.js';
-import {pinnedFetch,redirectStylesheet, MAX_BODY, HOP_RE} from './browser-network.js';
+import {chromium, type Browser, type BrowserContext, type JSHandle, type ElementHandle, type Frame, type Page, type Route,type Request} from 'playwright';
+import {resolveAllowedAddresses,redactString,redactText,redactUrl} from './policy.js';
+import {pinnedFetch,redirectStylesheet,PinnedConnectionPool, MAX_BODY, HOP_RE} from './browser-network.js';
+import {BrowserResourceCache} from './browser-cache.js';
 import {captureBrowserImage} from './browser-visual.js';
 import {runBrowserGesture,captureGestureGeometry,type GestureGeometry} from './browser-gesture.js';
 import {preflightBrowserInput} from './browser-preflight.js';
 import type {ActionAuthorization} from './types.js';
 import {ensurePointSelector,pointSelector} from './browser-point.js';
-import {inspectBrowserAction} from './browser-approval.js';
+import {inspectBrowserAction,isolatedCollect} from './browser-approval.js';
+import {installBrowserIntegrity,registerBrowserPrototypes,type BrowserIntegrity} from './browser-integrity.js';
 import {SECRET_LABEL_PATTERN, BROWSER_PRIVACY_RULES} from './privacy.js';
 import {ensureBrowserPrivacySelectors} from './browser-privacy.js';
 import type {GesturePolicy,GesturePlan,GestureReference,GestureExecution} from './gesture-types.js';
@@ -18,13 +20,16 @@ function deny(): never {
   throw new AdlError('E_POLICY_DENIED');
 }
 
-type Store = {ids: WeakMap<object, string>; nodes: Map<string, object>; seq: number; prefix: string; seen: Set<string>};
+type Store = {ids: WeakMap<object, string>; nodes: Map<string, object>; seq: number; prefix: string; seen: Set<string>;integrity:BrowserIntegrity};
+
+type PageSnapshot = {elements:ElementInfo[];sig:string;truncated:boolean;navigation:string;actionStates:Record<string,{target:string;form?:string}>;forms:Record<string,string>};
 
 // Runs inside the page against the private store kept in the JSHandle
 // closure (WeakMap/Map not on window, unreachable from page scripts).
 // Bounded TreeWalker traversal: visit cap, depth cap, output cap; only
 // bounded text nodes are read (never textContent on huge subtrees).
-function snapshotPageFn(store: Store, cfg: {maxOut: number; visitCap: number; maxDepth: number; fieldMax: number; secretLabelPattern:string; privacyRules:typeof BROWSER_PRIVACY_RULES}): {elements: ElementInfo[]; sig: string; truncated: boolean} {
+function snapshotPageFn(store: Store, cfg: {maxOut: number; visitCap: number; maxDepth: number; fieldMax: number; secretLabelPattern:string; privacyRules:typeof BROWSER_PRIVACY_RULES}): PageSnapshot {
+  if(!store.integrity.check())throw new Error('ADL_UNTRUSTED_DOM');
   const clip = (s: string): string => s.length > cfg.fieldMax ? s.slice(0, cfg.fieldMax) : s;
   const idFor = (n: object): string => {
     let id = store.ids.get(n);
@@ -43,6 +48,12 @@ function snapshotPageFn(store: Store, cfg: {maxOut: number; visitCap: number; ma
     }
     return t.trim();
   };
+  const directTextInfo=(el:Element):{truncated:boolean;length?:number}=>{
+    let full='',visits=0,c:ChildNode|null=el.firstChild;
+    for(;c&&visits++<64;c=c.nextSibling){if(c.nodeType===3&&c.nodeValue){if(full.length+c.nodeValue.length>1048576)return {truncated:true};full+=c.nodeValue;}}
+    if(c)return {truncated:true};
+    const length=full.trim().length;return {truncated:length>cfg.fieldMax,length};
+  };
   const visible = (el: HTMLElement): boolean => {
     try {
       return el.checkVisibility({opacityProperty: false, visibilityProperty: true});
@@ -60,32 +71,68 @@ function snapshotPageFn(store: Store, cfg: {maxOut: number; visitCap: number; ma
     }
     return node!==null; // Incomplete ancestry cannot establish a public region.
   };
+  let descendantClipped=false;
   const descendantText=(el:Element,includeHidden=false,failClosed=true):string=>{
+    descendantClipped=false;
     if(inSensitiveRegion(el))return "x".repeat(cfg.fieldMax);
     let scanned=0, exhausted=false;
     const walker=document.createTreeWalker(el,NodeFilter.SHOW_ELEMENT|NodeFilter.SHOW_TEXT,{acceptNode:node=>{if(++scanned>128){exhausted=true;return NodeFilter.FILTER_ACCEPT;}return node.nodeType===1&&(node as Element).matches(cfg.privacyRules.textSkipSelector+","+cfg.privacyRules.regionSelector)?NodeFilter.FILTER_REJECT:NodeFilter.FILTER_ACCEPT;}});
     let node:Node|null=walker.nextNode(),text='',visits=0;
     while(node&&!exhausted&&visits++<128&&text.length<cfg.fieldMax){
-      if(node.nodeType===3&&!node.parentElement?.closest('script,style')&&(includeHidden||!node.parentElement?.closest('[hidden],[aria-hidden="true"]')))text+=node.textContent?.slice(0,cfg.fieldMax-text.length)??'';
+      if(node.nodeType===3&&!node.parentElement?.closest('script,style')&&(includeHidden||!node.parentElement?.closest('[hidden],[aria-hidden="true"]'))){const value=node.textContent??'';if(value.length>cfg.fieldMax-text.length)descendantClipped=true;text+=value.slice(0,cfg.fieldMax-text.length);}
       node=walker.nextNode();
     }
+    descendantClipped ||= !!node||exhausted;
     // An incomplete naming hint cannot establish that a field is public.
     return node&&failClosed?'x'.repeat(cfg.fieldMax):text.trim();
   };
+  let referencedClipped=false;
   const referencedName=(el:Element):string=>{
+    referencedClipped=false;
     const refs=el.getAttribute('aria-labelledby');if(!refs)return '';
     if(refs.length>4096)throw new Error('Snapshot field limit');
     const ids=refs.trim().split(/\s+/);if(ids.length>16)return 'x'.repeat(cfg.fieldMax);
-    return ids.map(id=>{const label=(el.getRootNode() as Document|ShadowRoot).getElementById(id);return label?descendantText(label,true):'';}).join(' ').slice(0,cfg.fieldMax).trim();
+    const text=ids.map(id=>{const label=(el.getRootNode() as Document|ShadowRoot).getElementById(id);if(!label)return '';const value=descendantText(label,true);referencedClipped ||= descendantClipped;return value;}).join(' ');
+    referencedClipped ||= text.length>cfg.fieldMax;return text.slice(0,cfg.fieldMax).trim();
   };
   const CONSEQUENTIAL_RE = /(delete|remove|upload|send|submit|purchase|checkout|pay|payment|login|log in|sign in|sign up|register|withdraw|transfer)/i;
   const INTERACTIVE = new Set(['a', 'button', 'input', 'select', 'textarea']);
   const elements: ElementInfo[] = [];
   const sigParts: string[] = [];
+  // These complete strings are hashed in Node, never included in public elements.
+  // Missing/over-budget evidence disables relaxed freshness for that target.
+  const actionStates:PageSnapshot['actionStates']=Object.create(null),forms:Record<string,string>=Object.create(null);
+  const formCache=new Map<HTMLFormElement,string|null>();let evidenceBytes=0;
+  const accountEvidence=(length:number)=>{if(evidenceBytes+length>4194304)throw new Error('evidence limit');evidenceBytes+=length;};
+  const fullAttrs=(element:Element)=>{
+    // Pure inline geometry is guarded by the existing input/point preflight.
+    // Keeping it out preserves the semantic revision contract for layout drift.
+    const attrs=Array.from(element.attributes).filter(a=>a.name!=='style').map(a=>[a.name,a.value]).sort((a,b)=>a[0]!.localeCompare(b[0]!));
+    const length=JSON.stringify(attrs).length;if(attrs.length>128||length>16384)throw new Error('evidence limit');accountEvidence(length);
+    return attrs;
+  };
+  const retainedId=(element:Element)=>{const id=idFor(element);store.seen.add(id);return id;};
+  const formEvidence=(form:HTMLFormElement):string=>{
+    if(formCache.has(form)){const cached=formCache.get(form);if(!cached)throw new Error('evidence unavailable');return cached;}
+    formCache.set(form,null);
+    if(form.elements.length>128)throw new Error('evidence limit');
+    const controls=Array.from(form.elements,item=>{
+      const field=item as HTMLInputElement,value=store.integrity.value(item);if(value.length>4096)throw new Error('evidence limit');accountEvidence(value.length);
+      if(item instanceof HTMLSelectElement&&item.options.length>128)throw new Error('evidence limit');
+      const options=item instanceof HTMLSelectElement?Array.from(item.options,option=>{
+        if(option.value.length>4096||option.text.length>4096)throw new Error('evidence limit');accountEvidence(option.value.length+option.text.length);
+        return [retainedId(option),fullAttrs(option),option.value,option.text,option.disabled,option.selected];
+      }):undefined;
+      return [retainedId(item),item.tagName,fullAttrs(item),value,store.integrity.checked(item),Boolean(field.disabled),options];
+    });
+    const id=retainedId(form),serialized=JSON.stringify([id,fullAttrs(form),form.action,form.method,form.enctype,form.target,controls]);
+    if(serialized.length>1048576)throw new Error('evidence limit');accountEvidence(serialized.length);
+    forms[id]=serialized;formCache.set(form,id);return id;
+  };
   let visited = 0;
   let truncated = false;
   const root = document.body || document.documentElement;
-  const pending:{node:HTMLElement;depth:number}[]=[{node:root,depth:0}];
+  const pending:{node:HTMLElement;depth:number;group?:string}[]=[{node:root,depth:0}];
   let cur:HTMLElement;
   let depth = 0;
   while (pending.length) {
@@ -101,7 +148,9 @@ function snapshotPageFn(store: Store, cfg: {maxOut: number; visitCap: number; ma
     const isStatus = roleAttr === 'status' || roleAttr === 'alert' || cur.hasAttribute('aria-live');
     const clickable=cur.hasAttribute('onclick')||cur.tabIndex>=0&&getComputedStyle(cur).cursor==='pointer';
     const isText=/^(div|p|span|legend|h[1-6]|td|th|li|dt|dd|blockquote|code|pre|time|caption|figcaption|summary|strong|em|b|i|small|mark|q|samp|kbd|cite|abbr|address|article|section|main|header|footer|aside|output)$/.test(tag)&&!!directText(cur);
-    const interesting = (isInteractive || clickable || isStatus || roleAttr || isText || tag==='img'&&cur.hasAttribute('alt')) && visible(cur);
+    const structural=['table','tr','ul','ol','li'].includes(tag);
+    const interesting = (isInteractive || clickable || isStatus || roleAttr || isText || structural || tag==='td' || tag==='th' || tag==='img'&&cur.hasAttribute('alt')) && visible(cur);
+    let childGroup=item.group;
     if (interesting) {
       if (elements.length >= cfg.maxOut) {
         truncated = true;
@@ -109,7 +158,12 @@ function snapshotPageFn(store: Store, cfg: {maxOut: number; visitCap: number; ma
       }
       let role = roleAttr || '';
       if (!role) {
-        if (tag === 'button') role = 'button';
+        if (tag === 'table') role='table';
+        else if(tag==='tr')role='row';
+        else if(tag==='ul'||tag==='ol')role='list';
+        else if(tag==='li')role='listitem';
+        else if(tag==='td')role='cell';
+        else if (tag === 'button') role = 'button';
         else if (tag === 'a') role = 'link';
         else if (tag === 'select') role = 'combobox';
         else if (tag === 'textarea') role = 'textbox';
@@ -120,20 +174,28 @@ function snapshotPageFn(store: Store, cfg: {maxOut: number; visitCap: number; ma
       const form = cur.closest('form');
       const labelEl = (tag === 'input' || tag === 'textarea' || tag === 'select') ? (cur as HTMLInputElement).labels?.[0] : undefined;
       const ownText = directText(cur);
-      const labelText=labelEl?descendantText(labelEl):'';
-      const referenceText=referencedName(cur);
-      const rawName=referenceText || cur.getAttribute('aria-label') || labelText || (isText&&!isInteractive&&!clickable&&!roleAttr ? ownText : descendantText(cur,false,!bodyText)) || cur.getAttribute('alt') || cur.getAttribute('placeholder') || cur.getAttribute('title') || cur.id || '';
+      const labelText=labelEl?descendantText(labelEl):'',labelClipped=!!labelEl&&descendantClipped;
+      const referenceText=referencedName(cur),referenceClipped=referencedClipped;
+      const useOwn=isText&&!isInteractive&&!clickable&&!roleAttr;
+      const descendant=useOwn?'':descendantText(cur,false,!bodyText),descendantWasClipped=descendantClipped;
+      const rawName=referenceText || cur.getAttribute('aria-label') || labelText || (useOwn ? ownText : descendant) || cur.getAttribute('alt') || cur.getAttribute('placeholder') || cur.getAttribute('title') || cur.id || '';
+      const derived=!(referenceText||cur.getAttribute('aria-label')||labelText);
+      const ownInfo=useOwn?directTextInfo(cur):undefined;
+      const nameTruncated=(referenceText?referenceClipped:cur.getAttribute('aria-label')?false:labelText?labelClipped:useOwn?ownInfo!.truncated:descendantWasClipped)||rawName.length>cfg.fieldMax;
+      const textLength=derived&&useOwn&&!cur.firstElementChild?ownInfo?.length:undefined;
       if(rawName.length>4096)throw new Error('Snapshot field limit');
       const name = clip(rawName);
-      if(bodyText&&rawName.length>=cfg.fieldMax)truncated=true;
+      if(nameTruncated)truncated=true;
       const isPassword = tag === 'input' && type === 'password';
       const rawNameAttr = cur.getAttribute('name') || '';
       if(rawNameAttr.length>512)throw new Error('Snapshot field limit');
       const hints=[...(bodyText?[]:[rawName]),labelText,...(labelEl?[descendantText(labelEl,true)]:[]),referenceText,cur.getAttribute('aria-label')||'',cur.getAttribute('placeholder')||'',cur.getAttribute('title')||'',cur.getAttribute('autocomplete')||'',cur.id,rawNameAttr];
       if(hints.some(hint=>hint.length>4096))throw new Error('Snapshot field limit');
-      let sensitive = isPassword || inSensitiveRegion(cur) || hints.some(hint=>hint.length>=cfg.fieldMax||sensitiveLabel(hint));
+      const credentialField=['input','textarea','select'].includes(tag)||role==='textbox'||role==='searchbox';
+      const semanticHints=[referenceText,cur.getAttribute('aria-label')||'',cur.getAttribute('title')||'',cur.getAttribute('autocomplete')||'',...([cur.id,rawNameAttr].filter(hint=>!/^(?:cookie|key|pin|session)$/i.test(hint)))];
+      let sensitive = isPassword || inSensitiveRegion(cur) || (credentialField?hints:semanticHints).some(hint=>hint.length>=cfg.fieldMax||sensitiveLabel(hint));
       let rawVal = '';
-      if (tag === 'input' || tag === 'textarea') rawVal = (cur as HTMLInputElement).value ?? '';
+      if (tag === 'input' || tag === 'textarea') rawVal = store.integrity.value(cur);
       else if (tag === 'select') {
         const sel = cur as HTMLSelectElement;
         rawVal = sel.options[sel.selectedIndex]?.value ?? '';
@@ -142,7 +204,7 @@ function snapshotPageFn(store: Store, cfg: {maxOut: number; visitCap: number; ma
       if(rawVal.length>4096)throw new Error('Snapshot field limit');
       const value = isPassword ? undefined : clip(rawVal);
       const enabled = !(cur as HTMLButtonElement).disabled && !cur.closest('fieldset:disabled') && cur.getAttribute('aria-disabled')!=='true';
-      const checked = tag === 'input' && (type === 'checkbox' || type === 'radio') ? (cur as HTMLInputElement).checked : undefined;
+      const checked = tag === 'input' && (type === 'checkbox' || type === 'radio') ? store.integrity.checked(cur) : undefined;
       const selected = cur.hasAttribute('aria-selected')?cur.getAttribute('aria-selected')==='true':tag === 'select' ? (cur as HTMLSelectElement).selectedIndex >= 0 : undefined;
       const expanded=cur.hasAttribute('aria-expanded')?cur.getAttribute('aria-expanded')==='true':undefined;
       let options:ElementInfo['options'];
@@ -166,26 +228,49 @@ function snapshotPageFn(store: Store, cfg: {maxOut: number; visitCap: number; ma
       if(href.length>2048||actionAttr.length>2048)throw new Error('Snapshot field limit');
       const id = idFor(cur);
       store.seen.add(id);
-      sigParts.push(JSON.stringify([id, role, rawName, enabled, checked, selected, expanded, type, consequential, href, actionAttr, rawVal,ownText,sensitive,options,optionsTruncated,depth]));
-      elements.push({id, role, name, depth, ...(options?{options,...(optionsTruncated?{options_truncated:true}:{})}:{}), ...(value !== undefined ? {value} : {}), enabled, ...(checked !== undefined ? {checked} : {}), ...(selected !== undefined ? {selected} : {}), ...(expanded!==undefined?{expanded}:{}),...(inSensitiveRegion(cur)?{protected:true}:{}), ...(sensitive ? {sensitive: true} : {})});
+      if(structural)childGroup=id;
+      const signature=JSON.stringify([id, role, rawName, enabled, checked, selected, expanded, type, consequential, href, actionAttr, rawVal,ownText,sensitive,options,optionsTruncated,depth]);
+      sigParts.push(signature);
+      try{
+        if(optionsTruncated)throw new Error('evidence limit');
+        // Child frames deliberately retain strict revision checks. Their stores
+        // are collected separately and not merged into the main action map.
+        const owningForm=((cur as HTMLInputElement).form??cur.closest('form')) as HTMLFormElement|null;
+        const formId=owningForm?formEvidence(owningForm):undefined;
+        const target=JSON.stringify([signature,fullAttrs(cur),tag==='a'?(cur as HTMLAnchorElement).href:null,
+          (cur as HTMLInputElement).formAction??null,(cur as HTMLInputElement).formMethod??null,
+          (cur as HTMLInputElement).formEnctype??null,(cur as HTMLInputElement).formTarget??null]);
+        accountEvidence(target.length);actionStates[id]={target,...(formId?{form:formId}:{})};
+      }catch{/* Observation remains available; incomplete evidence never authorizes freshness fallback. */}
+      elements.push({id, role, name, depth,...(item.group?{parent_id:item.group}:{}),...(nameTruncated&&!inSensitiveRegion(cur)?{name_truncated:true}:{}),...(textLength!==undefined&&!inSensitiveRegion(cur)?{text_length:textLength}:{}), ...(options?{options,...(optionsTruncated?{options_truncated:true}:{})}:{}), ...(value !== undefined ? {value} : {}), enabled, ...(checked !== undefined ? {checked} : {}), ...(selected !== undefined ? {selected} : {}), ...(expanded!==undefined?{expanded}:{}),...(inSensitiveRegion(cur)?{protected:true}:{}), ...(sensitive ? {sensitive: true} : {})});
     }
     if(!skipChildren){
       const children=Array.from(cur.children) as HTMLElement[];
       if(cur.shadowRoot)children.push(...Array.from(cur.shadowRoot.children) as HTMLElement[]);
-      for(let i=children.length-1;i>=0;i--)pending.push({node:children[i]!,depth:depth+1});
+      for(let i=children.length-1;i>=0;i--)pending.push({node:children[i]!,depth:depth+1,group:childGroup});
     }
   }
-  return {elements, sig: JSON.stringify(sigParts), truncated};
+  if(!store.integrity.check())throw new Error('ADL_UNTRUSTED_DOM');
+  return {elements,sig:JSON.stringify(sigParts),truncated,navigation:JSON.stringify([store.prefix,location.href,document.baseURI]),actionStates,forms};
 }
 
-const STORE_INIT = () => ({ids: new WeakMap<object, string>(), nodes: new Map<string, object>(), seq: 0, prefix: '', seen: new Set<string>()});
+const STORE_INIT = (key:string) => {
+  const integrity=(window as unknown as Record<string,BrowserIntegrity>)[key];
+  if(!integrity||!integrity.check())throw new Error('ADL_UNTRUSTED_DOM');
+  return {ids:new WeakMap<object,string>(),nodes:new Map<string,object>(),seq:0,prefix:'',seen:new Set<string>(),integrity};
+};
 
 class BrowserSession implements AdapterSession {
   readonly tracksDispatch=true;
   private readonly frameStores=new Map<Frame,JSHandle<Store>>();
   private frameSeq=0;
-  private readonly networkBlocks=new Map<string,number>();
-  recordNetworkBlock(code:'origin_denied'|'request_denied'|'response_blocked'|'network_error'){this.networkBlocks.set(code,Math.min((this.networkBlocks.get(code)??0)+1,999999));}
+  private readonly networkBlocks=new Map<string,{code:string;count:number;origin?:string}>();
+  recordNetworkBlock(code:string,origin?:string){
+    if(origin){try{origin=new URL(origin).origin;}catch{origin=undefined;}}
+    const key=code+'|'+(origin??'');const old=this.networkBlocks.get(key);
+    if(old){old.count=Math.min(old.count+1,999999);return;}
+    if(this.networkBlocks.size<8)this.networkBlocks.set(key,{code,count:1,...(origin?{origin}:{})});
+  }
   pendingDocumentRedirect:string|undefined;
   documentRedirects=0;
   stylesheetRedirects=0;
@@ -223,6 +308,8 @@ class BrowserSession implements AdapterSession {
   openAbortCleanup: (() => void) | undefined;
   prefix = crypto.randomBytes(9).toString('base64url');
   readonly controller = new AbortController();
+  readonly transportPool=new PinnedConnectionPool();
+  readonly resourceCache=new BrowserResourceCache();
 
   constructor(
     private readonly owner: BrowserAdapter,
@@ -232,6 +319,8 @@ class BrowserSession implements AdapterSession {
     private readonly controls: {selector: string; actions: string[]}[],
     private readonly visual?:VisualPolicy,
     private readonly gestures?:GesturePolicy,
+    private readonly integrityKey='',
+    private readonly registrationSecret='',
   ) {}
 
   get origin():string {return this.policy.allowAllOperations&&this.pageValue?new URL(this.pageValue.url()).origin:this.initialOrigin;}
@@ -256,7 +345,7 @@ class BrowserSession implements AdapterSession {
   private async freshStore(): Promise<JSHandle<Store>> {
     if (!this.pageValue) throw new AdlError('E_TARGET_NOT_FOUND');
     this.prefix=crypto.randomBytes(9).toString('base64url');
-    const handle = await this.pageValue.evaluateHandle(STORE_INIT);
+    const handle=await this.initializeStore(this.pageValue);
     await handle.evaluate((s: Store, prefix: string) => {
       s.prefix = prefix;
     }, this.prefix);
@@ -265,6 +354,37 @@ class BrowserSession implements AdapterSession {
 
   private checkAlive(): void {
     if (this.closed) throw new AdlError('E_TARGET_NOT_FOUND');
+  }
+  private async registerPrototypes(signal?:AbortSignal):Promise<void>{
+    if(!this.pageValue)throw new AdlError('E_TARGET_NOT_FOUND');
+    try{await registerBrowserPrototypes(this.pageValue,{key:this.integrityKey,registrationSecret:this.registrationSecret},AbortSignal.any([this.controller.signal,...(signal?[signal]:[])]));}
+    catch(error){if(error instanceof AdlError&&error.code==='E_PRIVACY_BLOCKED'&&!error.reason)throw new AdlError('E_PRIVACY_BLOCKED','untrusted_dom_api');throw error;}
+  }
+  private async initializeStore(frame:Page|Frame,signal?:AbortSignal):Promise<JSHandle<Store>>{
+    try{return await frame.evaluateHandle(STORE_INIT,this.integrityKey);}
+    catch(error){
+      if(!(error instanceof Error&&error.message.includes('ADL_UNTRUSTED_DOM')))throw error;
+      await this.registerPrototypes(signal);
+      try{return await frame.evaluateHandle(STORE_INIT,this.integrityKey);}
+      catch(error){if(error instanceof Error&&error.message.includes('ADL_UNTRUSTED_DOM'))throw new AdlError('E_PRIVACY_BLOCKED','untrusted_dom_api');throw error;}
+    }
+  }
+  private async collectSnapshot(store:JSHandle<Store>,cfg:Parameters<typeof snapshotPageFn>[1],signal?:AbortSignal):Promise<PageSnapshot>{
+    try{return await store.evaluate(snapshotPageFn,cfg);}
+    catch(error){
+      if(!(error instanceof Error&&error.message.includes('ADL_UNTRUSTED_DOM')))throw error;
+      await this.registerPrototypes(signal);
+      try{return await store.evaluate(snapshotPageFn,cfg);}
+      catch(error){if(error instanceof Error&&error.message.includes('ADL_UNTRUSTED_DOM'))throw new AdlError('E_PRIVACY_BLOCKED','untrusted_dom_api');throw error;}
+    }
+  }
+  private async assertIntegrity(signal?:AbortSignal):Promise<void>{
+    this.checkAlive();
+    for(const store of [this.store,...this.frameStores.values()]){
+      if(!store)throw new AdlError('E_TARGET_NOT_FOUND');
+      let intact=false;try{intact=await store.evaluate(value=>value.integrity.check());}catch{throw new AdlError('E_STALE_STATE');}
+      if(!intact){await this.registerPrototypes(signal);if(!await store.evaluate(value=>value.integrity.check()))throw new AdlError('E_PRIVACY_BLOCKED','untrusted_dom_api');}
+    }
   }
 
   private async freshStoreAssign(): Promise<void> {
@@ -313,17 +433,18 @@ class BrowserSession implements AdapterSession {
     }
   }
 
-  async snapshot(): Promise<RawSnapshot> {
+  async snapshot(signal?:AbortSignal): Promise<RawSnapshot> {
     this.checkAlive();
     await this.settleRedirect();
     if(new URL(this.page.url()).origin!==this.origin){await this.close();throw new AdlError('E_POLICY_DENIED');}
-    const maxOut = 5000;
-    const cfg = {maxOut, visitCap: 20000, maxDepth: 12, fieldMax: 512,secretLabelPattern:SECRET_LABEL_PATTERN,privacyRules:BROWSER_PRIVACY_RULES};
-    let res: {elements: ElementInfo[]; sig: string; truncated: boolean};
+    const maxOut = 20000;
+    const cfg = {maxOut, visitCap: 100000, maxDepth: 12, fieldMax: 512,secretLabelPattern:SECRET_LABEL_PATTERN,privacyRules:BROWSER_PRIVACY_RULES};
+    let res: PageSnapshot;
     try {
-      res = await this.store!.evaluate(snapshotPageFn, cfg);
+      res = await this.collectSnapshot(this.store!,cfg,signal);
     } catch (e) {
       if (e instanceof AdlError) throw e;
+      if(e instanceof Error&&e.message.includes('ADL_UNTRUSTED_DOM'))throw new AdlError('E_PRIVACY_BLOCKED','untrusted_dom_api');
       if(e instanceof Error&&e.message.includes('Snapshot field limit'))throw new AdlError('E_RESOURCE_LIMIT');
       this.checkAlive();
       // Bounded lazy recovery: a same-origin document replacement (link click)
@@ -333,9 +454,10 @@ class BrowserSession implements AdapterSession {
       await this.freshStoreAssign();
       this.checkAlive();
       try {
-        res = await this.store!.evaluate(snapshotPageFn, cfg);
+        res = await this.collectSnapshot(this.store!,cfg,signal);
       } catch (e2) {
         if (e2 instanceof AdlError) throw e2;
+        if(e2 instanceof Error&&e2.message.includes('ADL_UNTRUSTED_DOM'))throw new AdlError('E_PRIVACY_BLOCKED','untrusted_dom_api');
         if(e2 instanceof Error&&e2.message.includes('Snapshot field limit'))throw new AdlError('E_RESOURCE_LIMIT');
         this.checkAlive();
         throw new AdlError('E_INTERNAL');
@@ -368,8 +490,8 @@ class BrowserSession implements AdapterSession {
         if(protectedFrame)continue;
         let store=this.frameStores.get(frame);
         if(store){try{await store.evaluate(()=>undefined);}catch{await store.dispose().catch(()=>undefined);this.frameStores.delete(frame);store=undefined;}}
-        if(!store){store=await frame.evaluateHandle(STORE_INIT);await store.evaluate((value,prefix)=>{value.prefix=prefix;},`${this.prefix}_f${++this.frameSeq}`);this.frameStores.set(frame,store);}
-        const child=await store.evaluate(snapshotPageFn,{...cfg,maxOut:maxOut-res.elements.length});
+        if(!store){store=await this.initializeStore(frame,signal);await store.evaluate((value,prefix)=>{value.prefix=prefix;},`${this.prefix}_f${++this.frameSeq}`);this.frameStores.set(frame,store);}
+        const child=await this.collectSnapshot(store,{...cfg,maxOut:maxOut-res.elements.length},signal);
         res.elements.push(...child.elements);res.sig+=child.sig;res.truncated||=child.truncated;
         await store.evaluate(value=>{for(const [id,node]of value.nodes)if(!value.seen.has(id)){value.ids.delete(node);value.nodes.delete(id);}value.seen.clear();});
       }catch{res.truncated=true;}
@@ -388,16 +510,69 @@ class BrowserSession implements AdapterSession {
     this.checkAlive();
     if(new URL(this.page.url()).origin!==this.origin){await this.close();throw new AdlError('E_POLICY_DENIED');}
     await this.owner.callGuard(this.page.url());
-    const location=new URL(this.page.url());
-    location.hash='';for(const key of [...location.searchParams.keys()])location.searchParams.set(key,'[redacted]');
-    const url=redactString(location.href).slice(0,512),title=redactString(await this.page.title()).slice(0,512);
-    const warnings=[...this.networkBlocks].map(([code,count])=>({code,count}));
-    const fingerprint = crypto.createHash('sha256').update(res.sig+JSON.stringify([url,title,warnings])).digest('hex');
-    return {elements: res.elements, fingerprint, truncated: res.truncated,url,title,...(warnings.length?{warnings}:{})};
+    const url=redactUrl(this.page.url(),this.policy.allowPersonalData),title=redactString(await this.page.title(),this.policy.allowPersonalData);
+    const warnings=[...this.networkBlocks.values()].map(w=>({...w}));
+    const digest=(value:string)=>crypto.createHash('sha256').update(value).digest('hex');
+    const formDigests=Object.fromEntries(Object.entries(res.forms).map(([id,value])=>[id,digest(value)]));
+    const actionEvidence={navigation:digest(JSON.stringify([res.navigation,this.documentGeneration])),elements:Object.fromEntries(Object.entries(res.actionStates).map(([id,state])=>[id,digest(JSON.stringify([state.target,state.form?formDigests[state.form]:null]))]))};
+    const fingerprint=digest(res.sig+JSON.stringify([url,title,warnings,actionEvidence]));
+    await this.assertIntegrity(signal);
+    return {elements:res.elements,fingerprint,truncated:res.truncated,url,title,actionEvidence,...(warnings.length?{warnings}:{})};
+  }
+
+  async readText(elementId:string,offset:number,length:number,signal:AbortSignal):Promise<{text:string;total_length:number;next_offset:number|null;truncated:boolean}>{
+    this.checkAlive();
+    if(signal.aborted)throw new AdlError('E_CANCELLED');
+    if(!Number.isSafeInteger(offset)||offset<0||!Number.isSafeInteger(length)||length<1||length>1048576)throw new AdlError('E_INVALID_ARGUMENT');
+    let store=this.store!,frame:Frame|undefined;
+    if(!elementId.startsWith(this.prefix+'-')){
+      store=null as unknown as JSHandle<Store>;
+      for(const [candidate,value] of this.frameStores){if(await value.evaluate((s,id)=>s.nodes.has(id),elementId)){store=value;frame=candidate;break;}}
+      if(!store||!frame)throw new AdlError('E_TARGET_NOT_FOUND');
+      for(let current:Frame|null=frame;current?.parentFrame();current=current.parentFrame()){
+        const url=current.url().startsWith('about:')?current.parentFrame()!.url():current.url();await this.owner.callGuard(url);
+        const host=await current.frameElement();
+        try{if(await host.evaluate((element,rules)=>{let node:Element|null=element as Element,depth=0;while(node&&depth++<rules.ancestorCap){if(node.matches(rules.regionSelector))return true;node=node.parentElement??(node.getRootNode() as ShadowRoot).host??null;}return node!==null;},BROWSER_PRIVACY_RULES))throw new AdlError('E_PRIVACY_BLOCKED');}finally{await host.dispose();}
+      }
+    }
+    const generation=this.documentGeneration;
+    const handle=await store.evaluateHandle((s,id)=>s.nodes.get(id)??null,elementId);
+    const element=handle.asElement() as ElementHandle|null;if(!element){await handle.dispose();throw new AdlError('E_TARGET_NOT_FOUND');}
+    let result:{error:'missing'|'protected'}|{text:string;truncated:boolean};
+    try{
+      await element.scrollIntoViewIfNeeded({timeout:this.policy.actionTimeoutMs});
+      result=await isolatedCollect(element,(root,arg:{rules:typeof BROWSER_PRIVACY_RULES;pattern:string})=>{
+      if(!root.isConnected)return {error:'missing' as const};
+      const protectedNode=(element:Element)=>{let n:Element|null=element,depth=0;while(n&&depth++<arg.rules.ancestorCap){if(n.matches(arg.rules.regionSelector))return true;n=n.parentElement??(n.getRootNode() as ShadowRoot).host??null;}return n!==null;};
+      if(protectedNode(root))return {error:'protected' as const};
+      const secret=new RegExp(arg.pattern,'iu');
+      const skip=(e:Element)=>{
+        if(e.matches('script,style,input,textarea,select,option,optgroup')||e.matches(arg.rules.regionSelector))return true;
+        if(e instanceof HTMLLabelElement){const field=e.control;if(field){const hints=[field.id,field.getAttribute('name'),field.getAttribute('autocomplete'),field.getAttribute('aria-label')].filter(Boolean).join(' ');if(protectedNode(field)||(field as HTMLInputElement).type==='password'||secret.test(hints))return true;}}
+        return false;
+      };
+      for(let ancestor:Element|null=root,depth=0;ancestor&&depth++<arg.rules.ancestorCap;ancestor=ancestor.parentElement??(ancestor.getRootNode() as ShadowRoot).host??null)if(skip(ancestor))return {text:'',truncated:false};
+      const walker=root.ownerDocument.createTreeWalker(root,NodeFilter.SHOW_ELEMENT|NodeFilter.SHOW_TEXT,{acceptNode:n=>n.nodeType===1&&skip(n as Element)?NodeFilter.FILTER_REJECT:NodeFilter.FILTER_ACCEPT});
+      let text='',visited=0,node:Node|null=walker.nextNode(),truncated=false;
+      while(node){if(++visited>100000){truncated=true;break;}if(node.nodeType===3){const value=node.nodeValue??'';const remaining=1048576-text.length;if(value.length>remaining){text+=value.slice(0,remaining);truncated=true;break;}text+=value;}node=walker.nextNode();}
+      // Never return the prefix of a token cut at the source cap.
+      if(truncated)text=text.replace(/[A-Za-z0-9._%+@-]+$/u,'');
+      return {text,truncated};
+    },{rules:BROWSER_PRIVACY_RULES,pattern:SECRET_LABEL_PATTERN});
+    }finally{await handle.dispose().catch(()=>undefined);}
+    this.checkAlive();if(signal.aborted)throw new AdlError('E_CANCELLED');if(generation!==this.documentGeneration)throw new AdlError('E_STALE_STATE');
+    if('error'in result)throw new AdlError(result.error==='protected'?'E_PRIVACY_BLOCKED':'E_TARGET_NOT_FOUND');
+    const text=redactText(result.text,this.policy.allowPersonalData===true);
+    const high=(code:number)=>code>=0xd800&&code<=0xdbff,low=(code:number)=>code>=0xdc00&&code<=0xdfff;
+    if(offset>text.length||offset>0&&low(text.charCodeAt(offset))&&high(text.charCodeAt(offset-1)))throw new AdlError('E_INVALID_ARGUMENT');
+    let end=Math.min(text.length,offset+length);
+    if(end<text.length&&high(text.charCodeAt(end-1))&&low(text.charCodeAt(end)))end++;
+    return {text:text.slice(offset,end),total_length:text.length,next_offset:end<text.length?end:null,truncated:result.truncated};
   }
 
   async capture(signal:AbortSignal):Promise<CapturedImage>{
     this.checkAlive();
+    await this.assertIntegrity(signal);
     if(signal.aborted){await this.close();throw new AdlError('E_CANCELLED');}
     const onAbort=()=>{void this.close();};
     signal.addEventListener('abort',onAbort,{once:true});
@@ -409,7 +584,7 @@ class BrowserSession implements AdapterSession {
           await ensurePointSelector();const pointNonce=crypto.randomBytes(12).toString('base64url');
           const pointReady=await this.page.locator(pointSelector('capture',pointNonce)).count()===1;
           const geometry=await captureGestureGeometry(this.page,this.gestures??{enabled:false,surfaces:[]},signal);
-          const image=await captureBrowserImage(this.page,this.origin,this.visual,signal);
+          const image=await captureBrowserImage(this.page,this.origin,this.visual,signal,this.policy.allowPersonalData);
           const after=await captureGestureGeometry(this.page,this.gestures??{enabled:false,surfaces:[]},signal);
           this.checkAlive();if(signal.aborted)throw new AdlError('E_CANCELLED');
           if(JSON.stringify(geometry)!==JSON.stringify(after)||generation!==this.documentGeneration)throw new AdlError('E_STALE_STATE');
@@ -417,6 +592,7 @@ class BrowserSession implements AdapterSession {
           const epoch=`${this.visualEpoch}:${generation}:${crypto.randomBytes(9).toString('base64url')}`;
           this.captureGeometry.set(epoch,{generation,geometry,...(pointReady?{pointNonce}:{})});
           while(this.captureGeometry.size>16)this.captureGeometry.delete(this.captureGeometry.keys().next().value!);
+          await this.assertIntegrity(signal);
           return {...image,surface_epoch:epoch};
         })(),
         new Promise<never>((_,reject)=>{timer=setTimeout(()=>{void this.close();reject(new AdlError('E_TIMEOUT'));},this.policy.actionTimeoutMs);}),
@@ -426,6 +602,7 @@ class BrowserSession implements AdapterSession {
   }
 
   async gesture(plan:GesturePlan,reference:GestureReference,signal:AbortSignal):Promise<GestureExecution>{
+    await this.assertIntegrity(signal);
     this.checkAlive();
     const proof=reference.surface_epoch?this.captureGeometry.get(reference.surface_epoch):undefined;
     const assertCurrent=()=>{this.checkAlive();if(!proof||proof.generation!==this.documentGeneration)throw new AdlError('E_STALE_STATE');if(new URL(this.page.url()).origin!==this.origin)throw new AdlError('E_POLICY_DENIED');};
@@ -459,16 +636,19 @@ class BrowserSession implements AdapterSession {
     finally{await node.dispose();}
   }
   async clickPoint(point:{x:number;y:number},reference:GestureReference,signal:AbortSignal,onDispatch:()=>void){
+    await this.assertIntegrity(signal);
     if(!this.policy.allowAllOperations)throw new AdlError('E_APPROVAL_REQUIRED','operation_not_granted');
     const locator=await this.pointTarget(point,reference,signal);if(await locator.count()!==1)throw new AdlError('E_STALE_STATE');
     if(signal.aborted)throw new AdlError('E_CANCELLED');
     await this.page.mouse.move(point.x,point.y);if(await locator.count()!==1)throw new AdlError('E_STALE_STATE');
+    await this.assertIntegrity(signal);
     let sent=false;try{onDispatch();sent=true;await this.page.mouse.click(point.x,point.y);await this.settleRedirect();}
     catch(error){const safe=error instanceof AdlError?error:new AdlError('E_INTERNAL');safe.mayHaveExecuted=sent;throw safe;}
   }
 
   async prepareAction(action:Action,signal:AbortSignal){
     this.checkAlive();if(signal.aborted)throw new AdlError('E_CANCELLED');
+    await this.assertIntegrity(signal);
     const id=action.element_id;if(!id)throw new AdlError('E_TARGET_NOT_FOUND');
     let target=this.store;if(!id.startsWith(this.prefix+'-')){target=null;for(const store of this.frameStores.values())if(await store.evaluate((value,key)=>value.nodes.has(key),id)){target=store;break;}}
     if(!target)throw new AdlError('E_TARGET_NOT_FOUND');
@@ -503,21 +683,28 @@ class BrowserSession implements AdapterSession {
       timer=setTimeout(()=>{local.abort();reject(new AdlError('E_TIMEOUT'));},this.policy.actionTimeoutMs);
     });
     try{await Promise.race([(async()=>{await this.runAction(action,combined,mark,authorization);await this.settleRedirect();})(),stopped]);}
-    catch(error){const safe=error instanceof AdlError?error:new AdlError('E_INTERNAL');safe.mayHaveExecuted=dispatched;if(dispatched)await this.close();throw safe;}
+    catch(error){const safe=error instanceof AdlError?error:new AdlError(error instanceof Error&&error.message.includes('ADL_UNTRUSTED_DOM')?'E_PRIVACY_BLOCKED':'E_INTERNAL',error instanceof Error&&error.message.includes('ADL_UNTRUSTED_DOM')?'untrusted_dom_api':undefined);safe.mayHaveExecuted=dispatched;if(dispatched)await this.close();throw safe;}
     finally{this.approvedRequest=undefined;if(timer)clearTimeout(timer);combined.removeEventListener('abort',onAbort);}
   }
 
   private async runAction(action: Action, signal:AbortSignal,onDispatch:()=>void,authorization?:ActionAuthorization): Promise<void> {
+    await this.assertIntegrity(signal);
     if(new URL(this.page.url()).origin!==this.origin){await this.close();throw new AdlError('E_POLICY_DENIED');}
+    const assertEvidence=async()=>{
+      if(!authorization?.actionEvidence)return;
+      if(signal.aborted)throw new AdlError('E_CANCELLED');
+      const current=(await this.snapshot(signal)).actionEvidence,expected=authorization.actionEvidence;
+      if(!current||current.navigation!==expected.navigation||expected.element!==undefined&&(!action.element_id||current.elements[action.element_id]!==expected.element))throw new AdlError('E_STALE_STATE');
+    };
     if(action.action==='back'){
       const protocol=await this.context.newCDPSession(this.page);
       try{
         const history=await protocol.send('Page.getNavigationHistory');
         const previous=history.entries[history.currentIndex-1];
         if(!previous)throw new AdlError('E_TARGET_NOT_FOUND');
-        if(!this.policy.allowAllOperations&&new URL(previous.url).origin!==this.origin)deny();
+        if(!this.policy.allowAllOperations&&new URL(previous.url).origin!==this.origin)throw new AdlError('E_POLICY_DENIED','origin_not_allowed');
         await this.owner.callGuard(previous.url);await resolveAllowedAddresses(previous.url,this.policy);
-        onDispatch();await this.page.goBack({waitUntil:'domcontentloaded'});
+        await assertEvidence();await this.assertIntegrity(signal);onDispatch();await this.page.goBack({waitUntil:'domcontentloaded'});
         await this.settleRedirect();await this.freshStoreAssign();return;
       }finally{await protocol.detach().catch(()=>undefined);}
     }
@@ -528,7 +715,7 @@ class BrowserSession implements AdapterSession {
       } catch {
         deny();
       }
-      if (!this.policy.allowAllOperations&&u.origin !== this.origin) deny();
+      if (!this.policy.allowAllOperations&&u.origin !== this.origin) throw new AdlError('E_POLICY_DENIED','origin_not_allowed');
       try {
         await this.owner.callGuard(u.href);
         await resolveAllowedAddresses(u.href, this.policy);
@@ -536,6 +723,8 @@ class BrowserSession implements AdapterSession {
         if (e instanceof AdlError && e.code === 'E_POLICY_DENIED') throw e;
         deny();
       }
+      await assertEvidence();
+      await this.assertIntegrity(signal);
       try {
         onDispatch();
         await this.page.goto(u.href, {waitUntil: 'domcontentloaded'});
@@ -553,6 +742,7 @@ class BrowserSession implements AdapterSession {
     let targetStore=this.store!;let targetFrame:Frame|undefined;
     if(!id.startsWith(this.prefix+'-')){const found=[...this.frameStores.values()];let match:JSHandle<Store>|undefined;for(const store of found)if(await store.evaluate((value,key)=>value.nodes.has(key),id)){match=store;break;}if(!match)throw new AdlError('E_TARGET_NOT_FOUND');targetStore=match;targetFrame=[...this.frameStores].find(([,store])=>store===match)?.[0];}
     const handle = await targetStore.evaluateHandle((store: Store, id:string) => {
+      if(!store.integrity.check())throw new Error('ADL_UNTRUSTED_DOM');
       const n = store.nodes.get(id);
       if (!n || !(n as Node).isConnected) return null;
       return n as Element;
@@ -564,8 +754,33 @@ class BrowserSession implements AdapterSession {
     }
     try {
       const permitted=this.policy.allowAllOperations===true||authorization?.normalOperations===true;
+      // All modes must protect the iframe host and target through the isolated
+      // world; page-world preflight getters are not privacy evidence.
+      const assertFramePublic=async()=>{
+        if(!targetFrame||authorization?.normalOperations)return;
+        // The compatibility permission is limited to configured origins and
+        // requires every ancestor frame to pass the network policy guard.
+        const crossAllowed=this.policy.allowAllOperations===true||this.policy.operationMode===undefined;
+        const allowedFrameOrigins=crossAllowed?this.policy.allowedOrigins:[];
+        const priorFrames:{frame:Frame;url:string}[]=[];
+        for(let frame:Frame|null=targetFrame;frame?.parentFrame();frame=frame.parentFrame()){
+          let effective=frame;while(effective.url().startsWith('about:')&&effective.parentFrame())effective=effective.parentFrame()!;
+          const url=effective.url();
+          if(new URL(url).origin!==this.origin&&!allowedFrameOrigins.includes(new URL(url).origin))throw new AdlError('E_POLICY_DENIED','iframe_action_proof_unavailable');
+          await this.owner.callGuard(url);priorFrames.push({frame,url:frame.url()});
+        }
+        const publicTarget=await isolatedCollect(el,(node,rules:typeof BROWSER_PRIVACY_RULES)=>{
+          let current:Element|null=node,depth=0;
+          while(current&&depth++<rules.ancestorCap){if(current.matches(rules.regionSelector))return {allowed:false};current=current.parentElement??(current.getRootNode() as ShadowRoot).host??null;}
+          return {allowed:current===null&&node.isConnected};
+        },BROWSER_PRIVACY_RULES,allowedFrameOrigins);
+        if(priorFrames.some(item=>item.frame.isDetached()||item.frame.url()!==item.url))throw new AdlError('E_STALE_STATE');
+        if(!publicTarget.allowed)throw new AdlError('E_PRIVACY_BLOCKED');
+      };
+      await assertFramePublic();
       if(authorization?.normalOperations){const fresh=await inspectBrowserAction(el,action);if(!authorization.approvalProof||fresh.proof!==authorization.approvalProof)throw new AdlError('E_STALE_STATE');}
-      const info = await el.evaluate((node, {secretLabelPattern,privacyRules}:{secretLabelPattern:string;privacyRules:typeof BROWSER_PRIVACY_RULES}) => {
+      const info = await el.evaluate((node, {secretLabelPattern,privacyRules,integrityKey}:{secretLabelPattern:string;privacyRules:typeof BROWSER_PRIVACY_RULES;integrityKey:string}) => {
+        if(!(window as unknown as Record<string,BrowserIntegrity>)[integrityKey]?.check())throw new Error('ADL_UNTRUSTED_DOM');
         const e = node as HTMLElement;
         const tag = e.tagName.toLowerCase();
         const type = tag === 'input' ? ((e as HTMLInputElement).type || 'text').toLowerCase() : '';
@@ -599,13 +814,15 @@ class BrowserSession implements AdapterSession {
           sensitive: (tag === 'input' && type === 'password') || inSensitiveRegion(e) || hints.some(sensitiveLabel),
           consequential: CONSEQUENTIAL_RE.test(name) || CONSEQUENTIAL_RE.test(nameAttr) || (tag === 'button' && (e.getAttribute('type') || 'submit') === 'submit' && !!form) || (tag === 'input' && type === 'submit'),
         };
-      },{secretLabelPattern:SECRET_LABEL_PATTERN,privacyRules:BROWSER_PRIVACY_RULES});
-      const authorized = permitted||action.action==='scroll' ? await el.evaluate(node=>{
+      },{secretLabelPattern:SECRET_LABEL_PATTERN,privacyRules:BROWSER_PRIVACY_RULES,integrityKey:this.integrityKey});
+      const authorized = permitted||action.action==='scroll' ? await el.evaluate((node,key)=>{
+        if(!(window as unknown as Record<string,BrowserIntegrity>)[key]?.check())throw new Error('ADL_UNTRUSTED_DOM');
         // Derive an exact selector from the retained element without modifying the page.
         const parts:string[]=[];let current:Element|null=node;
-        while(current){const parent:Element|null=current.parentElement;const index=parent?Array.from(parent.children).indexOf(current)+1:1;parts.unshift(`${current.tagName.toLowerCase()}:nth-child(${index})`);current=parent;}
+        while(current){const parent:Element|null=current.parentElement;const root=current.getRootNode();const siblings=parent?.children??(root instanceof ShadowRoot?root.children:undefined);const index=siblings?Array.from(siblings).indexOf(current)+1:1;parts.unshift(`${current.tagName.toLowerCase()}:nth-child(${index})`);current=parent;}
         return parts.join(' > ');
-      }) : await el.evaluate((node, arg: {rules: {selector: string; actions: string[]}[]; action: string}) => {
+      },this.integrityKey) : await el.evaluate((node, arg: {rules: {selector: string; actions: string[]}[]; action: string;integrityKey:string}) => {
+        if(!(window as unknown as Record<string,BrowserIntegrity>)[arg.integrityKey]?.check())throw new Error('ADL_UNTRUSTED_DOM');
         const e = node as HTMLElement;
         // Rule order must not decide the outcome: a rule authorizes only when
         // its selector resolves to exactly this element and lists the requested
@@ -631,7 +848,7 @@ class BrowserSession implements AdapterSession {
           }
         }
         return '';
-      }, {rules: this.controls, action: action.action});
+      }, {rules: this.controls, action: action.action,integrityKey:this.integrityKey});
       if (!authorized) throw new AdlError('E_APPROVAL_REQUIRED','operation_not_granted');
       // The page side already required the rule to allow this action; select the
       // matching rule (not merely the first rule with that selector) so duplicate
@@ -645,9 +862,10 @@ class BrowserSession implements AdapterSession {
       if(['click','fill','press','hover'].includes(action.action)){
         const generation=this.documentGeneration;
         const assertCurrent=()=>{this.checkAlive();if(generation!==this.documentGeneration)throw new AdlError('E_STALE_STATE');if(new URL(this.page.url()).origin!==this.origin)throw new AdlError('E_POLICY_DENIED');};
-        await preflightBrowserInput(this.page,el,action,authorized,signal,assertCurrent,permitted,action.action==='hover'?onDispatch:undefined);
+        await preflightBrowserInput(this.page,el,action,authorized,signal,assertCurrent,permitted,action.action==='hover'?onDispatch:undefined,this.integrityKey);
         assertCurrent();if(signal.aborted)throw new AdlError('E_CANCELLED');
       }
+      await assertFramePublic();
       if(authorization?.normalOperations){const fresh=await inspectBrowserAction(el,action);if(fresh.proof!==authorization.approvalProof)throw new AdlError('E_STALE_STATE');if(authorization.approved&&fresh.network)this.approvedRequest={...fresh.network,frame:targetFrame??this.page.mainFrame(),expires:Math.min(Date.now()+5000,authorization.expires_at??0)};}
       if(targetFrame){
         await this.owner.callGuard(targetFrame.url().startsWith('about:')?targetFrame.parentFrame()?.url()??'':targetFrame.url());
@@ -658,6 +876,8 @@ class BrowserSession implements AdapterSession {
       }
       const opts = {timeout: Math.max(1000, this.policy.actionTimeoutMs - 500)};
       if(action.action==='hover')return;
+      await assertEvidence();
+      await this.assertIntegrity(signal);
       if(action.action==='press'){if(!['Enter','Escape','Tab','ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Home','End','PageUp','PageDown','Space'].includes(action.value??''))throw new AdlError('E_INVALID_ARGUMENT');onDispatch();await el.press(action.value!,opts);}
       else if (action.action === 'fill') {
         if (typeof action.value !== 'string') throw new AdlError('E_INVALID_ARGUMENT');
@@ -669,6 +889,7 @@ class BrowserSession implements AdapterSession {
           const hit=await (await this.pointTarget(action.point,authorization.pointReference,signal)).elementHandle({timeout:1000});
           try{if(!hit||!await el.evaluate((e,actual)=>e===actual,hit))throw new AdlError('E_STALE_STATE');}finally{await hit?.dispose();}
           if(authorization.normalOperations&&(await inspectBrowserAction(el,action)).proof!==authorization.approvalProof)throw new AdlError('E_STALE_STATE');
+          await this.assertIntegrity(signal);
           onDispatch();await this.page.mouse.click(action.point.x,action.point.y);
         }else{onDispatch();await el.click(opts);}
       } else if (action.action === 'check') {
@@ -677,13 +898,21 @@ class BrowserSession implements AdapterSession {
         onDispatch();await el.selectOption(String(action.value ?? ''), opts);
       } else if (action.action === 'scroll') {
         if (action.direction) {
-          onDispatch();const supported = await el.evaluate((node, direction) => {
-            const element = node as HTMLElement;
-            if (element.scrollHeight <= element.clientHeight || element.clientHeight <= 0) return false;
-            element.scrollBy({top: (direction === 'down' ? 1 : -1) * Math.max(1, element.clientHeight * 0.8), behavior:'instant'});
-            return true;
-          }, action.direction);
-          if (!supported) throw new AdlError('E_UNSUPPORTED_ACTION');
+          const scrollTarget=await el.evaluateHandle((node,key)=>{
+            if(!(window as unknown as Record<string,BrowserIntegrity>)[key]?.check())throw new Error('ADL_UNTRUSTED_DOM');
+            let current:Element|null=node;
+            while(current){
+              const element=current as HTMLElement, style=getComputedStyle(element);
+              if(element.clientHeight>0&&element.scrollHeight>element.clientHeight&&/(auto|scroll|overlay)/.test(style.overflowY))return element;
+              current=current.parentElement??(current.getRootNode() as ShadowRoot).host??null;
+            }
+            const doc=node.ownerDocument, scrolling=doc.scrollingElement;
+            return scrolling&&scrolling.scrollHeight>scrolling.clientHeight?scrolling:null;
+          },this.integrityKey);
+          try{
+            const element=scrollTarget.asElement();if(!element)throw new AdlError('E_UNSUPPORTED_ACTION');
+            onDispatch();await element.evaluate((node,args)=>{if(!(window as unknown as Record<string,BrowserIntegrity>)[args.key]?.check())throw new Error('ADL_UNTRUSTED_DOM');const element=node as HTMLElement;element.scrollBy({top:(args.direction==='down'?1:-1)*Math.max(1,element.clientHeight*0.8),behavior:'instant'});},{direction:action.direction,key:this.integrityKey});
+          }finally{await scrollTarget.dispose();}
         } else {onDispatch();await el.scrollIntoViewIfNeeded(opts);}
       } else {
         throw new AdlError('E_UNSUPPORTED_ACTION');
@@ -696,6 +925,8 @@ class BrowserSession implements AdapterSession {
   markClosed(): void {
     this.closed = true;
     this.controller.abort();
+    this.transportPool.destroy();
+    this.resourceCache.clear();
   }
 
   close(): Promise<void> {
@@ -704,6 +935,8 @@ class BrowserSession implements AdapterSession {
     this.openAbortCleanup?.();
     this.openAbortCleanup = undefined;
     this.controller.abort();
+    this.transportPool.destroy();
+    this.resourceCache.clear();
     const store = this.store;
     this.store = null;
     this.closing=(async()=>{
@@ -723,11 +956,11 @@ export class BrowserAdapter implements Adapter {
   private closed=false;
   private readonly sessions = new Set<BrowserSession>();
 
-  constructor(private readonly policy: PolicyConfig, private readonly guard: (url: string) => Promise<void>) {}
+  constructor(private readonly policy: PolicyConfig, private readonly guard: (url: string,purpose?:'navigation'|'resource') => Promise<void>) {}
 
-  async callGuard(url: string): Promise<void> {
+  async callGuard(url: string,purpose:'navigation'|'resource'='navigation'): Promise<void> {
     try {
-      await this.guard(url);
+      await this.guard(url,purpose);
     } catch (e) {
       if (e instanceof AdlError) throw e;
       deny();
@@ -792,7 +1025,8 @@ export class BrowserAdapter implements Adapter {
       const browser = await this.ensureBrowser();
       if(signal.aborted||this.closed)throw new AdlError('E_CANCELLED');
       context = await browser.newContext({serviceWorkers: 'block',acceptDownloads:this.policy.allowAllOperations===true,hasTouch:config.gestures?.enabled===true});
-      session = new BrowserSession(this, this.policy, context, origin, config.controls ?? [],config.visual,config.gestures);
+      const installation=await installBrowserIntegrity(context);
+      session = new BrowserSession(this, this.policy, context, origin, config.controls ?? [],config.visual,config.gestures,installation.key,installation.registrationSecret);
       this.sessions.add(session);
       const active = session;
       const onAbort=()=>void active.close();
@@ -801,8 +1035,8 @@ export class BrowserAdapter implements Adapter {
       // Hard network boundary, installed before the first page exists.
       if(!this.policy.allowAllOperations||this.policy.restrictTargets||this.policy.browserProxyServer){
       await context.route('**/*', async (route: Route) => {
-        const block=async(code:'origin_denied'|'request_denied'|'response_blocked'|'network_error')=>{
-          active.recordNetworkBlock(code);
+        const block=async(code:string,origin?:string)=>{
+          active.recordNetworkBlock(code,origin);
           await route.abort().catch(()=>undefined);
         };
         try {
@@ -816,8 +1050,12 @@ export class BrowserAdapter implements Adapter {
             return block('request_denied');
           }
           if (u.protocol !== 'http:' && u.protocol !== 'https:') return block('request_denied');
-          if (!this.policy.allowAllOperations && u.origin !== active.origin) return block('origin_denied');
           const method = req.method().toUpperCase();
+          const resource=!req.isNavigationRequest()&&req.resourceType()!=='document';
+          if (!this.policy.allowAllOperations && u.origin !== active.origin){
+            const permitted=resource&&['GET','HEAD'].includes(method)&&[...this.policy.allowedOrigins,...(this.policy.resourceOrigins??[])].includes(u.origin);
+            if(!permitted)return block('origin_denied',u.origin);
+          }
           const body=req.postDataBuffer()??undefined;
           let manualGeneration:number|undefined,approvedExpires:number|undefined;
           if (!this.policy.allowAllOperations && method !== 'GET' && method !== 'HEAD') {
@@ -838,17 +1076,20 @@ export class BrowserAdapter implements Adapter {
           let current=u;
           let res:Awaited<ReturnType<typeof pinnedFetch>>;
           for(let hops=0;;hops++){
-            await this.callGuard(current.href);
-            const ips=await resolveAllowedAddresses(current.href,this.policy);
+            await this.callGuard(current.href,resource?'resource':'navigation');
+            const ips=await resolveAllowedAddresses(current.href,this.policy,undefined,resource?'resource':'navigation');
             // A grant checked before headers, guard or DNS may be revoked while
             // those awaits run. Recheck the exact generation at network dispatch.
             if(active.controller.signal.aborted||manualGeneration!==undefined&&!active.manualRequestCurrent(req,manualGeneration)||approvedExpires!==undefined&&approvedExpires<=Date.now())return block('request_denied');
-            res=await pinnedFetch(current,ips[0]!,method,headers,active.controller.signal,body,this.policy.browserProxyServer);
+            const cacheKey=active.resourceCache.key(current,ips[0]!,method,req.resourceType(),headers);
+            const cached=active.resourceCache.get(cacheKey);
+            res=cached??await pinnedFetch(current,ips[0]!,method,headers,active.controller.signal,body,this.policy.browserProxyServer,{resourceType:req.resourceType(),pool:active.transportPool});
+            if(!cached)active.resourceCache.put(cacheKey,res);
             if(res.status<300||res.status>=400||!res.headers.location)break;
             if(hops>=9||!['GET','HEAD'].includes(method))return block('response_blocked');
             let next:URL;
             try{next=new URL(res.headers.location,current);}catch{return block('response_blocked');}
-            if(next.origin!==current.origin||next.username||next.password)return block('origin_denied');
+            if(next.origin!==current.origin||next.username||next.password)return block('redirect_origin_not_allowed',next.origin);
             if(req.resourceType()==='stylesheet'&&method==='GET'){
               if(++active.stylesheetRedirects>64)return block('response_blocked');
               return route.fulfill({status:200,contentType:'text/css',headers:{'cache-control':'no-store'},body:redirectStylesheet(next)});
@@ -871,7 +1112,7 @@ export class BrowserAdapter implements Adapter {
           if (Array.isArray(setCookie)) outHeaders['set-cookie'] = setCookie.join('\n');
           return route.fulfill({status: res.status || 599, headers: outHeaders, body: res.body});
         } catch (error) {
-          await block(error instanceof AdlError && error.code==='E_RESOURCE_LIMIT'?'response_blocked':'network_error');
+          await block(error instanceof AdlError?(error.reason??(error.code==='E_RESOURCE_LIMIT'?'response_blocked':'network_error')):'network_error');
         }
       });
       await context.routeWebSocket('**/*', (ws) => {

@@ -8,7 +8,7 @@ import * as jsonc from 'jsonc-parser';
 import { parse as parseToml, stringify as stringifyToml } from 'smol-toml';
 
 export const AGENT_NAME = 'agentdesklink';
-const MAX_CONFIG_BYTES = 2 * 1024 * 1024;
+const MAX_CONFIG_BYTES = 16 * 1024 * 1024;
 const LOCK_SUFFIX = '.agentdesklink.lock';
 
 export interface ClientInfo {
@@ -292,7 +292,7 @@ function loadConfig(t: Target, configPath: string): Loaded | string {
     return 'cannot inspect the config file';
   }
   if (!st.isFile()) return 'refusing: config path is not a regular file';
-  if (st.size > MAX_CONFIG_BYTES) return 'refusing: config file is larger than 2 MiB';
+  if (st.size > MAX_CONFIG_BYTES) return 'refusing: config file is larger than 16 MiB';
   let text: string;
   try { text = fs.readFileSync(configPath, 'utf8'); } catch { return 'cannot read config file' }
   const mode = st.mode & 0o777;
@@ -556,7 +556,7 @@ export function configureClient(client: ClientInfo, registration: Registration, 
   try {
     text = t.format === 'json' ? editJson(loaded.text, t.map, value) : editToml(loaded, t.map, value);
   } catch { return fail(t, configPath, 'cannot build the updated config') }
-  if (Buffer.byteLength(text,'utf8') > MAX_CONFIG_BYTES) return fail(t,configPath,'updated config would exceed 2 MiB');
+  if (Buffer.byteLength(text,'utf8') > MAX_CONFIG_BYTES) return fail(t,configPath,'updated config would exceed 16 MiB');
   if (text === loaded.text) {
     return done(t, configPath, enabled ? 'enabled' : 'disabled', 'config already in the requested state');
   }
