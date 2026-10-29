@@ -17,7 +17,10 @@ export class UpdateChecker {
   private disposed = false;
   private retry?: Promise<void>;
   private lastNotified?: string;
-  constructor(private readonly extVersion: string, private readonly onChanged: () => void) {}
+  constructor(
+    private readonly extVersion: string,
+    private readonly onChanged: () => void,
+  ) {}
 
   status(): string {
     if (this.installedVersion) return `v${this.installedVersion} に更新済みです。再読み込みすると反映されます。`;
@@ -26,9 +29,17 @@ export class UpdateChecker {
   }
 
   start(): void {
-    this.startup = setTimeout(() => { void this.check(false); }, 5_000);
-    this.timer = setInterval(() => { void this.check(false); }, 6 * 60 * 60 * 1000);
-    this.startup.unref?.(); this.timer.unref?.();
+    this.startup = setTimeout(() => {
+      void this.check(false);
+    }, 5_000);
+    this.timer = setInterval(
+      () => {
+        void this.check(false);
+      },
+      6 * 60 * 60 * 1000,
+    );
+    this.startup.unref?.();
+    this.timer.unref?.();
   }
   cancel(): void {
     // Keep the promise until it settles: a second check must not overlap an install.
@@ -37,7 +48,8 @@ export class UpdateChecker {
   }
   dispose(): void {
     this.disposed = true;
-    clearInterval(this.timer); clearTimeout(this.startup);
+    clearInterval(this.timer);
+    clearTimeout(this.startup);
     this.cancel();
   }
   check(manual: boolean): Promise<void> {
@@ -75,31 +87,59 @@ export class UpdateChecker {
   }
   private async run(manual: boolean, signal: AbortSignal): Promise<void> {
     const settings = readSettings();
-    if (!settings.checkForUpdates || this.installedVersion) { this.onChanged(); return; }
+    if (!settings.checkForUpdates || this.installedVersion) {
+      this.onChanged();
+      return;
+    }
     const active = () => {
       const now = readSettings();
       return !signal.aborted && !this.disposed && now.checkForUpdates && now.autoUpdate === settings.autoUpdate;
     };
     try {
       this.setStatus('更新を確認しています…');
-      const bytes = await fetchUpdateBytes(GITHUB_RELEASES_URL, { maxBytes: 1024 * 1024, timeoutMs: 15_000, signal, isAllowedUrl: isGitHubUpdateUrl });
+      const bytes = await fetchUpdateBytes(GITHUB_RELEASES_URL, {
+        maxBytes: 1024 * 1024,
+        timeoutMs: 15_000,
+        signal,
+        isAllowedUrl: isGitHubUpdateUrl,
+      });
       if (!active()) return;
-      const update = findGitHubUpdate(JSON.parse(bytes.toString('utf8')), process.platform, process.arch);
-      if (!update) { this.setStatus('この OS・CPU に対応する更新はありません。'); return; }
-      if (!gt(update.version, this.extVersion)) { this.setStatus(`最新のバージョンです（v${this.extVersion}）。`); return; }
+      // Staged rollout applies to automatic checks only: a person pressing the check button gets the newest release at once.
+      const update = findGitHubUpdate(
+        JSON.parse(bytes.toString('utf8')),
+        process.platform,
+        process.arch,
+        manual ? undefined : { rolloutId: vscode.env.machineId },
+      );
+      if (!update) {
+        this.setStatus('この OS・CPU に対応する更新はありません。');
+        return;
+      }
+      if (!gt(update.version, this.extVersion)) {
+        this.setStatus(`最新のバージョンです（v${this.extVersion}）。`);
+        return;
+      }
       if (!settings.autoUpdate) {
         this.setStatus(`v${update.version} が利用可能です。自動更新は無効です。`);
         if (manual || this.lastNotified !== update.version) {
           this.lastNotified = update.version;
-          void vscode.window.showInformationMessage(`AgentDeskLink v${update.version} が利用可能です。自動更新を有効にするとインストールできます。`);
+          void vscode.window.showInformationMessage(
+            `AgentDeskLink v${update.version} が利用可能です。自動更新を有効にするとインストールできます。`,
+          );
         }
         return;
       }
       this.setStatus(`v${update.version} をダウンロードしています…`);
       // The VSIX bundles Node and the native helper dependencies, so allow the complete platform package.
-      const download = await fetchUpdateBytes(update.url, { maxBytes: 512 * 1024 * 1024, timeoutMs: 300_000, signal, isAllowedUrl: isGitHubUpdateUrl });
+      const download = await fetchUpdateBytes(update.url, {
+        maxBytes: 512 * 1024 * 1024,
+        timeoutMs: 300_000,
+        signal,
+        isAllowedUrl: isGitHubUpdateUrl,
+      });
       if (!active()) return;
-      if (createHash('sha256').update(download).digest('hex') !== update.sha256) throw new Error('ダウンロードの SHA-256 が一致しません。');
+      if (createHash('sha256').update(download).digest('hex') !== update.sha256)
+        throw new Error('ダウンロードの SHA-256 が一致しません。');
       const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'agentdesklink-update-'));
       try {
         const file = path.join(directory, 'agentdesklink.vsix');
@@ -110,10 +150,15 @@ export class UpdateChecker {
         this.setStatus(`v${update.version} に更新しました。再読み込みすると反映されます。`);
         if (!this.disposed) {
           const button = '再読み込み';
-          const pick = await vscode.window.showInformationMessage(`AgentDeskLink v${update.version} に更新しました。`, button);
+          const pick = await vscode.window.showInformationMessage(
+            `AgentDeskLink v${update.version} に更新しました。`,
+            button,
+          );
           if (pick === button && !this.disposed) await vscode.commands.executeCommand('workbench.action.reloadWindow');
         }
-      } finally { await fs.rm(directory, { recursive: true, force: true }); }
+      } finally {
+        await fs.rm(directory, { recursive: true, force: true });
+      }
     } catch (error) {
       if (!active()) return;
       this.setStatus('GitHub から更新を確認できませんでした。時間をおいて再度お試しください。');

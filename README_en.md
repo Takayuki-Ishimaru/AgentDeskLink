@@ -12,10 +12,10 @@ AgentDeskLink is an MCP server that connects AI agents to your local browser and
 
 [Get started](release-docs/INSTALL_en.md) · [What you can do](#what-you-can-do) · [Supported environments](#supported-environments) · [Release guide](release-docs/README_en.md) · [MIT License](LICENSE)
 
-> **0.1.6 / Beta**\
+> **0.1.7 / Beta**\
 > This beta is intended for a limited range of use. Before installing, review [supported environments and known limitations](release-docs/KNOWN_ISSUES_en.md).
 
-This version improves browser action and approval reliability, adds long-text reading and immediate action diffs, and separates resource-loading grants from navigation grants. See [what changed](release-docs/RELEASE_NOTES_en.md) and the [operation settings and approval guide](release-docs/OPERATIONS.md).
+This version adds Linux desktop control and desktop permission tiers with one-shot approvals, and improves browser actions, observations and setup. See [what changed](release-docs/RELEASE_NOTES_en.md) and the [operation settings and approval guide](release-docs/OPERATIONS.md).
 
 ## What you can do
 
@@ -30,7 +30,7 @@ Drag inside the browser, touch swipes and timestamped continuous frame capture a
 
 ## Get started in VS Code
 
-1. Download the common `agentdesklink-0.1.6.vsix` package, then install it with "Extensions: Install from VSIX".
+1. Download the common `agentdesklink-0.1.7.vsix` package, then install it with "Extensions: Install from VSIX".
 2. Open a folder and trust the workspace.
 3. Open **AgentDeskLink** in the activity bar.
 4. Choose **Open Settings** and configure the allowed browser origins or desktop app and the operation permissions you need.
@@ -54,9 +54,11 @@ Clients share the permissions of the workspace where you last explicitly enabled
 | --- | --- |
 | **macOS 14 or later / Apple silicon** | Browser and desktop. Requires the OS accessibility permission, plus screen recording for image capture |
 | **Windows 11 x64** | Browser and desktop. Desktop actions run in the same interactive session as the target app |
-| **Linux x64 (Ubuntu 24.04)** | Browser. Requires shared libraries for Chrome or Chromium and a working OS sandbox |
+| **Linux x64 (Ubuntu 24.04)** | Browser and desktop (semantic control through AT-SPI2). The browser needs the shared libraries for Chrome or Chromium and a working OS sandbox; the desktop needs python3-gi, gir1.2-atspi-2.0 and at-spi2-core |
 
 On macOS and Windows you can also check the state of, launch and normally close the apps you have allowed. Apps launched on Windows are placed on a dedicated Win32 desktop. Launching and closing are available when explicitly permitted in a CLI policy.
+
+Linux desktop control is observation plus click / fill / check / select / scroll through the accessibility API (AT-SPI2) only. Physical input, window images and application launch/quit are unsupported and listed under `platform_unsupported` in `adl_capabilities`. The application ID is the AT-SPI application name and the path is the absolute executable (`readlink /proc/<pid>/exe`); see [Linux setup](release-docs/INSTALL_en.md#per-operating-system-preparation).
 
 Which actions are available depends on your OS, app and display setup. See [supported environments and known limitations](release-docs/KNOWN_ISSUES_en.md) for details.
 
@@ -67,11 +69,11 @@ Which actions are available depends on your OS, app and display setup. See [supp
 - **Keep it apart from your everyday browser.** No human profile or sign-in state is shared.
 - **Physical input uses a dedicated mode.** `interactive_desktop` uses your real mouse and keyboard, so do not run it alongside your own input.
 
-Choose **Read only / Standard / Ask**. Standard permits ordinary input, clicks and GET search forms. Ask binds each approval to the exact target, input and form contents. In the main document, unrelated clock updates preserve approval; target, form or document changes, expiry and emergency stop invalidate it. Open Shadow DOM and same-origin iframes are supported. Closed shadow roots, out-of-process iframe proofs and native individual approvals remain unsupported. The legacy explicit all-operations setting takes precedence when enabled.
+Choose **Read only / Standard / Ask**. Standard permits ordinary input, clicks and forms handled within JavaScript. Real GET/POST form submissions require approval. Ask binds each approval to the exact target, input and form contents. In the main document, unrelated clock updates preserve approval; target, form or document changes, expiry and emergency stop invalidate it. Open Shadow DOM and same-origin iframes are supported. The same tiers apply to native actions in the granted desktop app (macOS, Windows and Linux): Standard operates only non-sensitive, non-consequential controls, and Ask approves consequential controls such as delete or send one at a time, bound to the target, control name and observed revision. Sensitive controls such as password fields are never operated, even with approval. Closed shadow roots and out-of-process iframe proofs remain unsupported. The legacy explicit all-operations setting takes precedence when enabled.
 
 Configure trusted grants near the top of the panel. `browserOrigins` grants navigation targets; `browserResourceOrigins` separately grants CDN assets for GET/HEAD loading. Localhost needs both its exact origin and `allowLoopback`. Personal data is masked by default; explicitly enable `allowPersonalData` to reveal email addresses and phone numbers. Credentials and explicitly protected regions remain protected.
 
-Use `adl_observe` with `text: {element_id, offset, length}` to read beyond a clipped name. Offsets refer to redacted text. `adl_act` with `include_diff: true` returns immediate changes. A response with `network_blocked` or `warnings` indicates blocked site traffic; `ok: true` acknowledges input, not application success. Unapproved fetch POST remains blocked even for search.
+Use `adl_observe` with `text: {element_id, offset, length}` to read beyond a clipped name. Offsets refer to redacted text. `adl_act` with `include_diff: true` returns immediate changes and switches to a full observation (`reset: true`) after a navigation. `network_blocked` means the action's own traffic was blocked; unrelated subresource blocks are counted in `subresources_blocked`. `ok: true` acknowledges input, not application success. Unapproved fetch POST remains blocked even for search.
 
 Unknown secrets in images or text cannot be detected completely. Use Emergency Stop in the settings panel or Command Palette to stop extension-managed operations, and Resume Operations to resume. Processing already dispatched to an application cannot be undone.
 
@@ -79,7 +81,7 @@ The panel also configures a visible browser, idle timeout and an HTTP(S) proxy w
 
 Bundled Node starts with `--use-system-ca`. Destination DNS/IP validation remains local, including through a proxy, so hosts resolvable only by the proxy are unsupported. Pages whose DOM APIs cannot be verified fail closed with `untrusted_dom_api`. See [supported environments and known limitations](release-docs/KNOWN_ISSUES_en.md).
 
-`adl_observe` supports `format: "compact"` to omit declared defaults and `"lines"` for escaped rows. JSON remains the default; diffs, scope and cursors work in all formats. Coordinate clicks use `adl_act` with `point: {frame_id,x,y}` in source CSS pixels from the latest retained capture. Capture again when geometry or the target changes.
+`adl_observe` supports `format: "compact"` to omit declared defaults and `"lines"` for escaped rows. JSON remains the default; diffs, scope and cursors work in all formats. `scope` searches the page: quote with `text:"v1.0: fixed"`, or use `role:` / `name:` / `id:` (see [operation settings](release-docs/OPERATIONS.md)). Links include `href`, images and canvas with a text alternative appear as `img`, and elements containing text that is hard for people to see carry `hidden_text: true`. Coordinate clicks use `adl_act` with `point: {frame_id,x,y}` in source CSS pixels from the latest retained capture. Capture again when geometry or the target changes.
 
 Browser regions marked `data-adl-sensitive` or `data-adl-classification="SECRET"` / `"UNKNOWN"` protect their descendants as well. Neither a child marked `PUBLIC` nor `allowAllOperations` removes that protection. Semantic observations redact protected content, and actions within these regions are denied. Browser captures and retained crops mask them. These explicit markers complement automatic detection.
 
@@ -118,7 +120,7 @@ Start the server from your MCP host, pointing it at the demo policy. Replace the
 }
 ```
 
-The server connects over stdio. Using the desktop from source also requires building and configuring the OS helper.
+The server connects over stdio. Using the desktop from source also requires building and configuring the OS helper. The Linux helper is a Python script (`native/linux-atspi/adl-linux-atspi-helper.py`) that needs no build; install `python3-gi`, `gir1.2-atspi-2.0` and `at-spi2-core` from the OS packages.
 
 Relative CLI `auditPath` values resolve from the policy JSON's directory. An unwritable log stops startup with a cause code on stderr before the MCP connection starts.
 
@@ -132,6 +134,7 @@ See [operation settings and approvals](release-docs/OPERATIONS.md) for the setti
 | Browser image capture | [visual.example.json](config/visual.example.json) |
 | Driving the macOS Calculator | [macos-calculator.example.json](config/macos-calculator.example.json) |
 | Driving the Windows Character Map | [windows-character-map.example.json](config/windows-character-map.example.json) |
+| Driving a Linux app (AT-SPI2) in the standard tier | [linux-atspi.example.json](config/linux-atspi.example.json) |
 
 ## Guides
 

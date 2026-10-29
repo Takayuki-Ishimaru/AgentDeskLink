@@ -1,10 +1,10 @@
-import {Buffer} from 'node:buffer';
-import {randomBytes} from 'node:crypto';
-import {errors,type CDPSession,type Locator,type Page} from 'playwright';
-import {AdlError} from './types.js';
-import type {CapturedImage, VisualPolicy} from './visual-types.js';
-import {TEXT_REDACTION_RULES,PERSONAL_DATA_REDACTION_RULES} from './privacy.js';
-import {privacyMaskSelector,ensureBrowserPrivacySelectors} from './browser-privacy.js';
+import { Buffer } from 'node:buffer';
+import { randomBytes } from 'node:crypto';
+import { errors, type CDPSession, type Locator, type Page } from 'playwright';
+import { AdlError } from './types.js';
+import type { CapturedImage, VisualPolicy } from './visual-types.js';
+import { TEXT_REDACTION_RULES, PERSONAL_DATA_REDACTION_RULES } from './privacy.js';
+import { privacyMaskSelector, ensureBrowserPrivacySelectors } from './browser-privacy.js';
 
 const MAX_DIMENSION = 4096;
 const MAX_PIXELS = 4194304;
@@ -13,7 +13,11 @@ const CAPTURE_TIMEOUT_MS = 5000;
 const BASE_MASK_SELECTORS = ['input[type="password" i]', 'iframe', 'frame', '[data-adl-sensitive]'];
 
 interface Geometry {
-  width: number; height: number; scroll_x: number; scroll_y: number; device_scale_factor: number;
+  width: number;
+  height: number;
+  scroll_x: number;
+  scroll_y: number;
+  device_scale_factor: number;
 }
 
 const GEOMETRY_EXPRESSION =
@@ -37,7 +41,7 @@ async function guarded<T>(work: () => Promise<T>, signal: AbortSignal): Promise<
   let onAbort!: () => void;
   const aborted = new Promise<never>((_, reject) => {
     onAbort = () => reject(new AdlError('E_CANCELLED'));
-    signal.addEventListener('abort', onAbort, {once: true});
+    signal.addEventListener('abort', onAbort, { once: true });
   });
   try {
     return await Promise.race([work(), aborted]);
@@ -52,20 +56,31 @@ async function guarded<T>(work: () => Promise<T>, signal: AbortSignal): Promise<
 }
 
 function sameGeometry(a: Geometry, b: Geometry): boolean {
-  return a.width === b.width && a.height === b.height && a.scroll_x === b.scroll_x &&
-    a.scroll_y === b.scroll_y && a.device_scale_factor === b.device_scale_factor;
+  return (
+    a.width === b.width &&
+    a.height === b.height &&
+    a.scroll_x === b.scroll_x &&
+    a.scroll_y === b.scroll_y &&
+    a.device_scale_factor === b.device_scale_factor
+  );
 }
 
 function validateGeometry(value: unknown): Geometry {
   if (value === null || typeof value !== 'object') throw new AdlError('E_STALE_STATE');
   const raw = value as Record<string, unknown>;
-  const {width, height, scroll_x: scrollX, scroll_y: scrollY, device_scale_factor: deviceScaleFactor} = raw;
+  const { width, height, scroll_x: scrollX, scroll_y: scrollY, device_scale_factor: deviceScaleFactor } = raw;
   if (!isInteger(width) || !isInteger(height) || width <= 0 || height <= 0) throw new AdlError('E_STALE_STATE');
-  if (width > MAX_DIMENSION || height > MAX_DIMENSION || width * height > MAX_PIXELS) throw new AdlError('E_RESOURCE_LIMIT');
-  if (!isFiniteNumber(scrollX) || !isFiniteNumber(scrollY) || !isFiniteNumber(deviceScaleFactor) || deviceScaleFactor <= 0) {
+  if (width > MAX_DIMENSION || height > MAX_DIMENSION || width * height > MAX_PIXELS)
+    throw new AdlError('E_RESOURCE_LIMIT');
+  if (
+    !isFiniteNumber(scrollX) ||
+    !isFiniteNumber(scrollY) ||
+    !isFiniteNumber(deviceScaleFactor) ||
+    deviceScaleFactor <= 0
+  ) {
     throw new AdlError('E_STALE_STATE');
   }
-  return {width, height, scroll_x: scrollX, scroll_y: scrollY, device_scale_factor: deviceScaleFactor};
+  return { width, height, scroll_x: scrollX, scroll_y: scrollY, device_scale_factor: deviceScaleFactor };
 }
 
 function assertOrigin(page: Page, origin: string): void {
@@ -86,7 +101,7 @@ function assertOrigin(page: Page, origin: string): void {
 }
 
 /** Trusted mask configuration fails closed: a malformed selector must never be dropped silently. */
-function maskSelectors(visual: VisualPolicy,allowPersonalData=false): string[] {
+function maskSelectors(visual: VisualPolicy, allowPersonalData = false): string[] {
   const trusted = visual.maskSelectors === undefined ? [] : visual.maskSelectors;
   if (!Array.isArray(trusted)) throw new AdlError('E_PRIVACY_BLOCKED');
   for (const selector of trusted) {
@@ -94,8 +109,10 @@ function maskSelectors(visual: VisualPolicy,allowPersonalData=false): string[] {
   }
   // Playwright text locators resolve against the rendered DOM at capture time,
   // including non-form text. They mask the smallest matching element.
-  const textMasks=[...TEXT_REDACTION_RULES,...(allowPersonalData?[]:PERSONAL_DATA_REDACTION_RULES)].map(([source])=>`:text-matches(${JSON.stringify(source)}, "i")`);
-  return [...new Set([...BASE_MASK_SELECTORS, ...trusted,privacyMaskSelector(allowPersonalData),...textMasks])];
+  const textMasks = [...TEXT_REDACTION_RULES, ...(allowPersonalData ? [] : PERSONAL_DATA_REDACTION_RULES)].map(
+    ([source]) => `:text-matches(${JSON.stringify(source)}, "i")`,
+  );
+  return [...new Set([...BASE_MASK_SELECTORS, ...trusted, privacyMaskSelector(allowPersonalData), ...textMasks])];
 }
 
 // The isolated world is inaccessible to page scripts. Keep its bounded DOM
@@ -118,49 +135,95 @@ const DOM_STATE_EXPRESSION = `(() => {
   }return JSON.stringify(out);
 })()`;
 
-async function domState(cdp:CDPSession,contextId:number,signal:AbortSignal):Promise<string>{
-  const result=await guarded(()=>cdp.send('Runtime.evaluate',{expression:DOM_STATE_EXPRESSION,contextId,returnByValue:true}),signal);
-  if(result.exceptionDetails||typeof result.result.value!=='string')throw new AdlError('E_PRIVACY_BLOCKED');
+async function domState(cdp: CDPSession, contextId: number, signal: AbortSignal): Promise<string> {
+  const result = await guarded(
+    () => cdp.send('Runtime.evaluate', { expression: DOM_STATE_EXPRESSION, contextId, returnByValue: true }),
+    signal,
+  );
+  if (result.exceptionDetails || typeof result.result.value !== 'string') throw new AdlError('E_PRIVACY_BLOCKED');
   return result.result.value;
 }
 
 export async function captureBrowserImage(
-  page: Page, origin: string, visual: VisualPolicy | undefined, signal: AbortSignal,allowPersonalData=false
+  page: Page,
+  origin: string,
+  visual: VisualPolicy | undefined,
+  signal: AbortSignal,
+  allowPersonalData = false,
 ): Promise<CapturedImage> {
   assertActive(signal);
   if (visual?.enabled !== true) throw new AdlError('E_PRIVACY_BLOCKED');
-  assertOrigin(page,origin);
-  let cdp:CDPSession|undefined,disabled=false;const marked:number[]=[];const marker=`data-adl-private-${randomBytes(8).toString('hex')}`;
-  try{
-    cdp=await guarded(()=>page.context().newCDPSession(page),signal);
-    disabled=true;await guarded(()=>cdp!.send('Emulation.setScriptExecutionDisabled',{value:true}),signal);
-    const dom=await guarded(()=>cdp!.send('DOM.getDocument',{depth:-1,pierce:true}),signal);
-    const pending=[dom.root];let visited=0;
-    while(pending.length){const node=pending.pop()!;if(++visited>10000)throw new AdlError('E_RESOURCE_LIMIT');
-      if(node.shadowRoots?.some(root=>root.shadowRootType==='closed')){marked.push(node.nodeId);await guarded(()=>cdp!.send('DOM.setAttributeValue',{nodeId:node.nodeId,name:marker,value:''}),signal);}
-      if(node.children)pending.push(...node.children);if(node.shadowRoots)pending.push(...node.shadowRoots);
+  assertOrigin(page, origin);
+  let cdp: CDPSession | undefined,
+    disabled = false;
+  const marked: number[] = [];
+  const marker = `data-adl-private-${randomBytes(8).toString('hex')}`;
+  try {
+    cdp = await guarded(() => page.context().newCDPSession(page), signal);
+    disabled = true;
+    await guarded(() => cdp!.send('Emulation.setScriptExecutionDisabled', { value: true }), signal);
+    const dom = await guarded(() => cdp!.send('DOM.getDocument', { depth: -1, pierce: true }), signal);
+    const pending = [dom.root];
+    let visited = 0;
+    while (pending.length) {
+      const node = pending.pop()!;
+      if (++visited > 10000) throw new AdlError('E_RESOURCE_LIMIT');
+      if (node.shadowRoots?.some(root => root.shadowRootType === 'closed')) {
+        marked.push(node.nodeId);
+        await guarded(
+          () => cdp!.send('DOM.setAttributeValue', { nodeId: node.nodeId, name: marker, value: '' }),
+          signal,
+        );
+      }
+      if (node.children) pending.push(...node.children);
+      if (node.shadowRoots) pending.push(...node.shadowRoots);
     }
-    const tree=await guarded(()=>cdp!.send('Page.getFrameTree'),signal);
-    const world=await guarded(()=>cdp!.send('Page.createIsolatedWorld',{frameId:tree.frameTree.frame.id,worldName:'adl-capture-privacy'}),signal);
-    const before=await domState(cdp,world.executionContextId,signal);
-    const image=await captureFrozenBrowserImage(page,origin,visual,signal,marked.length?`[${marker}]`:undefined,allowPersonalData);
-    const after=await domState(cdp,world.executionContextId,signal);
-    if(before!==after)throw new AdlError('E_PRIVACY_BLOCKED');
+    const tree = await guarded(() => cdp!.send('Page.getFrameTree'), signal);
+    const world = await guarded(
+      () =>
+        cdp!.send('Page.createIsolatedWorld', { frameId: tree.frameTree.frame.id, worldName: 'adl-capture-privacy' }),
+      signal,
+    );
+    const before = await domState(cdp, world.executionContextId, signal);
+    const image = await captureFrozenBrowserImage(
+      page,
+      origin,
+      visual,
+      signal,
+      marked.length ? `[${marker}]` : undefined,
+      allowPersonalData,
+    );
+    const after = await domState(cdp, world.executionContextId, signal);
+    if (before !== after) throw new AdlError('E_PRIVACY_BLOCKED');
     return image;
-  }finally{
-    if(cdp){
-      try{for(const nodeId of marked)await cdp.send('DOM.removeAttribute',{nodeId,name:marker});if(disabled)await cdp.send('Emulation.setScriptExecutionDisabled',{value:false});}
-      catch{await page.context().close().catch(()=>undefined);throw new AdlError('E_PRIVACY_BLOCKED');}
-      finally{await cdp.detach().catch(()=>undefined);}
+  } finally {
+    if (cdp) {
+      try {
+        for (const nodeId of marked) await cdp.send('DOM.removeAttribute', { nodeId, name: marker });
+        if (disabled) await cdp.send('Emulation.setScriptExecutionDisabled', { value: false });
+      } catch {
+        await page
+          .context()
+          .close()
+          .catch(() => undefined);
+        throw new AdlError('E_PRIVACY_BLOCKED');
+      } finally {
+        await cdp.detach().catch(() => undefined);
+      }
     }
   }
 }
 
 async function captureFrozenBrowserImage(
-  page: Page, origin: string, visual: VisualPolicy, signal: AbortSignal,additionalMask?:string,allowPersonalData=false
+  page: Page,
+  origin: string,
+  visual: VisualPolicy,
+  signal: AbortSignal,
+  additionalMask?: string,
+  allowPersonalData = false,
 ): Promise<CapturedImage> {
-  await guarded(()=>ensureBrowserPrivacySelectors(),signal);
-  const selectors = [...maskSelectors(visual,allowPersonalData),...(additionalMask?[additionalMask]:[])];
+  await guarded(() => ensureBrowserPrivacySelectors(), signal);
+  const selectors = [...maskSelectors(visual, allowPersonalData), ...(additionalMask ? [additionalMask] : [])];
   assertOrigin(page, origin);
 
   const before = validateGeometry(await guarded(() => page.evaluate(GEOMETRY_EXPRESSION), signal));
@@ -169,21 +232,25 @@ async function captureFrozenBrowserImage(
 
   let mask: Locator[];
   try {
-    mask = selectors.map((selector) => page.locator(selector));
+    mask = selectors.map(selector => page.locator(selector));
   } catch {
     throw new AdlError('E_PRIVACY_BLOCKED');
   }
 
-  const png = await guarded(() => page.screenshot({
-    type: 'png',
-    scale: 'css',
-    fullPage: false,
-    animations: 'disabled',
-    caret: 'initial',
-    timeout: CAPTURE_TIMEOUT_MS,
-    maskColor: '#000000',
-    mask
-  }), signal);
+  const png = await guarded(
+    () =>
+      page.screenshot({
+        type: 'png',
+        scale: 'css',
+        fullPage: false,
+        animations: 'disabled',
+        caret: 'initial',
+        timeout: CAPTURE_TIMEOUT_MS,
+        maskColor: '#000000',
+        mask,
+      }),
+    signal,
+  );
   assertActive(signal);
 
   assertOrigin(page, origin);
@@ -202,6 +269,10 @@ async function captureFrozenBrowserImage(
     coordinate_space: 'viewport_css_pixels',
     viewport: before,
     redacted: true,
-    redaction:{scope:'detected_regions',methods:['controls','frames','sensitive_labels','text_patterns','configured_selectors'],complete:false}
+    redaction: {
+      scope: 'detected_regions',
+      methods: ['controls', 'frames', 'sensitive_labels', 'text_patterns', 'configured_selectors'],
+      complete: false,
+    },
   };
 }

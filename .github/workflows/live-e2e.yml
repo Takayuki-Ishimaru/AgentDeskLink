@@ -1,0 +1,50 @@
+name: Live E2E
+on:
+  workflow_dispatch:
+  schedule:
+    # Mondays 03:00 UTC. Scheduled workflows run from the default branch.
+    - cron: '0 3 * * 1'
+permissions:
+  contents: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  python-docs:
+    # Drives the built MCP server against the real https://docs.python.org site (network required).
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    env:
+      CHROME_DEVEL_SANDBOX: ${{ matrix.os == 'ubuntu-24.04' && '/opt/google/chrome/chrome-sandbox' || '' }}
+      ADL_PROOF_DIR: artifacts/python-docs-live-${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - if: runner.os == 'Linux'
+        name: Prepare system Chromium sandbox helper
+        run: |
+          sudo chown root:root /opt/google/chrome/chrome-sandbox
+          sudo chmod 4755 /opt/google/chrome/chrome-sandbox
+          python3 - <<'PY'
+          import os, stat
+          info = os.stat('/opt/google/chrome/chrome-sandbox')
+          assert info.st_uid == 0 and info.st_mode & stat.S_ISUID
+          PY
+      - run: npm run build:tsc
+      - run: node --test --test-timeout=120000 --test-force-exit scripts/python-docs-live.mjs
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-docs-live-${{ matrix.os }}
+          path: ${{ env.ADL_PROOF_DIR }}
+          if-no-files-found: warn
+          retention-days: 14

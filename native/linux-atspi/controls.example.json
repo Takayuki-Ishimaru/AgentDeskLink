@@ -1,0 +1,6 @@
+{
+  "FixtureText": {"role": "textbox", "allowed": ["fill"]},
+  "FixtureButton": {"role": "button", "allowed": ["click"]},
+  "FixtureCheck": {"role": "check box", "allowed": ["check"]},
+  "FixtureScroll": {"role": "region", "allowed": ["scroll"]}
+}

@@ -215,3 +215,14 @@ ul.permissions li{display:flex;justify-content:space-between;gap:8px;font-size:1
 html[lang="ja"] [data-i18n-en],html[lang="en"] [data-i18n-ja]{display:none!important}
 .language-control{display:flex;align-items:center;gap:6px;margin-left:auto;font-size:.85em}
 .language-control select{max-width:110px}
+
+.client-list li span{min-width:0;overflow-wrap:anywhere}
+.client-list.stacked li{flex-direction:column;align-items:flex-start;gap:2px}
+.client-list.stacked li span:last-child{text-align:left}
+.browser-setup{border-left:2px solid var(--vscode-editorWarning-foreground,#cca700);padding-left:8px;margin:10px 0}
+.browser-setup .perm-title:first-child{margin-top:0}
+#browser-hosts li span:first-child{font-family:var(--vscode-editor-font-family,monospace);font-size:11px}
+.browser-name{font-weight:600}
+.client-list.stacked li .browser-path{font-family:var(--vscode-editor-font-family,monospace);font-size:11px;color:var(--vscode-descriptionForeground);text-align:left}
+.client-list.stacked li .browser-note{color:var(--vscode-list-warningForeground,var(--vscode-editorWarning-foreground));font-size:11px;text-align:left}
+.client-list.stacked li{padding:4px 0;border-bottom:1px solid var(--vscode-panel-border,rgba(128,128,128,.2))}

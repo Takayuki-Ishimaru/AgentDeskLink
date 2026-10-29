@@ -1,63 +1,489 @@
-import {test} from 'node:test';
+import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import {setTimeout as delay} from 'node:timers/promises';
-import {Engine} from '../src/core.js';
-import {parsePolicy} from '../src/policy.js';
-import {AdlError,safeError,type Adapter,type AdapterSession,type Action,type RawSnapshot} from '../src/types.js';
+import { setTimeout as delay } from 'node:timers/promises';
+import { Engine } from '../src/core.js';
+import { parsePolicy } from '../src/policy.js';
+import { AdlError, safeError, type Adapter, type AdapterSession, type Action, type RawSnapshot } from '../src/types.js';
 class Fake implements Adapter {
-  count=0;closed=0;opens=0;extern=0;hanging=false;
-  async open():Promise<AdapterSession>{this.opens++;let gone=false;
+  count = 0;
+  closed = 0;
+  opens = 0;
+  extern = 0;
+  hanging = false;
+  async open(): Promise<AdapterSession> {
+    this.opens++;
+    let gone = false;
     return {
-      snapshot:async()=>{if(gone)throw new AdlError('E_TARGET_NOT_FOUND');return {fingerprint:`${this.count}:${this.extern}`,truncated:false,elements:[{id:'e',role:'button',name:'Find',enabled:true},{id:'status',role:'status',name:this.count?'Done':'Ready',enabled:true}]} satisfies RawSnapshot;},
-      act:async(_a:Action,signal:AbortSignal)=>{if(this.hanging)await delay(10000,undefined,{signal});if(gone||signal.aborted)throw new AdlError('E_CANCELLED');this.count++;},
-      close:async()=>{if(!gone){gone=true;this.closed++;}}
+      snapshot: async () => {
+        if (gone) throw new AdlError('E_TARGET_NOT_FOUND');
+        return {
+          fingerprint: `${this.count}:${this.extern}`,
+          truncated: false,
+          elements: [
+            { id: 'e', role: 'button', name: 'Find', enabled: true },
+            { id: 'status', role: 'status', name: this.count ? 'Done' : 'Ready', enabled: true },
+          ],
+        } satisfies RawSnapshot;
+      },
+      act: async (_a: Action, signal: AbortSignal) => {
+        if (this.hanging) await delay(10000, undefined, { signal });
+        if (gone || signal.aborted) throw new AdlError('E_CANCELLED');
+        this.count++;
+      },
+      close: async () => {
+        if (!gone) {
+          gone = true;
+          this.closed++;
+        }
+      },
     };
   }
-  async close(){}
+  async close() {}
 }
-async function setup(extra:Record<string,unknown>={}){const adapter=new Fake();const p=parsePolicy({allowedOrigins:['https://example.com'],browserTargets:[{id:'demo',label:'Demo',url:'https://example.com',classification:'PUBLIC'}],...extra});const e=new Engine(p,{browser:adapter});const id=(await e.listTargets()).targets[0]!.target_id;return {e,adapter,id};}
-async function completed(e:Engine,id:string){for(let i=0;i<100;i++){const status=e.task(id);if(['completed','failed','cancelled'].includes(status.status))return status;await delay(10);}throw new Error('task did not finish');}
-test('opaque target/session handles, initial observe, mutation and close',async()=>{const {e,adapter,id}=await setup();try{
-  assert.ok(!id.includes('example'));const s=await e.open(id);const p=await e.observe(s.session_id);assert.equal(p.revision,1);
-  const result=await e.act(s.session_id,{action:'click',element_id:'e'},1);assert.equal(result.revision,2);assert.equal(adapter.count,1);
-  await e.close(s.session_id);await assert.rejects(e.observe(s.session_id),{code:'E_TARGET_NOT_FOUND'});
-}finally{await e.shutdown();}});
-test('external state change rejects stale mutation before side effect',async()=>{const {e,adapter,id}=await setup();try{const s=await e.open(id);adapter.extern++;await assert.rejects(e.act(s.session_id,{action:'click',element_id:'e'},1),{code:'E_STALE_STATE'});assert.equal(adapter.count,0);}finally{await e.shutdown();}});
-
-test('browser pre-action snapshot timeout preserves the session before any input is sent',async()=>{
- const {e,adapter,id}=await setup({actionTimeoutMs:100});const original=adapter.open.bind(adapter);let blocked=false;
- adapter.open=async()=>{const session=await original();return {...session,snapshot:async signal=>{if(blocked)await delay(10000,undefined,{signal});return session.snapshot(signal);}};};
- try{const s=await e.open(id);blocked=true;await assert.rejects(e.act(s.session_id,{action:'click',element_id:'e'},1),error=>error instanceof AdlError&&error.code==='E_TIMEOUT'&&!error.mayHaveExecuted);assert.equal(adapter.count,0);assert.equal(adapter.closed,0);blocked=false;assert.equal((await e.observe(s.session_id)).ok,true);}finally{await e.shutdown();}
+async function setup(extra: Record<string, unknown> = {}) {
+  const adapter = new Fake();
+  const p = parsePolicy({
+    allowedOrigins: ['https://example.com'],
+    browserTargets: [{ id: 'demo', label: 'Demo', url: 'https://example.com', classification: 'PUBLIC' }],
+    ...extra,
+  });
+  const e = new Engine(p, { browser: adapter });
+  const id = (await e.listTargets()).targets[0]!.target_id;
+  return { e, adapter, id };
+}
+async function completed(e: Engine, id: string) {
+  for (let i = 0; i < 100; i++) {
+    const status = e.task(id);
+    if (['completed', 'failed', 'cancelled'].includes(status.status)) return status;
+    await delay(10);
+  }
+  throw new Error('task did not finish');
+}
+test('opaque target/session handles, initial observe, mutation and close', async () => {
+  const { e, adapter, id } = await setup();
+  try {
+    assert.ok(!id.includes('example'));
+    const s = await e.open(id);
+    const p = await e.observe(s.session_id);
+    assert.equal(p.revision, 1);
+    const result = await e.act(s.session_id, { action: 'click', element_id: 'e1' }, 1);
+    assert.equal(result.revision, 2);
+    assert.equal(adapter.count, 1);
+    await e.close(s.session_id);
+    await assert.rejects(e.observe(s.session_id), { code: 'E_TARGET_NOT_FOUND' });
+  } finally {
+    await e.shutdown();
+  }
+});
+test('external state change rejects stale mutation before side effect', async () => {
+  const { e, adapter, id } = await setup();
+  try {
+    const s = await e.open(id);
+    adapter.extern++;
+    await assert.rejects(e.act(s.session_id, { action: 'click', element_id: 'e1' }, 1), { code: 'E_STALE_STATE' });
+    assert.equal(adapter.count, 0);
+  } finally {
+    await e.shutdown();
+  }
 });
 
-test('safe errors describe grant settings and do not recommend retries after uncertain execution',()=>{
- const denied=safeError(new AdlError('E_APPROVAL_REQUIRED','operation_not_granted'));
- assert.equal(denied.policy_setting,'browserTargets[].controls');assert.equal(denied.workspace_setting,'agentdesklink.operationMode');assert.equal(denied.retryable,false);
- const error=new AdlError('E_STALE_STATE','occluded');error.mayHaveExecuted=true;
- const uncertain=safeError(error);assert.equal(uncertain.retryable,false);assert.equal(uncertain.may_have_executed,true);assert.match(uncertain.safe_message,/may have executed/);assert.ok(!uncertain.safe_message.includes('observe again'));
+test('browser pre-action snapshot timeout preserves the session before any input is sent', async () => {
+  const { e, adapter, id } = await setup({ actionTimeoutMs: 100 });
+  const original = adapter.open.bind(adapter);
+  let blocked = false;
+  adapter.open = async () => {
+    const session = await original();
+    return {
+      ...session,
+      snapshot: async signal => {
+        if (blocked) await delay(10000, undefined, { signal });
+        return session.snapshot(signal);
+      },
+    };
+  };
+  try {
+    const s = await e.open(id);
+    blocked = true;
+    await assert.rejects(
+      e.act(s.session_id, { action: 'click', element_id: 'e1' }, 1),
+      error => error instanceof AdlError && error.code === 'E_TIMEOUT' && !error.mayHaveExecuted,
+    );
+    assert.equal(adapter.count, 0);
+    assert.equal(adapter.closed, 0);
+    blocked = false;
+    assert.equal((await e.observe(s.session_id)).ok, true);
+  } finally {
+    await e.shutdown();
+  }
 });
-test('all targets default denied and secret/unknown targets never listed',async()=>{const adapter=new Fake();const e=new Engine(parsePolicy({browserTargets:[{id:'secret',label:'hidden',url:'https://example.com',classification:'SECRET'}]}),{browser:adapter});try{assert.equal((await e.listTargets()).targets.length,0);await assert.rejects(e.open('forged'));assert.equal(adapter.opens,0);}finally{await e.shutdown();}});
-test('sessions belong to a server process, never another engine',async()=>{const a=await setup(),b=await setup();try{const s=await a.e.open(a.id);await assert.rejects(b.e.observe(s.session_id),{code:'E_TARGET_NOT_FOUND'});}finally{await a.e.shutdown();await b.e.shutdown();}});
-test('batch advances its own revisions and reports every completed step',async()=>{const {e,adapter,id}=await setup();try{const s=await e.open(id);const task=e.execute([{session_id:s.session_id,action:'click',element_id:'e'},{session_id:s.session_id,action:'click',element_id:'e'}],{[s.session_id]:1});const final=await completed(e,task.task_id);assert.equal(final.status,'completed');assert.equal(final.results.length,2);assert.equal(adapter.count,2);}finally{await e.shutdown();}});
-test('batch missing session fails before first side effect',async()=>{const {e,adapter,id}=await setup();try{const s=await e.open(id);assert.throws(()=>e.execute([{session_id:s.session_id,action:'click',element_id:'e'},{session_id:'forged',action:'click',element_id:'e'}],{[s.session_id]:1,forged:1}));assert.equal(adapter.count,0);}finally{await e.shutdown();}});
-test('batch stale step preserves prefix and marks suffix unexecuted',async()=>{const {e,adapter,id}=await setup();try{const s=await e.open(id);const task=e.execute([{session_id:s.session_id,action:'click',element_id:'e'},{session_id:s.session_id,action:'click',element_id:'e',expected_revision:1},{session_id:s.session_id,action:'click',element_id:'e'}],{[s.session_id]:1});const final=await completed(e,task.task_id);assert.equal(final.status,'failed');assert.deepEqual(final.results.map(r=>r.status),['completed','failed','not_executed']);assert.equal(adapter.count,1);}finally{await e.shutdown();}});
-test('cancel interrupts running wait and invalidates the session',async()=>{const {e,id}=await setup();try{const s=await e.open(id);const task=e.execute([{session_id:s.session_id,action:'wait_for',name:'Never',timeout_ms:5000},{session_id:s.session_id,action:'click',element_id:'e'}],{[s.session_id]:1});await delay(30);e.task(task.task_id,'cancel');const final=await completed(e,task.task_id);assert.equal(final.status,'cancelled');await assert.rejects(e.observe(s.session_id));assert.equal(final.results[1]?.status,'not_executed');}finally{await e.shutdown();}});
-test('action timeout closes session, no delayed writes after queue release',async()=>{const {e,adapter,id}=await setup({actionTimeoutMs:100});try{const s=await e.open(id);adapter.hanging=true;await assert.rejects(e.act(s.session_id,{action:'click',element_id:'e'},1),{code:'E_TIMEOUT'});assert.equal(adapter.closed,1);await delay(30);assert.equal(adapter.count,0);await assert.rejects(e.observe(s.session_id));}finally{await e.shutdown();}});
-test('concurrent same-revision mutations serialize and second is stale',async()=>{const {e,adapter,id}=await setup();try{const s=await e.open(id);const results=await Promise.allSettled([e.act(s.session_id,{action:'click',element_id:'e'},1),e.act(s.session_id,{action:'click',element_id:'e'},1)]);assert.equal(results.filter(r=>r.status==='fulfilled').length,1);assert.equal(adapter.count,1);}finally{await e.shutdown();}});
-test('session resource and lifetime limits',async()=>{const {e,id}=await setup({maxSessions:1,sessionTtlMs:1000});try{const s=await e.open(id);await assert.rejects(e.open(id),{code:'E_RESOURCE_LIMIT'});await delay(1050);await assert.rejects(e.observe(s.session_id),{code:'E_TARGET_NOT_FOUND'});}finally{await e.shutdown();}});
-test('shutdown cancels future work and closes every context',async()=>{const {e,adapter,id}=await setup();await e.open(id);await e.open(id);await e.shutdown();assert.equal(adapter.closed,2);await assert.rejects(e.open(id),{code:'E_CANCELLED'});});
-test('malformed later action rejects entire batch before its valid prefix',async()=>{const {e,adapter,id}=await setup();try{const s=await e.open(id);for(const action of [{action:'navigate'},{action:'navigate',url:'invalid'},{action:'fill',element_id:'e'},{action:'check',element_id:'e'}] as Action[])assert.throws(()=>e.execute([{session_id:s.session_id,action:'click',element_id:'e'},{session_id:s.session_id,...action}],{[s.session_id]:1}),{code:'E_INVALID_ARGUMENT'});assert.equal(adapter.count,0);}finally{await e.shutdown();}});
-test('late open never commits after shutdown during audit',async()=>{const {e,adapter,id}=await setup();let release!:()=>void;let entered!:()=>void;const ready=new Promise<void>(r=>entered=r);const gate=new Promise<void>(r=>release=r);(e as any).audit=async()=>{entered();await gate;return 'audit';};const opening=e.open(id);await ready;await e.shutdown();release();await assert.rejects(opening,{code:'E_CANCELLED'});assert.equal(adapter.closed,1);});
-test('standalone cancellation stops action and closes its session',async()=>{const {e,adapter,id}=await setup();try{const s=await e.open(id);adapter.hanging=true;const cancel=new AbortController();const action=e.act(s.session_id,{action:'click',element_id:'e'},1,cancel.signal);await delay(20);cancel.abort();await assert.rejects(action,{code:'E_CANCELLED'});assert.equal(adapter.count,0);assert.equal(adapter.closed,1);}finally{await e.shutdown();}});
-test('hung adapter cleanup quarantines the engine within a bound',async()=>{const {e,adapter,id}=await setup({actionTimeoutMs:100});const original=adapter.open.bind(adapter);adapter.open=async()=>{const s=await original();return {...s,close:async()=>new Promise<void>(()=>{})};};try{const s=await e.open(id);adapter.hanging=true;const task=e.execute([{session_id:s.session_id,action:'click',element_id:'e'}],{[s.session_id]:1});await delay(1250);const state=e.task(task.task_id);assert.ok(['failed','cancelled'].includes(state.status));assert.equal(state.results[0]?.error instanceof Object,true);await assert.rejects(e.open(id),{code:'E_CANCELLED'});}finally{await e.shutdown();}});
-test('standalone malformed actions reject before adapter mutation and preserve session',async()=>{const {e,adapter,id}=await setup();try{const s=await e.open(id);for(const action of [{action:'fill',element_id:'e'},{action:'check',element_id:'e'},{action:'select',element_id:'e'},{action:'navigate',url:'file:///tmp/private'},{action:'click'},{action:'scroll',element_id:'e',direction:'sideways'},{action:'click',element_id:'e',timeout_ms:0}] as Action[])await assert.rejects(e.act(s.session_id,action,1),{code:'E_INVALID_ARGUMENT'});assert.equal(adapter.count,0);assert.equal((await e.observe(s.session_id)).revision,1);}finally{await e.shutdown();}});
-test('collection limit bounds responses and later elements remain reachable by scope',async()=>{const {e,id}=await setup({maxElements:1});try{const s=await e.open(id);const p=await e.observe(s.session_id);assert.equal(p.elements?.length,1);assert.equal(p.truncated,true);const later=await e.observe(s.session_id,{scope:'id:status'});assert.equal(later.elements?.[0]?.id,'status');assert.ok(p.next_cursor);}finally{await e.shutdown();}});
 
+test('safe errors describe grant settings and do not recommend retries after uncertain execution', () => {
+  const denied = safeError(new AdlError('E_APPROVAL_REQUIRED', 'operation_not_granted'));
+  assert.equal(denied.policy_setting, 'browserTargets[].controls');
+  assert.equal(denied.workspace_setting, 'agentdesklink.operationMode');
+  assert.equal(denied.retryable, false);
+  const error = new AdlError('E_STALE_STATE', 'occluded');
+  error.mayHaveExecuted = true;
+  const uncertain = safeError(error);
+  assert.equal(uncertain.retryable, false);
+  assert.equal(uncertain.may_have_executed, true);
+  assert.match(uncertain.safe_message, /may have executed/);
+  assert.ok(!uncertain.safe_message.includes('observe again'));
+});
+test('all targets default denied and secret/unknown targets never listed', async () => {
+  const adapter = new Fake();
+  const e = new Engine(
+    parsePolicy({
+      browserTargets: [{ id: 'secret', label: 'hidden', url: 'https://example.com', classification: 'SECRET' }],
+    }),
+    { browser: adapter },
+  );
+  try {
+    assert.equal((await e.listTargets()).targets.length, 0);
+    await assert.rejects(e.open('forged'));
+    assert.equal(adapter.opens, 0);
+  } finally {
+    await e.shutdown();
+  }
+});
+test('sessions belong to a server process, never another engine', async () => {
+  const a = await setup(),
+    b = await setup();
+  try {
+    const s = await a.e.open(a.id);
+    await assert.rejects(b.e.observe(s.session_id), { code: 'E_TARGET_NOT_FOUND' });
+  } finally {
+    await a.e.shutdown();
+    await b.e.shutdown();
+  }
+});
+test('batch advances its own revisions and reports every completed step', async () => {
+  const { e, adapter, id } = await setup();
+  try {
+    const s = await e.open(id);
+    const task = e.execute(
+      [
+        { session_id: s.session_id, action: 'click', element_id: 'e1' },
+        { session_id: s.session_id, action: 'click', element_id: 'e1' },
+      ],
+      { [s.session_id]: 1 },
+    );
+    const final = await completed(e, task.task_id);
+    assert.equal(final.status, 'completed');
+    assert.equal(final.results.length, 2);
+    assert.equal(adapter.count, 2);
+  } finally {
+    await e.shutdown();
+  }
+});
+test('batch missing session fails before first side effect', async () => {
+  const { e, adapter, id } = await setup();
+  try {
+    const s = await e.open(id);
+    assert.throws(() =>
+      e.execute(
+        [
+          { session_id: s.session_id, action: 'click', element_id: 'e1' },
+          { session_id: 'forged', action: 'click', element_id: 'e1' },
+        ],
+        { [s.session_id]: 1, forged: 1 },
+      ),
+    );
+    assert.equal(adapter.count, 0);
+  } finally {
+    await e.shutdown();
+  }
+});
+test('batch stale step preserves prefix and marks suffix unexecuted', async () => {
+  const { e, adapter, id } = await setup();
+  try {
+    const s = await e.open(id);
+    const task = e.execute(
+      [
+        { session_id: s.session_id, action: 'click', element_id: 'e1' },
+        { session_id: s.session_id, action: 'click', element_id: 'e1', expected_revision: 1 },
+        { session_id: s.session_id, action: 'click', element_id: 'e1' },
+      ],
+      { [s.session_id]: 1 },
+    );
+    const final = await completed(e, task.task_id);
+    assert.equal(final.status, 'failed');
+    assert.deepEqual(
+      final.results.map(r => r.status),
+      ['completed', 'failed', 'not_executed'],
+    );
+    assert.equal(adapter.count, 1);
+  } finally {
+    await e.shutdown();
+  }
+});
+test('cancel interrupts running wait and invalidates the session', async () => {
+  const { e, id } = await setup();
+  try {
+    const s = await e.open(id);
+    const task = e.execute(
+      [
+        { session_id: s.session_id, action: 'wait_for', name: 'Never', timeout_ms: 5000 },
+        { session_id: s.session_id, action: 'click', element_id: 'e1' },
+      ],
+      { [s.session_id]: 1 },
+    );
+    await delay(30);
+    e.task(task.task_id, 'cancel');
+    const final = await completed(e, task.task_id);
+    assert.equal(final.status, 'cancelled');
+    await assert.rejects(e.observe(s.session_id));
+    assert.equal(final.results[1]?.status, 'not_executed');
+  } finally {
+    await e.shutdown();
+  }
+});
+test('action timeout closes session, no delayed writes after queue release', async () => {
+  const { e, adapter, id } = await setup({ actionTimeoutMs: 100 });
+  try {
+    const s = await e.open(id);
+    adapter.hanging = true;
+    await assert.rejects(e.act(s.session_id, { action: 'click', element_id: 'e1' }, 1), { code: 'E_TIMEOUT' });
+    assert.equal(adapter.closed, 1);
+    await delay(30);
+    assert.equal(adapter.count, 0);
+    await assert.rejects(e.observe(s.session_id));
+  } finally {
+    await e.shutdown();
+  }
+});
+test('concurrent same-revision mutations serialize and second is stale', async () => {
+  const { e, adapter, id } = await setup();
+  try {
+    const s = await e.open(id);
+    const results = await Promise.allSettled([
+      e.act(s.session_id, { action: 'click', element_id: 'e1' }, 1),
+      e.act(s.session_id, { action: 'click', element_id: 'e1' }, 1),
+    ]);
+    assert.equal(results.filter(r => r.status === 'fulfilled').length, 1);
+    assert.equal(adapter.count, 1);
+  } finally {
+    await e.shutdown();
+  }
+});
+test('session resource and lifetime limits', async () => {
+  const { e, id } = await setup({ maxSessions: 1, sessionTtlMs: 1000 });
+  try {
+    const s = await e.open(id);
+    await assert.rejects(e.open(id), { code: 'E_RESOURCE_LIMIT' });
+    await delay(1050);
+    await assert.rejects(e.observe(s.session_id), { code: 'E_TARGET_NOT_FOUND' });
+  } finally {
+    await e.shutdown();
+  }
+});
+test('shutdown cancels future work and closes every context', async () => {
+  const { e, adapter, id } = await setup();
+  await e.open(id);
+  await e.open(id);
+  await e.shutdown();
+  assert.equal(adapter.closed, 2);
+  await assert.rejects(e.open(id), { code: 'E_CANCELLED' });
+});
+test('malformed later action rejects entire batch before its valid prefix', async () => {
+  const { e, adapter, id } = await setup();
+  try {
+    const s = await e.open(id);
+    for (const action of [
+      { action: 'navigate' },
+      { action: 'navigate', url: 'invalid' },
+      { action: 'fill', element_id: 'e1' },
+      { action: 'check', element_id: 'e1' },
+    ] as Action[])
+      assert.throws(
+        () =>
+          e.execute(
+            [
+              { session_id: s.session_id, action: 'click', element_id: 'e1' },
+              { session_id: s.session_id, ...action },
+            ],
+            { [s.session_id]: 1 },
+          ),
+        { code: 'E_INVALID_ARGUMENT' },
+      );
+    assert.equal(adapter.count, 0);
+  } finally {
+    await e.shutdown();
+  }
+});
+test('late open never commits after shutdown during audit', async () => {
+  const { e, adapter, id } = await setup();
+  let release!: () => void;
+  let entered!: () => void;
+  const ready = new Promise<void>(r => (entered = r));
+  const gate = new Promise<void>(r => (release = r));
+  (e as any).audit = async () => {
+    entered();
+    await gate;
+    return 'audit';
+  };
+  const opening = e.open(id);
+  await ready;
+  await e.shutdown();
+  release();
+  await assert.rejects(opening, { code: 'E_CANCELLED' });
+  assert.equal(adapter.closed, 1);
+});
+test('standalone cancellation stops action and closes its session', async () => {
+  const { e, adapter, id } = await setup();
+  try {
+    const s = await e.open(id);
+    adapter.hanging = true;
+    const cancel = new AbortController();
+    const action = e.act(s.session_id, { action: 'click', element_id: 'e1' }, 1, cancel.signal);
+    await delay(20);
+    cancel.abort();
+    await assert.rejects(action, { code: 'E_CANCELLED' });
+    assert.equal(adapter.count, 0);
+    assert.equal(adapter.closed, 1);
+  } finally {
+    await e.shutdown();
+  }
+});
+test('hung adapter cleanup quarantines the engine within a bound', async () => {
+  const { e, adapter, id } = await setup({ actionTimeoutMs: 100 });
+  const original = adapter.open.bind(adapter);
+  adapter.open = async () => {
+    const s = await original();
+    return { ...s, close: async () => new Promise<void>(() => {}) };
+  };
+  try {
+    const s = await e.open(id);
+    adapter.hanging = true;
+    const task = e.execute([{ session_id: s.session_id, action: 'click', element_id: 'e1' }], { [s.session_id]: 1 });
+    await delay(1250);
+    const state = e.task(task.task_id);
+    assert.ok(['failed', 'cancelled'].includes(state.status));
+    assert.equal(state.results[0]?.error instanceof Object, true);
+    await assert.rejects(e.open(id), { code: 'E_CANCELLED' });
+  } finally {
+    await e.shutdown();
+  }
+});
+test('standalone malformed actions reject before adapter mutation and preserve session', async () => {
+  const { e, adapter, id } = await setup();
+  try {
+    const s = await e.open(id);
+    for (const action of [
+      { action: 'fill', element_id: 'e1' },
+      { action: 'check', element_id: 'e1' },
+      { action: 'select', element_id: 'e1' },
+      { action: 'navigate', url: 'file:///tmp/private' },
+      { action: 'click' },
+      { action: 'scroll', element_id: 'e1', direction: 'sideways' },
+      { action: 'click', element_id: 'e1', timeout_ms: 0 },
+    ] as Action[])
+      await assert.rejects(e.act(s.session_id, action, 1), { code: 'E_INVALID_ARGUMENT' });
+    assert.equal(adapter.count, 0);
+    assert.equal((await e.observe(s.session_id)).revision, 1);
+  } finally {
+    await e.shutdown();
+  }
+});
+test('collection limit bounds responses and later elements remain reachable by scope', async () => {
+  const { e, id } = await setup({ maxElements: 1 });
+  try {
+    const s = await e.open(id);
+    const p = await e.observe(s.session_id);
+    assert.equal(p.elements?.length, 1);
+    assert.equal(p.truncated, true);
+    const later = await e.observe(s.session_id, { scope: 'id:e2' });
+    assert.equal(later.elements?.[0]?.id, 'e2');
+    assert.ok(p.next_cursor);
+  } finally {
+    await e.shutdown();
+  }
+});
 
-test('wait timeouts preserve sessions and name predicates match substrings',async()=>{const {e,adapter,id}=await setup();try{const s=await e.open(id);await assert.rejects(e.wait(s.session_id,{name:'Never'},20),error=>error instanceof AdlError&&error.code==='E_TIMEOUT'&&!error.mayHaveExecuted);assert.equal(adapter.closed,0);assert.equal((await e.observe(s.session_id)).revision,1);assert.equal((await e.wait(s.session_id,{name:'ead'},20)).matched,true);}finally{await e.shutdown();}});
+test('wait timeouts preserve sessions and name predicates match substrings', async () => {
+  const { e, adapter, id } = await setup();
+  try {
+    const s = await e.open(id);
+    await assert.rejects(
+      e.wait(s.session_id, { name: 'Never' }, 20),
+      error => error instanceof AdlError && error.code === 'E_TIMEOUT' && !error.mayHaveExecuted,
+    );
+    assert.equal(adapter.closed, 0);
+    assert.equal((await e.observe(s.session_id)).revision, 1);
+    assert.equal((await e.wait(s.session_id, { name: 'ead' }, 20)).matched, true);
+  } finally {
+    await e.shutdown();
+  }
+});
 
-test('adapter pre-dispatch policy and stale failures preserve the session without claiming execution',async()=>{const {e,adapter,id}=await setup();const original=adapter.open.bind(adapter);let failure: 'E_POLICY_DENIED'|'E_STALE_STATE'='E_POLICY_DENIED';adapter.open=async()=>({...await original(),tracksDispatch:true,act:async()=>{throw new AdlError(failure);}});try{const s=await e.open(id);for(const code of ['E_POLICY_DENIED','E_STALE_STATE'] as const){failure=code;await assert.rejects(e.act(s.session_id,{action:'click',element_id:'e'},1),error=>error instanceof AdlError&&error.code===code&&!error.mayHaveExecuted);assert.equal((await e.observe(s.session_id)).revision,1);}assert.equal(adapter.closed,0);}finally{await e.shutdown();}});
+test('adapter pre-dispatch policy and stale failures preserve the session without claiming execution', async () => {
+  const { e, adapter, id } = await setup();
+  const original = adapter.open.bind(adapter);
+  let failure: 'E_POLICY_DENIED' | 'E_STALE_STATE' = 'E_POLICY_DENIED';
+  adapter.open = async () => ({
+    ...(await original()),
+    tracksDispatch: true,
+    act: async () => {
+      throw new AdlError(failure);
+    },
+  });
+  try {
+    const s = await e.open(id);
+    for (const code of ['E_POLICY_DENIED', 'E_STALE_STATE'] as const) {
+      failure = code;
+      await assert.rejects(
+        e.act(s.session_id, { action: 'click', element_id: 'e1' }, 1),
+        error => error instanceof AdlError && error.code === code && !error.mayHaveExecuted,
+      );
+      assert.equal((await e.observe(s.session_id)).revision, 1);
+    }
+    assert.equal(adapter.closed, 0);
+  } finally {
+    await e.shutdown();
+  }
+});
 
-test('failure after the browser dispatch boundary invalidates the session',async()=>{const {e,adapter,id}=await setup();const original=adapter.open.bind(adapter);adapter.open=async()=>({...await original(),tracksDispatch:true,act:async(_action,_signal,dispatch)=>{dispatch?.();throw new Error('Unknown result');}});try{const s=await e.open(id);await assert.rejects(e.act(s.session_id,{action:'click',element_id:'e'},1),error=>error instanceof AdlError&&error.mayHaveExecuted);assert.equal(adapter.closed,1);await assert.rejects(e.observe(s.session_id),{code:'E_TARGET_NOT_FOUND'});}finally{await e.shutdown();}});
+test('failure after the browser dispatch boundary invalidates the session', async () => {
+  const { e, adapter, id } = await setup();
+  const original = adapter.open.bind(adapter);
+  adapter.open = async () => ({
+    ...(await original()),
+    tracksDispatch: true,
+    act: async (_action, _signal, dispatch) => {
+      dispatch?.();
+      throw new Error('Unknown result');
+    },
+  });
+  try {
+    const s = await e.open(id);
+    await assert.rejects(
+      e.act(s.session_id, { action: 'click', element_id: 'e1' }, 1),
+      error => error instanceof AdlError && error.mayHaveExecuted,
+    );
+    assert.equal(adapter.closed, 1);
+    await assert.rejects(e.observe(s.session_id), { code: 'E_TARGET_NOT_FOUND' });
+  } finally {
+    await e.shutdown();
+  }
+});
 
-test('using a session renews its idle TTL and session listings omit expired handles',async()=>{const {e,id}=await setup({sessionTtlMs:1000});const now=Date.now;let offset=0;try{Date.now=()=>now()+offset;const s=await e.open(id);offset=700;await e.observe(s.session_id);offset=1400;assert.equal((await e.observe(s.session_id)).revision,1);assert.equal(e.listSessions().sessions[0]?.session_id,s.session_id);offset=2500;assert.equal(e.listSessions().sessions.length,0);await assert.rejects(e.observe(s.session_id),{code:'E_TARGET_NOT_FOUND'});}finally{Date.now=now;await e.shutdown();}});
+test('using a session renews its idle TTL and session listings omit expired handles', async () => {
+  const { e, id } = await setup({ sessionTtlMs: 1000 });
+  const now = Date.now;
+  let offset = 0;
+  try {
+    Date.now = () => now() + offset;
+    const s = await e.open(id);
+    offset = 700;
+    await e.observe(s.session_id);
+    offset = 1400;
+    assert.equal((await e.observe(s.session_id)).revision, 1);
+    assert.equal(e.listSessions().sessions[0]?.session_id, s.session_id);
+    offset = 2500;
+    assert.equal(e.listSessions().sessions.length, 0);
+    await assert.rejects(e.observe(s.session_id), { code: 'E_TARGET_NOT_FOUND' });
+  } finally {
+    Date.now = now;
+    await e.shutdown();
+  }
+});

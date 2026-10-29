@@ -1,7 +1,88 @@
-import {spawn} from 'node:child_process';import {createInterface} from 'node:readline';import assert from 'node:assert/strict';import {resolve,join} from 'node:path';import {writeFile} from 'node:fs/promises';
-const root=resolve('native/macos-ax/build');
-function channel(exe,args=[]){const p=spawn(exe,args,{stdio:['pipe','pipe','pipe']});const values=[],pending=[];let err='';p.stderr.on('data',c=>err+=c);createInterface({input:p.stdout}).on('line',l=>{const v=JSON.parse(l);pending.length?pending.shift()(v):values.push(v)});return {p,err:()=>err,next:()=>values.length?Promise.resolve(values.shift()):Promise.race([new Promise(r=>pending.push(r)),new Promise((_,j)=>setTimeout(()=>j(new Error('timeout '+err)),5000).unref())]),call:async function(x){p.stdin.write(JSON.stringify(x)+'\n');return this.next()}}}
-const f=channel(join(root,'ADLFixture.app/Contents/MacOS/ADLFixture'));await f.next();const h=channel(join(root,'adl-macos-ax-helper'),['--app-id','local.agentdesklink.fixture','--app-path',join(root,'ADLFixture.app/Contents/MacOS/ADLFixture')]);let request=0;
-const call=async(op,args={})=>{for(let tries=0;;tries++){const r=await h.call({op,request_id:String(++request),...args});if(r.ok)return r.result;if(['discover','snapshot'].includes(op)&&r.error.code==='E_TARGET_NOT_FOUND'&&tries<20){await new Promise(r=>setTimeout(r,25));continue;}assert.equal(r.ok,true,JSON.stringify(r));}};
-const retired=new Set();let completed=0;
-try{for(let i=0;i<300;i++){const d=await call('discover');assert.equal(d.targets.length,3);for(const t of d.targets)assert.ok(!retired.has(t.target_id));const t=d.targets.find(t=>t.window.bounds.x===50);assert.ok(t);const s=await call('open',{target_id:t.target_id,mode:'background_semantic'});await call('snapshot',{target_id:t.target_id,session_id:s.session_id});await f.call({op:'close',index:0});await f.call({op:'reopen',index:0,screen:0});const old=await h.call({op:'snapshot',request_id:String(++request),target_id:t.target_id,session_id:s.session_id});assert.equal(old.ok,false);await call('close',{target_id:t.target_id,session_id:s.session_id});retired.add(t.target_id);completed++;if(i%50===49)console.log(JSON.stringify({cycles:completed}));}await writeFile('artifacts/macos-lifecycle.json',JSON.stringify({ok:true,cycles:completed,retired_ids_rejected:retired.size,requests:request},null,2));}catch(e){console.error('cycles',completed,'helperstderr',h.err());throw e}finally{f.p.kill();h.p.kill()}
+import { spawn } from 'node:child_process';
+import { createInterface } from 'node:readline';
+import assert from 'node:assert/strict';
+import { resolve, join } from 'node:path';
+import { writeFile } from 'node:fs/promises';
+const root = resolve('native/macos-ax/build');
+function channel(exe, args = []) {
+  const p = spawn(exe, args, { stdio: ['pipe', 'pipe', 'pipe'] });
+  const values = [],
+    pending = [];
+  let err = '';
+  p.stderr.on('data', c => (err += c));
+  createInterface({ input: p.stdout }).on('line', l => {
+    const v = JSON.parse(l);
+    pending.length ? pending.shift()(v) : values.push(v);
+  });
+  return {
+    p,
+    err: () => err,
+    next: () =>
+      values.length
+        ? Promise.resolve(values.shift())
+        : Promise.race([
+            new Promise(r => pending.push(r)),
+            new Promise((_, j) => setTimeout(() => j(new Error('timeout ' + err)), 5000).unref()),
+          ]),
+    call: async function (x) {
+      p.stdin.write(JSON.stringify(x) + '\n');
+      return this.next();
+    },
+  };
+}
+const f = channel(join(root, 'ADLFixture.app/Contents/MacOS/ADLFixture'));
+await f.next();
+const h = channel(join(root, 'adl-macos-ax-helper'), [
+  '--app-id',
+  'local.agentdesklink.fixture',
+  '--app-path',
+  join(root, 'ADLFixture.app/Contents/MacOS/ADLFixture'),
+]);
+let request = 0;
+const call = async (op, args = {}) => {
+  for (let tries = 0; ; tries++) {
+    const r = await h.call({ op, request_id: String(++request), ...args });
+    if (r.ok) return r.result;
+    if (['discover', 'snapshot'].includes(op) && r.error.code === 'E_TARGET_NOT_FOUND' && tries < 20) {
+      await new Promise(r => setTimeout(r, 25));
+      continue;
+    }
+    assert.equal(r.ok, true, JSON.stringify(r));
+  }
+};
+const retired = new Set();
+let completed = 0;
+try {
+  for (let i = 0; i < 300; i++) {
+    const d = await call('discover');
+    assert.equal(d.targets.length, 3);
+    for (const t of d.targets) assert.ok(!retired.has(t.target_id));
+    const t = d.targets.find(t => t.window.bounds.x === 50);
+    assert.ok(t);
+    const s = await call('open', { target_id: t.target_id, mode: 'background_semantic' });
+    await call('snapshot', { target_id: t.target_id, session_id: s.session_id });
+    await f.call({ op: 'close', index: 0 });
+    await f.call({ op: 'reopen', index: 0, screen: 0 });
+    const old = await h.call({
+      op: 'snapshot',
+      request_id: String(++request),
+      target_id: t.target_id,
+      session_id: s.session_id,
+    });
+    assert.equal(old.ok, false);
+    await call('close', { target_id: t.target_id, session_id: s.session_id });
+    retired.add(t.target_id);
+    completed++;
+    if (i % 50 === 49) console.log(JSON.stringify({ cycles: completed }));
+  }
+  await writeFile(
+    'artifacts/macos-lifecycle.json',
+    JSON.stringify({ ok: true, cycles: completed, retired_ids_rejected: retired.size, requests: request }, null, 2),
+  );
+} catch (e) {
+  console.error('cycles', completed, 'helperstderr', h.err());
+  throw e;
+} finally {
+  f.p.kill();
+  h.p.kill();
+}

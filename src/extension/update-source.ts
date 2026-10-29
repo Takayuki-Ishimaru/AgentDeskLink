@@ -1,10 +1,15 @@
+import { createHash } from 'node:crypto';
 import { gt, valid } from 'semver';
 
 const OWNER = 'Takayuki-Ishimaru';
 const REPO = 'AgentDeskLink';
 export const GITHUB_RELEASES_URL = `https://api.github.com/repos/${OWNER}/${REPO}/releases?per_page=100`;
 
-export interface GitHubUpdate { version: string; url: string; sha256: string }
+export interface GitHubUpdate {
+  version: string;
+  url: string;
+  sha256: string;
+}
 
 function canonicalUrl(tag: string, name: string): string {
   return `https://github.com/${OWNER}/${REPO}/releases/download/${tag}/${name}`;
@@ -19,8 +24,36 @@ function tagVersion(tag: unknown): string | undefined {
 /** Universal VSIX names are valid for exactly the three bundled universal targets. */
 const UNIVERSAL_TARGETS = new Set(['darwin-arm64', 'win32-x64', 'linux-x64']);
 
-/** Prefer the smaller exact-platform asset; retain universal release compatibility. */
-export function findGitHubUpdate(data: unknown, platform: string, arch: string): GitHubUpdate | undefined {
+const ROLLOUT_LINE = /^[ \t]*<!--[ \t]*adl-rollout\b(.*?)-->[ \t]*\r?$/gm;
+
+/** Staged-rollout percentage from a `<!-- adl-rollout: N -->` line: none is 100; a malformed or conflicting marker holds the release at 0. */
+function releaseRollout(body: unknown): number {
+  if (typeof body !== 'string') return 100;
+  let found: number | undefined;
+  for (const line of body.matchAll(ROLLOUT_LINE)) {
+    const digits = /^[ \t]*:[ \t]*(\d+)[ \t]*$/.exec(line[1]!)?.[1];
+    const percent = digits === undefined ? NaN : Number(digits);
+    if (!(percent <= 100) || (found !== undefined && found !== percent)) return 0;
+    found = percent;
+  }
+  return found ?? 100;
+}
+
+/** Stable 0..99 bucket of an installation for one version: the first 4 bytes of SHA-256 as a big-endian uint32, mod 100. */
+export function rolloutBucket(id: string, version: string): number {
+  return createHash('sha256').update(`${id}\n${version}`).digest().readUInt32BE(0) % 100;
+}
+
+/**
+ * Prefer the smaller exact-platform asset; retain universal release compatibility.
+ * With `rolloutId` (automatic checks) only releases whose staged-rollout share includes this installation are eligible.
+ */
+export function findGitHubUpdate(
+  data: unknown,
+  platform: string,
+  arch: string,
+  options?: { rolloutId?: string },
+): GitHubUpdate | undefined {
   if (!Array.isArray(data)) throw new Error('GitHub リリース情報の形式が不正です。');
   const target = `${platform}-${arch}`;
   let best: GitHubUpdate | undefined;
@@ -30,6 +63,8 @@ export function findGitHubUpdate(data: unknown, platform: string, arch: string):
     if (release.draft !== false) continue;
     const version = tagVersion(release.tag_name);
     if (!version || !Array.isArray(release.assets)) continue;
+    if (options?.rolloutId !== undefined && rolloutBucket(options.rolloutId, version) >= releaseRollout(release.body))
+      continue;
     const candidates: string[] = [`agentdesklink-${target}-${version}.vsix`];
     if (UNIVERSAL_TARGETS.has(target)) candidates.push(`agentdesklink-${version}.vsix`);
     for (const name of candidates) {
@@ -52,9 +87,15 @@ export function findGitHubUpdate(data: unknown, platform: string, arch: string):
 /** Only the fixed API endpoint, this repository's canonical release downloads and GitHub's signed asset CDN. */
 export function isGitHubUpdateUrl(raw: string): boolean {
   let url: URL;
-  try { url = new URL(raw); } catch { return false; }
+  try {
+    url = new URL(raw);
+  } catch {
+    return false;
+  }
   if (url.protocol !== 'https:' || url.username || url.password || url.hash || url.port) return false;
-  if (url.host === 'api.github.com') return url.pathname === `/repos/${OWNER}/${REPO}/releases` && url.search === '?per_page=100';
-  if (url.host === 'github.com') return !url.search && new RegExp(`^/${OWNER}/${REPO}/releases/download/[^/]+/[^/]+$`).test(url.pathname);
+  if (url.host === 'api.github.com')
+    return url.pathname === `/repos/${OWNER}/${REPO}/releases` && url.search === '?per_page=100';
+  if (url.host === 'github.com')
+    return !url.search && new RegExp(`^/${OWNER}/${REPO}/releases/download/[^/]+/[^/]+$`).test(url.pathname);
   return url.host === 'release-assets.githubusercontent.com';
 }

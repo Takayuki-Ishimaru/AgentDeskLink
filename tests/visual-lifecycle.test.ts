@@ -1,20 +1,247 @@
-import {test} from 'node:test';import {setTimeout as delay} from 'node:timers/promises';import assert from 'node:assert/strict';import sharp from 'sharp';import {Engine} from '../src/core.js';import {parsePolicy} from '../src/policy.js';import {AdlError,type Adapter,type AdapterSession} from '../src/types.js';import type {CapturedImage} from '../src/visual-types.js';
-function gate(){let resolve!:()=>void;const promise=new Promise<void>(r=>resolve=r);return {resolve,promise};}
-async function setup(){const png=await sharp({create:{width:64,height:64,channels:3,background:'red'}}).png().toBuffer();const state={closed:0,gestures:0,captures:0,active:0,maxActive:0,onCapture:undefined as (()=>Promise<void>)|undefined,error:undefined as AdlError|undefined,onSnapshot:()=>{},onGesture:undefined as ((signal:AbortSignal)=>Promise<void>)|undefined};const adapter:Adapter={open:async():Promise<AdapterSession>=>({snapshot:async()=>{state.onSnapshot();return {elements:[],fingerprint:'same',truncated:false}},capture:async():Promise<CapturedImage>=>{state.captures++;state.active++;state.maxActive=Math.max(state.maxActive,state.active);try{await state.onCapture?.();if(state.error)throw state.error;return {png,captured_at:new Date().toISOString(),coordinate_space:'viewport_css_pixels',viewport:{width:64,height:64,scroll_x:0,scroll_y:0,device_scale_factor:1},surface_epoch:'same',redacted:true}}finally{state.active--}},gesture:async(plan,_ref,signal)=>{state.gestures++;await state.onGesture?.(signal);return {kind:plan.kind,released_input:true,points_executed:plan.points.length,verified:'input_sequence_completed'}},act:async()=>{},close:async()=>{state.closed++}}),close:async()=>{}};const policy=parsePolicy({browserTargets:[{id:'fixture',label:'Fixture',url:'https://example.com',classification:'PUBLIC',visual:{enabled:true},gestures:{enabled:true,surfaces:[{id:'board',selector:'#board',kinds:['drag']}]}}]});const engine=new Engine(policy,{browser:adapter});const target=(await engine.listTargets()).targets[0]!;const session=await engine.open(target.target_id);const frame=await engine.capture(session.session_id);const request={frame_id:frame.metadata.frame_id,expected_revision:frame.metadata.revision,surface_id:'board',kind:'drag' as const,points:[{x:10,y:10,t_ms:0},{x:20,y:20,t_ms:50}]};return {state,engine,session,frame,request};}
-test('record provider timeout invalidates old frame/session',{timeout:3000},async()=>{const f=await setup();try{f.state.error=new AdlError('E_TIMEOUT');await assert.rejects(f.engine.record(f.session.session_id,{frame_count:2,interval_ms:50}),{code:'E_TIMEOUT'});await assert.rejects(f.engine.capture(f.session.session_id,{frame_id:f.frame.metadata.frame_id}),{code:'E_TARGET_NOT_FOUND'});}finally{await f.engine.shutdown()}});
-test('gesture aborted after adapter dispatch preserves partial execution uncertainty',{timeout:3000},async()=>{const f=await setup(),entered=gate(),abort=new AbortController();f.state.onGesture=async signal=>{entered.resolve();await new Promise<void>((_,reject)=>{signal.addEventListener('abort',()=>{const error=new AdlError('E_CANCELLED');error.mayHaveExecuted=true;reject(error)},{once:true})})};try{const pending=f.engine.gesture(f.session.session_id,f.request,abort.signal);const checked=assert.rejects(pending,(e:unknown)=>e instanceof AdlError&&e.code==='E_CANCELLED'&&e.mayHaveExecuted);await entered.promise;abort.abort();await checked;}finally{await f.engine.shutdown()}});
-test('gesture rechecks the browser 30-second frame limit after slow refresh before adapter input',{timeout:3000},async()=>{const original=Date.now;let now=original();Date.now=()=>now;let f:Awaited<ReturnType<typeof setup>>|undefined;try{f=await setup();f.state.onSnapshot=()=>{now+=30100};await assert.rejects(f.engine.gesture(f.session.session_id,f.request),{code:'E_STALE_STATE'});assert.equal(f.state.gestures,0);}finally{Date.now=original;await f?.engine.shutdown()}});
+import { test } from 'node:test';
+import { setTimeout as delay } from 'node:timers/promises';
+import assert from 'node:assert/strict';
+import sharp from 'sharp';
+import { Engine } from '../src/core.js';
+import { parsePolicy } from '../src/policy.js';
+import { AdlError, type Adapter, type AdapterSession } from '../src/types.js';
+import type { CapturedImage } from '../src/visual-types.js';
+function gate() {
+  let resolve!: () => void;
+  const promise = new Promise<void>(r => (resolve = r));
+  return { resolve, promise };
+}
+async function setup() {
+  const png = await sharp({ create: { width: 64, height: 64, channels: 3, background: 'red' } })
+    .png()
+    .toBuffer();
+  const state = {
+    closed: 0,
+    gestures: 0,
+    captures: 0,
+    active: 0,
+    maxActive: 0,
+    onCapture: undefined as (() => Promise<void>) | undefined,
+    error: undefined as AdlError | undefined,
+    onSnapshot: () => {},
+    onGesture: undefined as ((signal: AbortSignal) => Promise<void>) | undefined,
+  };
+  const adapter: Adapter = {
+    open: async (): Promise<AdapterSession> => ({
+      snapshot: async () => {
+        state.onSnapshot();
+        return { elements: [], fingerprint: 'same', truncated: false };
+      },
+      capture: async (): Promise<CapturedImage> => {
+        state.captures++;
+        state.active++;
+        state.maxActive = Math.max(state.maxActive, state.active);
+        try {
+          await state.onCapture?.();
+          if (state.error) throw state.error;
+          return {
+            png,
+            captured_at: new Date().toISOString(),
+            coordinate_space: 'viewport_css_pixels',
+            viewport: { width: 64, height: 64, scroll_x: 0, scroll_y: 0, device_scale_factor: 1 },
+            surface_epoch: 'same',
+            redacted: true,
+          };
+        } finally {
+          state.active--;
+        }
+      },
+      gesture: async (plan, _ref, signal) => {
+        state.gestures++;
+        await state.onGesture?.(signal);
+        return {
+          kind: plan.kind,
+          released_input: true,
+          points_executed: plan.points.length,
+          verified: 'input_sequence_completed',
+        };
+      },
+      act: async () => {},
+      close: async () => {
+        state.closed++;
+      },
+    }),
+    close: async () => {},
+  };
+  const policy = parsePolicy({
+    browserTargets: [
+      {
+        id: 'fixture',
+        label: 'Fixture',
+        url: 'https://example.com',
+        classification: 'PUBLIC',
+        visual: { enabled: true },
+        gestures: { enabled: true, surfaces: [{ id: 'board', selector: '#board', kinds: ['drag'] }] },
+      },
+    ],
+  });
+  const engine = new Engine(policy, { browser: adapter });
+  const target = (await engine.listTargets()).targets[0]!;
+  const session = await engine.open(target.target_id);
+  const frame = await engine.capture(session.session_id);
+  const request = {
+    frame_id: frame.metadata.frame_id,
+    expected_revision: frame.metadata.revision,
+    surface_id: 'board',
+    kind: 'drag' as const,
+    points: [
+      { x: 10, y: 10, t_ms: 0 },
+      { x: 20, y: 20, t_ms: 50 },
+    ],
+  };
+  return { state, engine, session, frame, request };
+}
+test('record provider timeout invalidates old frame/session', { timeout: 3000 }, async () => {
+  const f = await setup();
+  try {
+    f.state.error = new AdlError('E_TIMEOUT');
+    await assert.rejects(f.engine.record(f.session.session_id, { frame_count: 2, interval_ms: 50 }), {
+      code: 'E_TIMEOUT',
+    });
+    await assert.rejects(f.engine.capture(f.session.session_id, { frame_id: f.frame.metadata.frame_id }), {
+      code: 'E_TARGET_NOT_FOUND',
+    });
+  } finally {
+    await f.engine.shutdown();
+  }
+});
+test('gesture aborted after adapter dispatch preserves partial execution uncertainty', { timeout: 3000 }, async () => {
+  const f = await setup(),
+    entered = gate(),
+    abort = new AbortController();
+  f.state.onGesture = async signal => {
+    entered.resolve();
+    await new Promise<void>((_, reject) => {
+      signal.addEventListener(
+        'abort',
+        () => {
+          const error = new AdlError('E_CANCELLED');
+          error.mayHaveExecuted = true;
+          reject(error);
+        },
+        { once: true },
+      );
+    });
+  };
+  try {
+    const pending = f.engine.gesture(f.session.session_id, f.request, abort.signal);
+    const checked = assert.rejects(
+      pending,
+      (e: unknown) => e instanceof AdlError && e.code === 'E_CANCELLED' && e.mayHaveExecuted,
+    );
+    await entered.promise;
+    abort.abort();
+    await checked;
+  } finally {
+    await f.engine.shutdown();
+  }
+});
+test(
+  'gesture rechecks the browser 30-second frame limit after slow refresh before adapter input',
+  { timeout: 3000 },
+  async () => {
+    const original = Date.now;
+    let now = original();
+    Date.now = () => now;
+    let f: Awaited<ReturnType<typeof setup>> | undefined;
+    try {
+      f = await setup();
+      f.state.onSnapshot = () => {
+        now += 30100;
+      };
+      await assert.rejects(f.engine.gesture(f.session.session_id, f.request), { code: 'E_STALE_STATE' });
+      assert.equal(f.state.gestures, 0);
+    } finally {
+      Date.now = original;
+      await f?.engine.shutdown();
+    }
+  },
+);
 
-test('record cancellation closes session and suppresses late capture retention',{timeout:3000},async()=>{
- const f=await setup(),entered=gate(),release=gate(),cancel=new AbortController();
- f.state.onCapture=async()=>{entered.resolve();await release.promise;};
- try{const recording=f.engine.record(f.session.session_id,{frame_count:2,interval_ms:50},cancel.signal);const rejected=assert.rejects(recording,{code:'E_CANCELLED'});await entered.promise;cancel.abort();await rejected;assert.equal(f.state.closed,1);release.resolve();await delay(10);await assert.rejects(f.engine.capture(f.session.session_id,{frame_id:f.frame.metadata.frame_id}),{code:'E_TARGET_NOT_FOUND'});}finally{release.resolve();await f.engine.shutdown();}
+test('record cancellation closes session and suppresses late capture retention', { timeout: 3000 }, async () => {
+  const f = await setup(),
+    entered = gate(),
+    release = gate(),
+    cancel = new AbortController();
+  f.state.onCapture = async () => {
+    entered.resolve();
+    await release.promise;
+  };
+  try {
+    const recording = f.engine.record(f.session.session_id, { frame_count: 2, interval_ms: 50 }, cancel.signal);
+    const rejected = assert.rejects(recording, { code: 'E_CANCELLED' });
+    await entered.promise;
+    cancel.abort();
+    await rejected;
+    assert.equal(f.state.closed, 1);
+    release.resolve();
+    await delay(10);
+    await assert.rejects(f.engine.capture(f.session.session_id, { frame_id: f.frame.metadata.frame_id }), {
+      code: 'E_TARGET_NOT_FOUND',
+    });
+  } finally {
+    release.resolve();
+    await f.engine.shutdown();
+  }
 });
-test('record and concurrent capture serialize adapter access and preserve sampled handles',{timeout:3000},async()=>{
- const f=await setup(),entered=gate(),release=gate();f.state.onCapture=async()=>{entered.resolve();await release.promise;};
- try{const recording=f.engine.record(f.session.session_id,{frame_count:2,interval_ms:50});const capturing=f.engine.capture(f.session.session_id);await entered.promise;assert.equal(f.state.captures,2);release.resolve();const [sequence,capture]=await Promise.all([recording,capturing]);assert.equal(f.state.captures,4);assert.equal(f.state.maxActive,1);assert.equal(sequence.frames.length,2);assert.ok(sequence.frames.every(frame=>frame.metadata.frame_id!==capture.metadata.frame_id));for(const frame of sequence.frames)assert.equal((await f.engine.capture(f.session.session_id,{frame_id:frame.metadata.frame_id})).metadata.frame_id,frame.metadata.frame_id);}finally{release.resolve();await f.engine.shutdown();}
-});
-test('failed post-gesture image reports partial execution and invalidates retained frames',{timeout:3000},async()=>{
- const f=await setup();f.state.onGesture=async()=>{f.state.error=new AdlError('E_PRIVACY_BLOCKED');};
- try{await assert.rejects(f.engine.gesture(f.session.session_id,f.request),(error:unknown)=>error instanceof AdlError&&error.code==='E_PRIVACY_BLOCKED'&&error.mayHaveExecuted);assert.equal(f.state.gestures,1);assert.equal(f.state.closed,1);await assert.rejects(f.engine.capture(f.session.session_id,{frame_id:f.frame.metadata.frame_id}),{code:'E_TARGET_NOT_FOUND'});}finally{await f.engine.shutdown();}
-});
+test(
+  'record and concurrent capture serialize adapter access and preserve sampled handles',
+  { timeout: 3000 },
+  async () => {
+    const f = await setup(),
+      entered = gate(),
+      release = gate();
+    f.state.onCapture = async () => {
+      entered.resolve();
+      await release.promise;
+    };
+    try {
+      const recording = f.engine.record(f.session.session_id, { frame_count: 2, interval_ms: 50 });
+      const capturing = f.engine.capture(f.session.session_id);
+      await entered.promise;
+      assert.equal(f.state.captures, 2);
+      release.resolve();
+      const [sequence, capture] = await Promise.all([recording, capturing]);
+      assert.equal(f.state.captures, 4);
+      assert.equal(f.state.maxActive, 1);
+      assert.equal(sequence.frames.length, 2);
+      assert.ok(sequence.frames.every(frame => frame.metadata.frame_id !== capture.metadata.frame_id));
+      for (const frame of sequence.frames)
+        assert.equal(
+          (await f.engine.capture(f.session.session_id, { frame_id: frame.metadata.frame_id })).metadata.frame_id,
+          frame.metadata.frame_id,
+        );
+    } finally {
+      release.resolve();
+      await f.engine.shutdown();
+    }
+  },
+);
+test(
+  'failed post-gesture image reports partial execution and invalidates retained frames',
+  { timeout: 3000 },
+  async () => {
+    const f = await setup();
+    f.state.onGesture = async () => {
+      f.state.error = new AdlError('E_PRIVACY_BLOCKED');
+    };
+    try {
+      await assert.rejects(
+        f.engine.gesture(f.session.session_id, f.request),
+        (error: unknown) => error instanceof AdlError && error.code === 'E_PRIVACY_BLOCKED' && error.mayHaveExecuted,
+      );
+      assert.equal(f.state.gestures, 1);
+      assert.equal(f.state.closed, 1);
+      await assert.rejects(f.engine.capture(f.session.session_id, { frame_id: f.frame.metadata.frame_id }), {
+        code: 'E_TARGET_NOT_FOUND',
+      });
+    } finally {
+      await f.engine.shutdown();
+    }
+  },
+);

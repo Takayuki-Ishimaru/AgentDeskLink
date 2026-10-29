@@ -185,8 +185,9 @@ std::string ExpectedRole(const ControlsTable& t, const std::string& automation_i
   return it == t.allowed.end() ? std::string() : it->second.role;
 }
 
-bool IsSensitiveText(const std::string& text) {
-  // Normalize full-width ASCII identifiers without locale-dependent ctype calls.
+namespace {
+// Normalize full-width ASCII identifiers without locale-dependent ctype calls.
+std::string NormalizeWidth(const std::string& text) {
   std::string normalized;
   for(size_t i=0;i<text.size();++i){
     const auto a=static_cast<unsigned char>(text[i]);
@@ -199,9 +200,10 @@ bool IsSensitiveText(const std::string& text) {
     }
     normalized.push_back(text[i]);
   }
-  if(normalized.find('@')!=std::string::npos)return true;
-  for (const auto* label : {u8"パスワード",u8"暗証番号",u8"認証コード",u8"認証情報",u8"認証トークン",u8"認証キー",u8"ワンタイム",u8"秘密鍵",u8"秘密キー",u8"シークレット",u8"アクセストークン",u8"apiキー"})
-    if (Lower(normalized).find(label) != std::string::npos) return true;
+  return normalized;
+}
+// camelCase and letter/digit boundaries become spaces (btnDelete -> btn Delete); '_' and '-' already split in Tokens().
+std::string SplitCamel(const std::string& normalized) {
   std::string split;
   for (size_t i=0;i<normalized.size();++i) {
     const auto c=static_cast<unsigned char>(normalized[i]);
@@ -210,7 +212,16 @@ bool IsSensitiveText(const std::string& text) {
     if(i&&((std::isalpha(prev)&&std::isdigit(c))||(std::isdigit(prev)&&std::isalpha(c))||(std::isupper(c)&&(std::islower(prev)||(std::isupper(prev)&&std::islower(next))))))split.push_back(' ');
     split.push_back(static_cast<char>(c));
   }
-  const auto tokens=Tokens(Lower(split));
+  return split;
+}
+}  // namespace
+
+bool IsSensitiveText(const std::string& text) {
+  const std::string normalized=NormalizeWidth(text);
+  if(normalized.find('@')!=std::string::npos)return true;
+  for (const auto* label : {u8"パスワード",u8"暗証番号",u8"認証コード",u8"認証情報",u8"認証トークン",u8"認証キー",u8"ワンタイム",u8"秘密鍵",u8"秘密キー",u8"シークレット",u8"アクセストークン",u8"apiキー"})
+    if (Lower(normalized).find(label) != std::string::npos) return true;
+  const auto tokens=Tokens(Lower(SplitCamel(normalized)));
   for(size_t i=0;i<tokens.size();++i) {
     for(const auto* entry:kSensitive) {
       std::string key=entry;if(!key.empty()&&key.back()=='*')key.pop_back();
@@ -218,6 +229,23 @@ bool IsSensitiveText(const std::string& text) {
     }
     for(const auto* entry:{"key","auth","authorization","bearer","session","cookie","cvc","accesskey","accesstoken","refreshtoken"})if(tokens[i]==entry)return true;
     if(i+1<tokens.size())for(const auto* entry:{"apikey","accesskey","accesstoken","refreshtoken","privatekey","authcode","cardnumber","creditcard","onetime","ccnumber","cccsc"})if(tokens[i]+tokens[i+1]==entry)return true;
+  }
+  return false;
+}
+
+bool IsConsequentialText(const std::string& text) {
+  const std::string normalized=NormalizeWidth(text);
+  for (const auto* label : {u8"削除",u8"購入",u8"注文",u8"支払",u8"決済",u8"送信",u8"登録",u8"取消",u8"取り消",u8"キャンセル",u8"振込",u8"送金",u8"転送",u8"申込",u8"申し込",u8"解約",u8"確定",u8"ログイン"})
+    if (normalized.find(label) != std::string::npos) return true;
+  static const char* const kWords[] = {"delete", "upload", "send", "submit", "purchase", "checkout", "pay", "payment", "login",
+                                       "register", "withdraw", "transfer", "confirm", "cancel", "order"};
+  const auto tokens=Tokens(Lower(SplitCamel(normalized)));
+  for(size_t i=0;i<tokens.size();++i) {
+    if (InList(kWords, sizeof(kWords) / sizeof(*kWords), tokens[i])) return true;
+    const bool more = i+1<tokens.size();
+    // "remove filters" is the browser vocabulary's one exemption; any other "remove" is consequential.
+    if (tokens[i]=="remove") { if (more && (tokens[i+1]=="filter" || tokens[i+1]=="filters")) continue; return true; }
+    if (more && ((tokens[i]=="log" && tokens[i+1]=="in") || (tokens[i]=="sign" && (tokens[i+1]=="in" || tokens[i+1]=="up")))) return true;
   }
   return false;
 }
@@ -340,6 +368,13 @@ std::string DoAct(const json& rid, const json& doc, Session& s, const Backend& b
     return Err(rid, "E_BAD_REQUEST", "scroll requires 'direction'");
   if (a.action != "scroll" && doc.contains("direction"))
     return Err(rid, "E_BAD_REQUEST", "direction is only valid for scroll");
+  if (doc.contains("approved")) {
+    // Only an ask-tier launch accepts the parent's one-shot approval, and only as the literal true.
+    if (!doc.at("approved").is_boolean() || !doc.at("approved").get<bool>())
+      return Err(rid, "E_BAD_REQUEST", "approved must be true when present");
+    if (!c.ask()) return Err(rid, "E_BAD_REQUEST", "approved is only accepted with --operation-mode ask");
+    a.approved = true;
+  }
 
   SnapshotResult fresh;
   Status fresh_status = b.snapshot(b.ctx, s, fresh);
@@ -351,7 +386,17 @@ std::string DoAct(const json& rid, const json& doc, Session& s, const Backend& b
   for (const ElemInfo& e : s.elements)
     if (e.id == a.element_id) found = &e;
   if (!found) return Err(rid, "E_NO_ELEMENT", "unknown element handle");
-  if (!c.allow_all) {
+  if (c.tier() && !c.allow_all) {
+    // Standard / ask tier: no allowlist, the shared vocabulary decides. Sensitive
+    // controls are refused even with approved:true; scroll never needs approval.
+    if (found->sensitive || found->is_password)
+      return Err(rid, "E_PRIVACY_BLOCKED", "sensitive control");
+    if (a.action != "scroll" && !a.approved &&
+        (IsConsequentialText(found->name) || IsConsequentialText(found->automation_id)))
+      return Err(rid, "E_APPROVAL_REQUIRED", c.ask() ? "consequential control; retry with the one-shot host approval"
+                                                     : "consequential control; the standard tier refuses it");
+    a.expected_role = found->role;
+  } else if (!c.allow_all) {
     if (found->sensitive || IsBlockedControl(*found))
       return Err(rid, "E_CONTROL_BLOCKED", "control is not eligible for semantic mutation");
     if (!ActionAllowed(c, found->automation_id, a.action))
@@ -417,7 +462,7 @@ std::string HandleRequest(const std::string& line, Session& s, const Backend& b,
   }
   if (!doc.is_object()) return Err("", "E_BAD_REQUEST", "request must be a JSON object");
   static const std::vector<std::string> allowed_fields = {
-      "op", "request_id", "target_id", "mode", "session_id", "element_id", "expected_revision", "action", "value", "checked", "direction"};
+      "op", "request_id", "target_id", "mode", "session_id", "element_id", "expected_revision", "action", "value", "checked", "direction", "approved"};
   for (auto it = doc.begin(); it != doc.end(); ++it) {
     if (std::find(allowed_fields.begin(), allowed_fields.end(), it.key()) == allowed_fields.end())
       return Err("", "E_BAD_REQUEST", "request contains an unsupported field");
@@ -584,7 +629,7 @@ std::string HandleRequest(const std::string& line, Broker& broker, const Backend
   if (!doc.is_object()) return Err("", "E_BAD_REQUEST", "request must be a JSON object");
   static const std::vector<std::string> allowed_fields = {
       "op", "request_id", "target_id", "mode", "session_id", "element_id", "expected_revision",
-      "action", "value", "checked", "direction", "input_token", "surface_id", "kind", "points", "swipe_backend", "point", "expected_target", "confirmation_id"};
+      "action", "value", "checked", "direction", "approved", "input_token", "surface_id", "kind", "points", "swipe_backend", "point", "expected_target", "confirmation_id"};
   for (auto it = doc.begin(); it != doc.end(); ++it) {
     if (std::find(allowed_fields.begin(), allowed_fields.end(), it.key()) == allowed_fields.end())
       return Err("", "E_BAD_REQUEST", "request contains an unsupported field");
@@ -654,7 +699,8 @@ std::string HandleRequest(const std::string& line, Broker& broker, const Backend
     }
     return Ok(rid, {{"protocol_version", 2},
                     {"targets", targets},
-                    {"mutations_enabled", true},
+                    // Honest launch-time fact: without --allow-all, a tier or an allowlist entry no act can succeed.
+                    {"mutations_enabled", c.allow_all || c.tier() || !c.allowed.empty()},
                     {"autofocusing_disabled", true},
                     {"visual_capture", b.capture != nullptr},{"interactive_input",b.input_operation != nullptr},{"gesture_backends",b.gesture_backends}});
   }

@@ -3,17 +3,27 @@ export function isHttpsUrl(raw: string): boolean {
   try {
     const url = new URL(raw);
     return url.protocol === 'https:' && !url.username && !url.password && !url.hash;
-  } catch { return false; }
+  } catch {
+    return false;
+  }
 }
 
-export async function fetchUpdateBytes(url: string, options: {
-  maxBytes: number; timeoutMs: number; signal: AbortSignal; fetch?: typeof fetch;
-  isAllowedUrl?: (url: string) => boolean;
-}): Promise<Buffer> {
+export async function fetchUpdateBytes(
+  url: string,
+  options: {
+    maxBytes: number;
+    timeoutMs: number;
+    signal: AbortSignal;
+    fetch?: typeof fetch;
+    isAllowedUrl?: (url: string) => boolean;
+  },
+): Promise<Buffer> {
   const controller = new AbortController();
   let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
   let rejectAbort: (error: Error) => void = () => {};
-  const aborted = new Promise<never>((_resolve, reject) => { rejectAbort = reject; });
+  const aborted = new Promise<never>((_resolve, reject) => {
+    rejectAbort = reject;
+  });
   const abort = () => {
     controller.abort();
     void reader?.cancel().catch(() => {});
@@ -21,14 +31,19 @@ export async function fetchUpdateBytes(url: string, options: {
   };
   const timer = setTimeout(abort, options.timeoutMs);
   options.signal.addEventListener('abort', abort, { once: true });
-  const check = () => { if (controller.signal.aborted) throw new Error('更新の取得を中止しました。'); };
+  const check = () => {
+    if (controller.signal.aborted) throw new Error('更新の取得を中止しました。');
+  };
   const work = async (): Promise<Buffer> => {
     let current = url;
     for (let redirects = 0; redirects <= 5; redirects++) {
       check();
-      if (!isHttpsUrl(current) || (options.isAllowedUrl && !options.isAllowedUrl(current))) throw new Error('更新先として許可されていない URL です。');
+      if (!isHttpsUrl(current) || (options.isAllowedUrl && !options.isAllowedUrl(current)))
+        throw new Error('更新先として許可されていない URL です。');
       const response = await (options.fetch ?? fetch)(current, {
-        redirect: 'manual', signal: controller.signal, credentials: 'omit'
+        redirect: 'manual',
+        signal: controller.signal,
+        credentials: 'omit',
       });
       if (controller.signal.aborted) {
         void response.body?.cancel().catch(() => {});

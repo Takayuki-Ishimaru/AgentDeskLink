@@ -3,21 +3,38 @@ import { AdlError, type ErrorCode } from './types.js';
 import { MAX_VISUAL_OUTPUT_BYTES, type VisualObservation } from './visual-types.js';
 import type { SequenceHooks, SequenceObservation, SequenceOptions } from './sequence-types.js';
 
-const MIN_FRAMES = 2, MAX_FRAMES = 16, DEFAULT_FRAMES = 8;
-const MIN_INTERVAL_MS = 50, MAX_INTERVAL_MS = 2000, DEFAULT_INTERVAL_MS = 250;
+const MIN_FRAMES = 2,
+  MAX_FRAMES = 16,
+  DEFAULT_FRAMES = 8;
+const MIN_INTERVAL_MS = 50,
+  MAX_INTERVAL_MS = 2000,
+  DEFAULT_INTERVAL_MS = 250;
 const MAX_SPAN_MS = 6000;
-const MIN_MAX_DIMENSION = 64, MAX_MAX_DIMENSION = 1024, DEFAULT_MAX_DIMENSION = 512;
-const MIN_MAX_PIXELS = 4096, MAX_MAX_PIXELS = 1048576, DEFAULT_MAX_PIXELS = 262144;
+const MIN_MAX_DIMENSION = 64,
+  MAX_MAX_DIMENSION = 1024,
+  DEFAULT_MAX_DIMENSION = 512;
+const MIN_MAX_PIXELS = 4096,
+  MAX_MAX_PIXELS = 1048576,
+  DEFAULT_MAX_PIXELS = 262144;
 const ALLOWED_KEYS = ['frame_count', 'interval_ms', 'max_dimension', 'max_pixels'];
 
-function invalid(): never { throw new AdlError('E_INVALID_ARGUMENT'); }
-function isInt(value: unknown): value is number { return typeof value === 'number' && Number.isInteger(value); }
+function invalid(): never {
+  throw new AdlError('E_INVALID_ARGUMENT');
+}
+function isInt(value: unknown): value is number {
+  return typeof value === 'number' && Number.isInteger(value);
+}
 
-interface Limits { frame_count: number; interval_ms: number; max_dimension: number; max_pixels: number }
+interface Limits {
+  frame_count: number;
+  interval_ms: number;
+  max_dimension: number;
+  max_pixels: number;
+}
 
 /** SequenceOptions borrows the visual limits but a sequence always frames the whole surface. */
 function validate(options: SequenceOptions): Limits {
-  if(options===null||typeof options!=='object'||Array.isArray(options)) invalid();
+  if (options === null || typeof options !== 'object' || Array.isArray(options)) invalid();
   const given = options as Record<string, unknown>;
   for (const key of Object.keys(given)) {
     if (key === 'region' || !ALLOWED_KEYS.includes(key)) invalid();
@@ -32,22 +49,42 @@ function validate(options: SequenceOptions): Limits {
   if (((frame_count as number) - 1) * (interval_ms as number) > MAX_SPAN_MS) invalid();
   if ((max_dimension as number) < MIN_MAX_DIMENSION || (max_dimension as number) > MAX_MAX_DIMENSION) invalid();
   if ((max_pixels as number) < MIN_MAX_PIXELS || (max_pixels as number) > MAX_MAX_PIXELS) invalid();
-  return { frame_count: frame_count as number, interval_ms: interval_ms as number, max_dimension: max_dimension as number, max_pixels: max_pixels as number };
+  return {
+    frame_count: frame_count as number,
+    interval_ms: interval_ms as number,
+    max_dimension: max_dimension as number,
+    max_pixels: max_pixels as number,
+  };
 }
 
-function cancelled(): never { throw new AdlError('E_CANCELLED'); }
+function cancelled(): never {
+  throw new AdlError('E_CANCELLED');
+}
 
 /** The caller's sleeper may ignore the signal, so every await is bracketed by an explicit check. */
 function defaultSleep(ms: number, signal: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
-    if (signal.aborted) { reject(new AdlError('E_CANCELLED')); return; }
-    const onAbort = () => { clearTimeout(timer); reject(new AdlError('E_CANCELLED')); };
-    const timer = setTimeout(() => { signal.removeEventListener('abort', onAbort); resolve(); }, ms);
+    if (signal.aborted) {
+      reject(new AdlError('E_CANCELLED'));
+      return;
+    }
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(new AdlError('E_CANCELLED'));
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
     signal.addEventListener('abort', onAbort, { once: true });
   });
 }
 
-export async function recordSequence(hooks: SequenceHooks, options: SequenceOptions, signal: AbortSignal): Promise<SequenceObservation> {
+export async function recordSequence(
+  hooks: SequenceHooks,
+  options: SequenceOptions,
+  signal: AbortSignal,
+): Promise<SequenceObservation> {
   const limits = validate(options);
   if (signal.aborted) cancelled();
   const now = hooks.now ?? (() => performance.now());
@@ -60,7 +97,11 @@ export async function recordSequence(hooks: SequenceHooks, options: SequenceOpti
   const elapsedMs: number[] = [];
 
   const drop = async (code: ErrorCode): Promise<never> => {
-    try { hooks.discard(captured); } catch { /* a failed discard must not mask the cause */ }
+    try {
+      hooks.discard(captured);
+    } catch {
+      /* a failed discard must not mask the cause */
+    }
     throw new AdlError(code);
   };
 
@@ -78,7 +119,10 @@ export async function recordSequence(hooks: SequenceHooks, options: SequenceOpti
       if (signal.aborted) cancelled();
       if (i === 0) {
         if (image.metadata.ok !== true) return await drop('E_INTERNAL');
-      } else if (image.metadata.session_id !== frames[0]!.metadata.session_id || image.metadata.target_id !== frames[0]!.metadata.target_id) {
+      } else if (
+        image.metadata.session_id !== frames[0]!.metadata.session_id ||
+        image.metadata.target_id !== frames[0]!.metadata.target_id
+      ) {
         return await drop('E_STALE_STATE');
       }
       if (seen.has(image.metadata.frame_id)) return await drop('E_STALE_STATE');
@@ -96,7 +140,11 @@ export async function recordSequence(hooks: SequenceHooks, options: SequenceOpti
     if (signal.aborted) cancelled();
   } catch (error) {
     const code: ErrorCode = error instanceof AdlError ? error.code : 'E_INTERNAL';
-    try { hooks.discard(captured); } catch { /* ignore */ }
+    try {
+      hooks.discard(captured);
+    } catch {
+      /* ignore */
+    }
     throw new AdlError(code);
   }
 

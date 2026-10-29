@@ -26,7 +26,8 @@ export function validateManagedDescriptor(value: unknown): ManagedLaunchDescript
   }
   if (obj.schemaVersion !== 1) return undefined;
   if (typeof obj.owner !== 'string' || obj.owner.length === 0 || obj.owner.length > 8192) return undefined;
-  if (typeof obj.generation !== 'string' || obj.generation.length === 0 || obj.generation.length > 256) return undefined;
+  if (typeof obj.generation !== 'string' || obj.generation.length === 0 || obj.generation.length > 256)
+    return undefined;
   if (typeof obj.enabled !== 'boolean') return undefined;
   if (typeof obj.command !== 'string' || !path.isAbsolute(obj.command)) return undefined;
   if (typeof obj.cwd !== 'string' || !path.isAbsolute(obj.cwd)) return undefined;
@@ -72,7 +73,13 @@ function readRegularFile(file: string, maxBytes: number): Buffer | undefined {
   } catch {
     return undefined;
   } finally {
-    if (fd !== undefined) { try { fs.closeSync(fd); } catch { /* ignore */ } }
+    if (fd !== undefined) {
+      try {
+        fs.closeSync(fd);
+      } catch {
+        /* ignore */
+      }
+    }
   }
 }
 
@@ -112,7 +119,9 @@ function mkdirPrivate(dir: string): void {
   assertNoSymlinkAncestors(dir);
   try {
     fs.chmodSync(dir, 0o700);
-  } catch { /* best effort on non-POSIX */ }
+  } catch {
+    /* best effort on non-POSIX */
+  }
 }
 
 function atomicWrite(file: string, data: string, mode: number): boolean {
@@ -132,18 +141,32 @@ function atomicWrite(file: string, data: string, mode: number): boolean {
   if (leaf !== undefined && leaf.isFile()) {
     try {
       if (fs.readFileSync(file).equals(Buffer.from(data, 'utf8'))) return false;
-    } catch { /* rewrite below */ }
+    } catch {
+      /* rewrite below */
+    }
   }
   const tmp = path.join(dir, `.${path.basename(file)}.${randomUUID()}.tmp`);
-  const fd = fs.openSync(tmp, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW, mode);
+  const fd = fs.openSync(
+    tmp,
+    fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW,
+    mode,
+  );
   try {
     fs.writeFileSync(fd, data, 'utf8');
     fs.fchmodSync(fd, mode);
   } finally {
     fs.closeSync(fd);
   }
-  try { assertNoSymlinkAncestors(file); fs.renameSync(tmp, file); }
-  finally { try { fs.unlinkSync(tmp); } catch { /* renamed */ } }
+  try {
+    assertNoSymlinkAncestors(file);
+    fs.renameSync(tmp, file);
+  } finally {
+    try {
+      fs.unlinkSync(tmp);
+    } catch {
+      /* renamed */
+    }
+  }
   return true;
 }
 

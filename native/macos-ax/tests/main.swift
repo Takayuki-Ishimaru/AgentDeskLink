@@ -72,6 +72,10 @@ test("secret labels preserve ordinary fields and protect Japanese and identifier
     for label in ["Shipping address","Author","spinbutton","Quantity","monkey"] {try require(!secretLabel(label))}
     for label in ["PIN","auth","api_key","access-token","accessToken","newPassword","APIKeyInput","apiKey1","password1","accessToken2","暗証番号","パスワード","認証コード","ＡＰＩキー"] {try require(secretLabel(label))}
 }
+test("consequential labels follow the shared browser/Linux vocabulary after identifier splitting"){
+    for label in ["","Find","Fixture button","Remove filters","Shipping address","Recorder","Payload","Sender","Registered users","Confirmation","FixtureText","Orders list"] {try require(!consequentialLabel(label))}
+    for label in ["Delete record","btnDelete","delete_all","delete-row","Submit Form","Log in","login","LogIn","Sign up","sign-in","Remove item","sendMail","Pay now","Checkout","Transfer funds","Cancel order","Order","削除","注文を確定","キャンセル","ログイン","振込","Ｄｅｌｅｔｅ","送信"] {try require(consequentialLabel(label))}
+}
 func semanticHistory(_ healthy:Bool=true)->SemanticInputHistory{var h=SemanticInputHistory();h.setHealthy(healthy);return h}
 test("semantic: event classification shares the actual listen-only tap mask and excludes unrelated events"){
     try require(semanticInputTypes.count==9 && Set(semanticInputTypes.map{$0.rawValue}).count==9)
