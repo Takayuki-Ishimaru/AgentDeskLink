@@ -169,6 +169,8 @@ async function pickMac(selected: string): Promise<DesktopPickResult> {
     };
   if (!bundle) {
     // A bare executable outside any bundle: the path is usable but there is no bundle identifier to suggest.
+    if (!(await executable(selected, 'darwin')))
+      return { ok: false, message: '実行可能なファイルを選んでください。 / Choose an executable file.' };
     return {
       ok: true,
       pick: {
@@ -180,6 +182,8 @@ async function pickMac(selected: string): Promise<DesktopPickResult> {
   }
   const plist = await readPlist(bundle);
   if (type === 'file') {
+    if (!(await executable(selected, 'darwin')))
+      return { ok: false, message: '実行可能なファイルを選んでください。 / Choose an executable file.' };
     const appPath = await fs.realpath(selected);
     if (plist.state === 'xml' && plist.entries.get('CFBundleExecutable') === path.basename(selected)) {
       const appId = plist.entries.get('CFBundleIdentifier');
