@@ -1,0 +1,96 @@
+# AgentDeskLink 0.1.7（ベータ版）
+
+**日本語** | [English](https://github.com/Takayuki-Ishimaru/AgentDeskLink/blob/v0.1.7/release-docs/RELEASE_NOTES_en.md)
+
+AI エージェントから、MCP を通じてローカルのブラウザとデスクトップを操作するベータ版です。利用前に[対応環境と既知の制限](https://github.com/Takayuki-Ishimaru/AgentDeskLink/blob/v0.1.7/release-docs/KNOWN_ISSUES.md)を確認してください。
+
+## 0.1.6 からの主な変更
+
+- **Linux のデスクトップ操作に対応しました。** Ubuntu 24.04 x64 で、AT-SPI2 によるウィンドウの観測とクリック・入力・チェック・選択・スクロールを利用できます。OS 側のアクセシビリティ設定と追加パッケージが必要です。画像取得・物理入力・アプリの起動と終了は対象外です。
+- **デスクトップアプリにも権限段階と個別承認を追加しました。** macOS・Windows・Linux の許可したアプリに、読み取り専用・標準・都度承認を適用します。都度承認では削除・送信などの重要なコントロールを VS Code で一度ずつ確認します。パスワードなどの機密コントロールは承認でも操作しません。
+- **ブラウザ操作と承認を改善しました。** スクロール後の対象確認、ページやフォームの名前付き要素、承認後の差分取得を改善しました。標準モードでは JavaScript 内で処理するフォームを操作でき、実際の GET/POST フォーム送信は送信前に止めて承認を求めます。承認画面の送信内容も実際のフォーム内容に合わせました。
+- **観測結果を読みやすくしました。** 要素 ID をセッションごとの短い表記にし、表やリスト、リンク先、代替テキストのある画像を読み取りやすくしました。要素の省略と文字列の切り詰めを区別し、ページ内検索の指定方法や引数エラーも確認しやすくしました。
+- **設定と初回起動を改善しました。** デスクトップアプリの参照・指定を補助し、ブラウザの自動取得に失敗した場合は再試行やインストール済みブラウザの選択を案内します。「すべて許可」の確認では、許可する操作を具体的に表示します。
+- **企業プロキシ向けの設定を追加しました。** `browserProxyConnectByHostname` を明示的に有効にすると、HTTPS の CONNECT にホスト名を使用します。ローカルの DNS/IP 検査と TLS のホスト名検証は維持します。
+- **マスク・警告・停止処理を改善しました。** 秘密情報のマスク対象を拡充し、操作自体の通信遮断と無関係なサブリソースの遮断を区別します。Windows の緊急停止状態の保存も改善しました。
+
+## 導入と更新
+
+VS Code 1.101 以上で、共通パッケージ `agentdesklink-0.1.7.vsix` を「拡張機能: VSIXからのインストール」で開きます。macOS / Apple silicon、Windows x64、Linux x64 で同じ VSIX を利用できます。Node.js・画像処理ライブラリ・各 OS 用のデスクトップ helper を同梱します。Linux の helper には OS 側の Python 3 と AT-SPI2 関連パッケージが必要です。インストール後はウィンドウを再読み込みしてください。
+
+0.1.3〜0.1.6 からは更新確認・自動更新を利用できます。自動更新は段階的に届く場合があります。手動の場合は VSIX と `SHA256SUMS` を取得し、ハッシュを確認してからインストールしてください。0.1.2 以前からは手動インストールが必要です。
+
+**既存の `agentdesklink.allowAllOperations: true` は更新後も優先されます。** 段階的な権限へ切り替えるには、設定パネルで読み取り専用・標準・都度承認を選び直してください。MCP の有効化だけでは対象へのアクセス権限を追加しません。
+
+他の AI クライアントは **AIクライアント → すべて有効** で登録します。選んだワークスペースの権限が共有され、他のプロジェクトからもその範囲を利用できます。更新・権限変更・VS Code の再起動後は、必要に応じて再接続してください。既存の別サーバーや同名の手動登録は保持します。
+
+[インストール手順](https://github.com/Takayuki-Ishimaru/AgentDeskLink/blob/v0.1.7/release-docs/INSTALL.md)・[操作設定と承認](https://github.com/Takayuki-Ishimaru/AgentDeskLink/blob/v0.1.7/release-docs/OPERATIONS.md)・[更新ガイド](https://github.com/Takayuki-Ishimaru/AgentDeskLink/blob/v0.1.7/release-docs/UPDATES.md)を参照してください。
+
+## 利用上の注意
+
+- ブラウザの個別承認は main document、open Shadow DOM、同一 origin の iframe にある検査可能な操作が対象です。閉じた Shadow DOM、別プロセスの iframe は対象外です。通信の許可は検査済み URL encoded フォーム POST 1 回に限られ、multipart・ファイル・一般的な AJAX/DELETE は対象外です。
+- 個別承認は対象・入力内容・観測した状態に結び付きます。画面が変わった場合は観測し直してください。VS Code に接続できない場合や、許可したデスクトップアプリが確認画面を操作できる構成では、承認を利用できません。
+- Linux ではアプリやデスクトップ環境によって AT-SPI2 が公開する機能が異なります。GTK 4 のチェック操作、Qt 5 の検出、Wayland の位置情報などの制限は[対応環境と既知の制限](https://github.com/Takayuki-Ishimaru/AgentDeskLink/blob/v0.1.7/release-docs/KNOWN_ISSUES.md)を確認してください。
+- 手動引き継ぎの通信許可中は、人間のクリック前にもサイトが送信・変更・削除を行えます。再開・期限終了・緊急停止は、すでに送信した処理を取り消せません。
+- 物理入力と無加工のネイティブ画像は既定で無効です。`interactive_desktop` は実際のマウス・キーボードを使うため、人間の操作と並行して利用しないでください。
+- 画像やテキスト内の未知の秘密情報を完全に検出する保証はありません。取得した情報は接続先の AI ホストへ渡ります。
+- macOS のデスクトップ操作にはアクセシビリティ権限、画像取得には画面収録権限が必要です。Windows の helper は未署名、macOS の helper は ad-hoc 署名です。
+- 拡張機能を削除する前に **すべて無効** で外部クライアントの管理対象登録を解除してください。
+
+## ライセンス
+
+AgentDeskLink は [MIT License](https://github.com/Takayuki-Ishimaru/AgentDeskLink/blob/v0.1.7/LICENSE) で提供します。同梱する第三者ソフトウェアには、それぞれのライセンスが適用されます。
+
+## 配布ファイル / Downloads
+
+- macOS / Apple silicon・Windows x64・Linux x64 共通 / Common VSIX: `agentdesklink-0.1.7.vsix`
+- 日英ドキュメント / Japanese and English guides: `AgentDeskLink-0.1.7-docs.zip`
+- SHA-256: `SHA256SUMS`
+
+Linux のデスクトップ操作には OS 側の Python 3 と AT-SPI2 関連パッケージが必要です。画像取得・物理入力・アプリの起動と終了は対象外です。
+Linux desktop control requires OS-provided Python 3 and AT-SPI2 packages. Window capture, physical input and application launch/quit are unsupported.
+
+---
+
+# AgentDeskLink 0.1.7 (beta)
+
+[日本語](https://github.com/Takayuki-Ishimaru/AgentDeskLink/blob/v0.1.7/release-docs/RELEASE_NOTES_ja.md) | **English**
+
+This beta lets AI agents operate the local browser and desktop over MCP. Read the [supported environments and known limitations](https://github.com/Takayuki-Ishimaru/AgentDeskLink/blob/v0.1.7/release-docs/KNOWN_ISSUES_en.md) before use.
+
+## Changes since 0.1.6
+
+- **Added Linux desktop control.** On Ubuntu 24.04 x64, AT-SPI2 supports window observation and semantic click, fill, check, select and scroll actions. OS accessibility settings and additional packages are required. Window capture, physical input and application launch/quit are unsupported.
+- **Added desktop permission tiers and one-shot approvals.** Read only, Standard and Ask each time apply to the granted app on macOS, Windows and Linux. Ask confirms consequential controls such as delete or send in VS Code, one action at a time. Sensitive controls such as password fields are never operated, even with approval.
+- **Improved browser actions and approvals.** Improved target checks after scrolling, named page and form elements, and immediate diffs after approval. Standard mode supports forms handled within JavaScript; real GET/POST form submissions are stopped before sending and require approval. Approval dialogs also reflect the actual submitted fields.
+- **Made observations easier to read.** Element IDs use short session-specific names. Tables, lists, link destinations and images with alternative text are easier to inspect. Element omission is distinguished from clipped text, with clearer page-search syntax and argument errors.
+- **Improved setup and first launch.** The panel helps select a desktop app. Failed browser downloads offer retry and an explicit choice of an installed browser. Allow all confirmation describes the operations being granted.
+- **Added a corporate proxy option.** Explicitly enabling `browserProxyConnectByHostname` sends HTTPS CONNECT requests by hostname. Local DNS/IP checks and TLS hostname verification remain enforced.
+- **Improved masking, warnings and stopping.** Expanded secret masking, distinguished action-related network blocks from unrelated subresource blocks, and improved saving the emergency-stop state on Windows.
+
+## Installation and updates
+
+Use VS Code 1.101 or newer and select “Extensions: Install from VSIX...” to install `agentdesklink-0.1.7.vsix`. The same VSIX supports macOS / Apple silicon, Windows x64 and Linux x64. It bundles Node.js, image-processing libraries and desktop helpers for each OS. The Linux helper also needs OS-provided Python 3 and AT-SPI2 packages. Reload the window after installation.
+
+The updaters in 0.1.3 through 0.1.6 support this release. Automatic updates may arrive in stages. For manual installation, download the VSIX and `SHA256SUMS`, verify the hash and install. Updating from 0.1.2 or earlier requires manual installation.
+
+**An existing `agentdesklink.allowAllOperations: true` still takes precedence after updating.** To use a permission tier, select Read only, Standard or Ask each time in the panel. Enabling MCP alone grants no target access.
+
+Register other AI clients with **AI Clients → Enable all**. They share the selected workspace's permissions, including from other projects in those clients. Reconnect when needed after updating, changing permissions or restarting VS Code. Other servers and manual entries with the same name are preserved.
+
+See the [installation guide](https://github.com/Takayuki-Ishimaru/AgentDeskLink/blob/v0.1.7/release-docs/INSTALL_en.md), [operation settings and approvals](https://github.com/Takayuki-Ishimaru/AgentDeskLink/blob/v0.1.7/release-docs/OPERATIONS.md) and [update guide](https://github.com/Takayuki-Ishimaru/AgentDeskLink/blob/v0.1.7/release-docs/UPDATES_en.md).
+
+## Usage notes
+
+- Browser one-shot approval covers inspected controls in the main document, open Shadow DOM and same-origin iframes. Closed shadow roots and out-of-process iframe proofs remain unsupported. Network permits cover one inspected URL-encoded form POST; multipart, files and generic AJAX/DELETE remain unsupported.
+- Approval binds the target, input and observed state. Reobserve when the screen changes. Approval is unavailable without a connection to VS Code, or when the granted desktop app could operate the approval dialog.
+- On Linux, available AT-SPI2 features depend on the app and desktop environment. See [known limitations](https://github.com/Takayuki-Ishimaru/AgentDeskLink/blob/v0.1.7/release-docs/KNOWN_ISSUES_en.md) for GTK 4 check boxes, Qt 5 discovery and Wayland geometry restrictions.
+- During a manual handoff network grant, website scripts may send, change or delete before a human click. Resume, expiry and emergency stop cannot undo requests already dispatched.
+- Physical input and unredacted native images default to off. `interactive_desktop` uses the real mouse and keyboard; do not use it while someone is interacting with the desktop.
+- Unknown secrets in images or text cannot be detected completely. Captured information is passed to the connected AI host.
+- macOS desktop control requires Accessibility permission; capture requires Screen Recording. The Windows helper is unsigned and the macOS helper is ad-hoc signed.
+- Use **Disable all** to remove managed external-client registrations before uninstalling the extension.
+
+## License
+
+AgentDeskLink is available under the [MIT License](https://github.com/Takayuki-Ishimaru/AgentDeskLink/blob/v0.1.7/LICENSE). Bundled third-party software remains subject to its respective licenses.

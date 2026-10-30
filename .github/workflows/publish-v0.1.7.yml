@@ -1,0 +1,94 @@
+name: Publish v0.1.7 beta (one-time)
+on:
+  push:
+    branches: [codex/publish-v0.1.7-20261030]
+  workflow_dispatch:
+permissions: {}
+concurrency:
+  group: publish-agentdesklink-0.1.7-beta
+  cancel-in-progress: false
+jobs:
+  publish:
+    if: github.repository == 'Takayuki-Ishimaru/AgentDeskLink' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/codex/publish-v0.1.7-20261030'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      # Publisher tooling (config, notes, helper, tests) lives at .release/
+      # in this checkout; it is never the release ref.
+      - uses: actions/checkout@v4
+        with:
+          path: publisher
+          persist-credentials: false
+      - name: Read approved config
+        id: cfg
+        run: |
+          python3 - <<'EOF'
+          import json, os, re
+          cfg = json.load(open('publisher/.release-v0.1.7/config.json'))
+          assert cfg['repo'] == 'Takayuki-Ishimaru/AgentDeskLink' and cfg['version'] == '0.1.7'
+          assert all(re.fullmatch('[0-9a-f]{40}', cfg[k]) for k in ['source_sha','base_sha'])
+          assert type(cfg['ci_run_id']) is int and cfg['ci_run_id'] > 0
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              for key in ['source_sha', 'ci_run_id']:
+                  print(f"{key}={cfg[key]}", file=output)
+          EOF
+      # Verify the Beta validation CI run on source_sha BEFORE downloading its
+      # artifact; the publisher itself re-checks everything before mutating.
+      - name: Check CI run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api "repos/${{ github.repository }}/actions/runs/${{ steps.cfg.outputs.ci_run_id }}" \
+            --jq '.head_sha,.status,.conclusion,.name,.path' | tee /tmp/ci
+          [ "$(sed -n 1p /tmp/ci)" = "${{ steps.cfg.outputs.source_sha }}" ]
+          [ "$(sed -n 2p /tmp/ci)" = completed ] && [ "$(sed -n 3p /tmp/ci)" = success ]
+          [ "$(sed -n 4p /tmp/ci)" = 'Beta validation' ]
+          [ "$(sed -n 5p /tmp/ci)" = .github/workflows/ci.yml ]
+      # Release ref (main + tag) must be the validated source commit, not the
+      # publisher branch.
+      - uses: actions/checkout@v4
+        with:
+          path: release-source
+          persist-credentials: false
+          ref: ${{ steps.cfg.outputs.source_sha }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Build from validated source
+        working-directory: release-source
+        run: |
+          npm ci
+          npm run build
+      - uses: actions/download-artifact@v4
+        with:
+          name: agentdesklink-universal
+          run-id: ${{ steps.cfg.outputs.ci_run_id }}
+          github-token: ${{ github.token }}
+          path: artifact
+      - name: Offline publisher tests
+        working-directory: publisher/.release-v0.1.7
+        run: |
+          python3 -m unittest -v test_publisher.py test_hardening.py
+          python3 -m py_compile publisher.py
+      - name: Prepare payload
+        run: |
+          python3 publisher/.release-v0.1.7/publisher.py prepare \
+            --config publisher/.release-v0.1.7/config.json \
+            --source release-source \
+            --vsix artifact/agentdesklink-0.1.7.vsix \
+            --notes publisher/.release-v0.1.7/notes.md \
+            --out assets \
+            --plan plan.json
+      # github.token is exposed as GH_TOKEN only here, the sole mutating step.
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 publisher/.release-v0.1.7/publisher.py publish \
+            --config publisher/.release-v0.1.7/config.json \
+            --source release-source \
+            --plan plan.json
