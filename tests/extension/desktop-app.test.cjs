@@ -129,6 +129,53 @@ test('macOS: binary or missing plists and bad bundles are explained instead of g
   assert.equal((await resolveDesktopSelection('relative/path', 'darwin')).ok, false);
 });
 
+test(
+  'macOS: non-executable files outside bundles are rejected without changing permissions',
+  { skip: process.platform === 'win32' },
+  async () => {
+    const { resolveDesktopSelection } = await load(),
+      dir = fresh(),
+      file = path.join(dir, 'notes.txt');
+    fs.writeFileSync(file, 'ordinary text');
+    fs.chmodSync(file, 0o644);
+    const result = await resolveDesktopSelection(file, 'darwin');
+    assert.equal(result.ok, false);
+    assert.match(result.message, /executable/i);
+    assert.equal(fs.statSync(file).mode & 0o777, 0o644);
+    fs.chmodSync(file, 0o755);
+    const executable = await resolveDesktopSelection(file, 'darwin');
+    assert.equal(executable.ok, true, 'an executable outside a bundle remains eligible');
+    assert.equal(executable.pick.appPath, fs.realpathSync(file));
+    assert.equal(executable.pick.replaceId, false);
+  },
+);
+
+test(
+  'macOS: direct bundle files require executable permission for both main and helper binaries',
+  { skip: process.platform === 'win32' },
+  async () => {
+    const { resolveDesktopSelection } = await load(),
+      dir = fresh(),
+      { app, exe } = makeBundle(dir),
+      helper = path.join(path.dirname(exe), 'Helper');
+    fs.writeFileSync(helper, 'helper');
+    for (const file of [exe, helper]) {
+      fs.chmodSync(file, 0o644);
+      const result = await resolveDesktopSelection(file, 'darwin');
+      assert.equal(result.ok, false, file);
+      assert.match(result.message, /executable/i);
+      assert.equal(fs.statSync(file).mode & 0o777, 0o644);
+      fs.chmodSync(file, 0o755);
+      assert.equal((await resolveDesktopSelection(file, 'darwin')).ok, true, file);
+    }
+    assert.equal(
+      (await resolveDesktopSelection(app, 'darwin')).ok,
+      true,
+      'bundle selection still resolves its executable',
+    );
+  },
+);
+
 test('Windows and Linux: pick an executable file and suggest a label-safe ID', async t => {
   const { resolveDesktopSelection, suggestAppId } = await load(),
     dir = fresh();
