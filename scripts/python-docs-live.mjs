@@ -54,7 +54,7 @@ test(
           assert.equal(p.revision, revision);
           elements.push(...p.elements);
         }
-        assert.equal(p.next_cursor, null);
+        assert.equal(p.next_cursor, undefined);
         return { ...p, elements };
       };
       const capture = async file => {

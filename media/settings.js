@@ -64,11 +64,23 @@
     browserSetup: $('browser-setup'), browserSetupStatus: $('browser-setup-status'), browserHosts: $('browser-hosts'), browserRetry: $('browser-retry'),
     browserInstalled: $('browser-installed'), browserInstalledEmpty: $('browser-installed-empty'), browserCompat: $('browser-compat'), browserUseAuto: $('browser-use-auto'),
     desktopOsHint: $('desktop-os-hint'), desktopAppId: $('desktop-app-id'), desktopAppPath: $('desktop-app-path'), desktopBrowse: $('desktop-browse'), desktopSave: $('desktop-save'),
-    desktopClear: $('desktop-clear'), desktopNotice: $('desktop-notice'), desktopError: $('desktop-error'), allowPhysicalInput: $('allow-physical-input'), allowUnredactedImages: $('allow-unredacted-images')
+    desktopClear: $('desktop-clear'), desktopNotice: $('desktop-notice'), desktopError: $('desktop-error'), allowPhysicalInput: $('allow-physical-input'), allowUnredactedImages: $('allow-unredacted-images'),
+    aiSummary: $('ai-summary'), aiSummaryExtra: $('ai-summary-extra'),
+    setupChecklist: $('setup-checklist'), setupProgress: $('setup-progress'), setupDismiss: $('setup-dismiss'), setupReopen: $('setup-reopen'),
+    grantsDetails: $('grants-details'), permissionsDetails: $('permissions-details'), advancedDetails: $('advanced-details'), desktopDetails: $('desktop-details'),
+    clientsDetails: $('clients-details'), desktopState: $('desktop-state'), clientsState: $('clients-state')
   };
+  const SETUP_STEPS = ['mcp', 'origin', 'tier'].map((name) => ({ name, item: $(`setup-step-${name}`), mark: $(`setup-mark-${name}`), state: $(`setup-state-${name}`), go: $(`setup-go-${name}`) }));
   const DESKTOP_CONTROLS = ['desktopAppId', 'desktopAppPath', 'desktopBrowse', 'desktopSave', 'desktopClear', 'allowPhysicalInput', 'allowUnredactedImages'];
 
   const set = (el, text) => setText(el, text);
+  // A collapsed group opens by itself when a problem or an elevated grant appears inside it (once per appearance, so the user can close it again).
+  const seenProblem = new Map();
+  function openOnProblem(key, details, problem) {
+    const was = seenProblem.get(key) === true;
+    seenProblem.set(key, !!problem);
+    if (problem && !was && details) details.open = true;
+  }
   if (els.language) {
     els.language.value = uiLanguage;
     els.language.addEventListener('change', () => applyLanguage(els.language.value));
@@ -114,12 +126,15 @@
       if (client.message) li.title = String(client.message);
       els.clientsList.appendChild(li);
     }
-    set(els.clientsError, state.error || state.rows.filter(c => c.status === 'error' || c.status === 'conflict').map(c => `${c.name}: ${c.message}`).join('\n'));
+    const clientsProblem = state.error || state.rows.filter(c => c.status === 'error' || c.status === 'conflict').map(c => `${c.name}: ${c.message}`).join('\n');
+    set(els.clientsError, clientsProblem);
+    openOnProblem('clients', els.clientsDetails, !!clientsProblem);
     if (state.busy) set(els.clientsStatus, 'AI クライアントを更新しています… / Updating AI clients…');
     else {
       const detected = state.rows.filter(c => c.detected).length;
       const configured = state.rows.filter(c => c.status === 'enabled').length;
       setTextParts(els.clientsStatus, [`${detected} 件を検出 / ${detected} detected`, `${configured} 件に登録済み / ${configured} configured`]);
+      set(els.clientsState, `${configured} 件に登録済み / ${configured} configured`);
     }
     setBusy(els.clientsEnable, !!state.busy || !!busy.clients);
     setBusy(els.clientsRefresh, !!state.busy || !!busy.clients);
@@ -171,6 +186,8 @@
     const loopback = ['localhost', '127.0.0.1', '[::1]'].includes(host);
     if (els.loopbackSuggestion) els.loopbackSuggestion.hidden = !loopback || els.allowLoopback?.checked === true;
     if (els.privateNetworkSuggestion) els.privateNetworkSuggestion.hidden = loopback || !host || !isPrivateHost(host) || els.allowPrivateNetwork?.checked === true;
+    // The hints point at the toggles in "More grants": show them when a suggestion appears.
+    openOnProblem('suggest', els.grantsDetails, els.loopbackSuggestion?.hidden === false || els.privateNetworkSuggestion?.hidden === false);
   }
   // A successful add clears the input; a rejected one keeps it so the text can be corrected.
   const pendingAdd = { origin: '', resource: '' };
@@ -342,6 +359,118 @@
   }
   if (els.operationMode) els.operationMode.addEventListener('change', () => send({type:'setOperationMode',mode:String(els.operationMode.value)},'operationMode'));
 
+  // ---- "What the AI can do now" summary and first-run checklist ----
+  // Presentation only: both are derived from the state the host already posts and never change a setting.
+  // Capabilities come from the effective permissions when present, so nothing is claimed that the state does not grant.
+  const MODES = ['read_only', 'standard', 'ask', 'all'];
+  const model = { settings: null, perms: null, stopped: null, workspaceOk: null, mcpError: '', runtimeError: '', desktopError: '' };
+  const uiState = (() => {
+    try { const saved = vscode && typeof vscode.getState === 'function' ? vscode.getState() : null; return saved && typeof saved === 'object' ? { ...saved } : {}; }
+    catch { return {}; }
+  })();
+  let setupDismissed = uiState.setupDismissed === true;
+  // Webview state API (not a setting): survives the sidebar being hidden and shown again.
+  function rememberUi(patch) {
+    Object.assign(uiState, patch);
+    try { if (vscode && typeof vscode.setState === 'function') vscode.setState({ ...uiState }); } catch { /* state API unavailable */ }
+  }
+  const plain = (value) => String(value ?? '').replace(/ \/ /g, '/');
+  const effective = () => { const p = model.perms; return p && typeof p === 'object' ? (p.effective && typeof p.effective === 'object' ? p.effective : p) : null; };
+  const flag = (key) => { const eff = effective(); return eff && typeof eff[key] === 'boolean' ? eff[key] : !!(model.settings && model.settings[key] === true); };
+  const grantedOrigins = () => {
+    const eff = effective(), own = model.settings;
+    const list = eff && Array.isArray(eff.browserOrigins) ? eff.browserOrigins : own && Array.isArray(own.browserOrigins) ? own.browserOrigins : [];
+    return list.filter(value => typeof value === 'string' && value);
+  };
+  const currentMode = () => {
+    const eff = effective();
+    if (eff && (eff.operationMode === 'all' || eff.allowAllOperations === true)) return 'all';
+    if (eff && MODES.includes(eff.operationMode)) return eff.operationMode;
+    return model.settings && MODES.includes(model.settings.operationMode) ? model.settings.operationMode : 'read_only';
+  };
+  const siteName = (origin) => plain(origin).replace(/^https:\/\//i, '').replace(/\/$/, '');
+  function sitesText(origins) {
+    const names = origins.map(siteName), shown = names.slice(0, 2), more = names.length - shown.length;
+    return { ja: shown.join('、') + (more > 0 ? ` ほか ${more} 件` : ''), en: shown.join(', ') + (more > 0 ? ` and ${more} more` : '') };
+  }
+  function summarize() {
+    if (model.stopped === true) return { ja: '緊急停止中です。操作を再開するまで、AI は何も実行できません。', en: 'Emergency stop is active. The AI cannot do anything until you resume operations.' };
+    const s = model.settings;
+    if (!s || typeof s.enabled !== 'boolean') return null;
+    if (model.workspaceOk === false) return { ja: '信頼済みのフォルダーを開くまで MCP は使えません。AI は何もできません。', en: 'MCP is unavailable until a trusted folder is open, so the AI can do nothing.' };
+    if (!s.enabled) return { ja: 'このワークスペースでは MCP が無効です。AI は何もできません。', en: 'MCP is off in this workspace, so the AI can do nothing.' };
+    if (model.mcpError) return { ja: 'MCP の設定に問題があります。下のメッセージを解消するまで、AI の権限は確定しません。', en: 'There is a problem with the MCP configuration. The AI\'s access is not settled until the message below is resolved.' };
+    const origins = grantedOrigins();
+    if (!origins.length) return { ja: 'MCP は有効ですが、許可された Web サイトがないため、AI はブラウザーを操作できません。', en: 'MCP is on, but no websites are allowed, so the AI cannot use the browser.' };
+    const sites = sitesText(origins), mode = currentMode();
+    if (mode === 'all') return { ja: `AI は ${sites.ja} で、確認なしにあらゆる操作（送信・削除・購入・認証情報の入力を含む）を実行できます（すべて許可・旧設定）。`, en: `The AI can perform any action on ${sites.en} without asking, including submitting forms, deleting, buying and entering credentials (allow all, legacy).` };
+    if (mode === 'ask') return { ja: `AI は ${sites.ja} を閲覧し、通常のクリックや入力ができます。送信や削除などの重要な操作は、VS Code の確認画面で承認した場合のみ実行されます（都度承認）。`, en: `The AI can view ${sites.en} and click or type in ordinary controls. Consequential actions such as submitting or deleting run only after you approve each one in VS Code (ask each time).` };
+    if (mode === 'standard') return { ja: `AI は ${sites.ja} を閲覧し、通常のクリックや入力ができます。送信や削除などの重要な操作は拒否されます（標準）。`, en: `The AI can view ${sites.en} and click or type in ordinary controls. Consequential actions such as submitting or deleting are denied (standard).` };
+    return { ja: `AI は ${sites.ja} を閲覧できます。クリックや入力はできません（読み取り専用）。`, en: `The AI can view ${sites.en}. It cannot click or type (read only).` };
+  }
+  // Grants outside the browser sentence that are on right now, so they stay visible while their toggles sit in collapsed groups.
+  function extraGrants() {
+    const s = model.settings;
+    if (!s || s.enabled !== true || model.stopped === true || model.workspaceOk === false || model.mcpError) return null;
+    const eff = effective() || {}, ja = [], en = [];
+    const app = typeof eff.desktopAppId === 'string' ? eff.desktopAppId : '';
+    if (app) { ja.push(`デスクトップアプリ ${plain(app)}`); en.push(`desktop app ${plain(app)}`); }
+    if (flag('allowPhysicalInput')) { ja.push('物理入力'); en.push('physical input'); }
+    if (flag('allowUnredactedImages')) { ja.push('無加工のネイティブ画像'); en.push('unredacted native images'); }
+    if (flag('allowLoopback')) { ja.push('ループバック'); en.push('loopback'); }
+    if (flag('allowPrivateNetwork')) { ja.push('プライベートネットワーク'); en.push('private network'); }
+    if (flag('allowPersonalData')) { ja.push('個人データの表示'); en.push('revealing personal data'); }
+    return ja.length ? { ja: `ほかに有効な設定: ${ja.join('、')}。`, en: `Also on: ${en.join(', ')}.` } : null;
+  }
+  function renderSummary() {
+    const text = summarize();
+    if (text) set(els.aiSummary, `${text.ja} / ${text.en}`);
+    const extra = text ? extraGrants() : null;
+    if (els.aiSummaryExtra) { set(els.aiSummaryExtra, extra ? `${extra.ja} / ${extra.en}` : ''); els.aiSummaryExtra.hidden = !extra; }
+  }
+  const SETUP_DONE = { mcp: () => !!model.settings && model.settings.enabled === true, origin: () => grantedOrigins().length > 0, tier: () => currentMode() !== 'read_only' };
+  function renderSetup() {
+    const known = model.settings !== null || model.perms !== null;
+    const done = SETUP_STEPS.map((step) => !!SETUP_DONE[step.name]());
+    const count = done.filter(Boolean).length, complete = count === done.length;
+    SETUP_STEPS.forEach((step, index) => {
+      if (step.mark) step.mark.textContent = done[index] ? '✓' : '○';
+      set(step.state, done[index] ? '完了 / Done' : '未完了 / To do');
+      if (step.item && step.item.dataset) step.item.dataset.done = done[index] ? 'true' : 'false';
+      if (step.go) step.go.hidden = done[index];
+    });
+    set(els.setupProgress, `${count}/${done.length} 完了 / ${count} of ${done.length} done`);
+    if (els.setupChecklist) els.setupChecklist.hidden = !known || complete || setupDismissed;
+    if (els.setupReopen) els.setupReopen.hidden = !known || complete || !setupDismissed;
+  }
+  // Open any collapsed group around the control, scroll it into view and move keyboard focus to it.
+  function focusControl(el) {
+    if (!el) return;
+    const group = typeof el.closest === 'function' ? el.closest('details') : null;
+    if (group) group.open = true;
+    if (typeof el.scrollIntoView === 'function') el.scrollIntoView({ block: 'center' });
+    if (typeof el.focus === 'function') el.focus();
+  }
+  const SETUP_TARGET = { mcp: () => els.enabled, origin: () => els.originInput, tier: () => els.operationMode };
+  for (const step of SETUP_STEPS) if (step.go) step.go.addEventListener('click', () => focusControl(SETUP_TARGET[step.name]()));
+  if (els.setupDismiss) els.setupDismiss.addEventListener('click', () => {
+    setupDismissed = true; rememberUi({ setupDismissed: true }); renderSetup();
+    if (els.setupReopen && !els.setupReopen.hidden && typeof els.setupReopen.focus === 'function') els.setupReopen.focus();
+  });
+  if (els.setupReopen) els.setupReopen.addEventListener('click', () => {
+    setupDismissed = false; rememberUi({ setupDismissed: false }); renderSetup();
+    const next = SETUP_STEPS.find((step) => step.go && !step.go.hidden), target = next ? next.go : els.setupDismiss;
+    if (target && typeof target.focus === 'function') target.focus();
+  });
+  function renderGroups() {
+    const eff = effective() || {}, saved = model.settings || {};
+    openOnProblem('reasons', els.permissionsDetails, Array.isArray(eff.reasons) && eff.reasons.length > 0);
+    openOnProblem('grants', els.grantsDetails, flag('allowLoopback') || flag('allowPrivateNetwork') || flag('allowPersonalData'));
+    openOnProblem('desktop', els.desktopDetails, saved.allowPhysicalInput === true || saved.allowUnredactedImages === true || !!model.desktopError);
+    openOnProblem('runtime', els.advancedDetails, !!model.runtimeError);
+    if (typeof saved.desktopAppId === 'string') set(els.desktopState, saved.desktopAppId ? plain(saved.desktopAppId) : '未設定 / Not set');
+  }
+
   window.addEventListener('message', (event) => {
     const s = event.data;
     if (s && typeof s === 'object' && s.type === 'desktopAppPicked') {
@@ -353,6 +482,15 @@
       return;
     }
     if (!s || typeof s !== 'object' || s.type !== 'state') return;
+    if (s.settings && typeof s.settings === 'object') model.settings = { ...(model.settings || {}), ...s.settings };
+    if (s.permissions && typeof s.permissions === 'object') model.perms = s.permissions;
+    if (typeof s.stopped === 'boolean') model.stopped = s.stopped;
+    if (typeof s.trusted === 'boolean' || typeof s.hasFolder === 'boolean') model.workspaceOk = s.trusted !== false && s.hasFolder !== false;
+    if (s.status && typeof s.status === 'object') {
+      model.mcpError = typeof s.status.mcpError === 'string' ? s.status.mcpError : '';
+      model.runtimeError = typeof s.status.runtimeError === 'string' ? s.status.runtimeError : '';
+      model.desktopError = typeof s.status.desktopError === 'string' ? s.status.desktopError : '';
+    }
     if (s.busy) Object.keys(s.busy).forEach((k) => markBusy(k, !!s.busy[k]));
     if (typeof s.trusted === 'boolean' || typeof s.hasFolder === 'boolean') {
       const workspaceOk = s.trusted !== false && s.hasFolder !== false;
@@ -423,6 +561,9 @@
       renderDesktopNotice();
       set(els.mcpError, s.status.mcpError || '');
     }
+    renderSummary();
+    renderSetup();
+    renderGroups();
   });
 
   post({ type: 'ready' });

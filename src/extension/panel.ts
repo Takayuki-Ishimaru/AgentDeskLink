@@ -102,36 +102,51 @@ export class SettingsPanelProvider implements vscode.WebviewViewProvider {
 <title>AgentDeskLink</title></head><body>
 <header class="header-row"><div class="title-group"><img class="brand-mark" src="${brand}" alt="" width="32" height="32"><h2>AgentDeskLink</h2></div><label class="language-control" for="ui-language"><span data-i18n-ja>表示言語</span><span data-i18n-en>Language</span><select id="ui-language" aria-label="表示言語 / UI language"><option value="ja">日本語</option><option value="en">English</option></select></label><span class="version" id="version"></span></header>
 <p class="hint intro">ブラウザとデスクトップを、必要な範囲で。 / Control your browser and desktop within explicit grants.</p>
-<p class="hint">Node と helper を同梱しています。Chrome を検出し、必要な場合は専用 Chromium を取得します。 / Node and helpers are bundled. Chrome is detected, with dedicated Chromium downloaded when needed.</p>
 <section class="section" aria-labelledby="workspace-title">
   <h3 id="workspace-title">このワークスペース / Workspace</h3>
   <div class="actions emergency-row"><button id="emergency-stop" class="danger" title="実行中の操作をただちに停止します / Stop running operations immediately">緊急停止 / Emergency stop</button><button id="resume-operations" class="secondary" hidden>操作を再開 / Resume operations</button></div>
   <p class="status" id="stopped-status" role="status" hidden>緊急停止中です。再開するには「操作を再開」を押してください。 / Operations are stopped. Select Resume operations to continue.</p>
+  <div class="summary-card"><p class="summary-label" id="ai-summary-label">いまの AI の権限 / What the AI can do now</p><div id="ai-summary-box" role="status" aria-live="polite" aria-atomic="true" aria-labelledby="ai-summary-label"><p class="summary-text" id="ai-summary"></p><p class="summary-extra" id="ai-summary-extra" hidden></p></div></div>
+  <button type="button" id="setup-reopen" class="link-button" hidden>セットアップの手順を表示 / Show setup steps</button>
+  <div class="checklist" id="setup-checklist" role="group" aria-labelledby="setup-checklist-title" hidden>
+    <div class="checklist-head"><h4 class="checklist-title" id="setup-checklist-title">はじめの設定 / First-time setup</h4><span class="checklist-progress" id="setup-progress"></span><button type="button" id="setup-dismiss" class="secondary compact" aria-label="セットアップの手順を閉じる / Dismiss the setup steps">閉じる / Dismiss</button></div>
+    <ol class="checklist-items">
+      <li id="setup-step-mcp"><span class="step-mark" id="setup-mark-mcp" aria-hidden="true"></span><span class="step-body"><span class="step-text">MCP を有効にする / Turn on MCP</span> <span class="step-state" id="setup-state-mcp"></span></span><button type="button" id="setup-go-mcp" class="secondary compact" aria-label="MCP の有効化の設定へ移動 / Go to the Enable MCP setting">設定へ / Go</button></li>
+      <li id="setup-step-origin"><span class="step-mark" id="setup-mark-origin" aria-hidden="true"></span><span class="step-body"><span class="step-text">許可する Web サイトを追加する / Add an allowed website</span> <span class="step-state" id="setup-state-origin"></span></span><button type="button" id="setup-go-origin" class="secondary compact" aria-label="許可する origin の入力欄へ移動 / Go to the allowed origin field">設定へ / Go</button></li>
+      <li id="setup-step-tier"><span class="step-mark" id="setup-mark-tier" aria-hidden="true"></span><span class="step-body"><span class="step-text">権限段階を選ぶ（読み取り専用のままでも可） / Choose a permission tier (Read only is fine to keep)</span> <span class="step-state" id="setup-state-tier"></span></span><button type="button" id="setup-go-tier" class="secondary compact" aria-label="操作の権限段階の選択へ移動 / Go to the permission tier selector">設定へ / Go</button></li>
+    </ol>
+  </div>
   <div class="row"><label class="check"><input type="checkbox" id="enabled"><span>このワークスペースで MCP を有効にする / Enable MCP in this workspace</span></label></div>
   <p class="hint" id="enabled-hint">変更はこのワークスペースに保存されます。 / Changes are saved to this workspace.</p>
-  <h4 class="perm-title">許可する範囲 / Trusted grants</h4>
-  <p class="hint">権限はワークスペース単位です。空の許可リストはアクセスを許可しません。 / Grants apply to this workspace; empty lists allow no access.</p>
-  <div class="row"><label class="check"><input type="checkbox" id="allow-loopback"><span>ループバックを許可 / Allow loopback (localhost)</span></label></div>
-  <div class="row"><label class="check"><input type="checkbox" id="allow-private-network"><span>プライベートネットワークを許可 / Allow private network</span></label></div>
-  <div class="row"><label class="check"><input type="checkbox" id="allow-personal-data"><span>メール・電話番号などの個人データを表示 / Allow revealing email and phone numbers</span></label></div>
+  <p class="error" id="enabled-error" role="alert"></p>
+  <p class="status" id="mcp-status" role="status"></p>
+  <p class="error" id="mcp-error" role="alert"></p>
   <h4 class="perm-title">ブラウザ移動を許可する origin / Navigable browser origins</h4>
   <p class="hint">完全な http(s) origin を追加します。localhost はループバック許可を手動で有効にした場合のみ利用できます。 / Add exact http(s) origins. Localhost requires manually enabling the loopback grant.</p>
   <ul class="client-list" id="origins-list" aria-label="Navigable browser origins"></ul>
   <div class="actions"><input id="origin-input" type="text" inputmode="url" placeholder="https://example.com" aria-label="Origin to allow"><button id="origin-add">追加 / Add</button></div>
-  <p class="hint" id="loopback-suggestion" hidden>この origin はループバックです。必要な場合だけ上の許可を手動で有効にしてください。 / This is a loopback origin. Enable the grant above manually only if needed.</p>
-  <p class="hint" id="private-network-suggestion" hidden>この origin はプライベートネットワークのアドレスです。必要な場合だけ上の「プライベートネットワークを許可」を手動で有効にしてください。 / This origin is a private-network address. Enable "Allow private network" above manually only if needed.</p>
+  <p class="hint" id="loopback-suggestion" hidden>この origin はループバックです。必要な場合だけ「詳細な許可」で手動で有効にしてください。 / This is a loopback origin. Enable the grant in More grants manually only if needed.</p>
+  <p class="hint" id="private-network-suggestion" hidden>この origin はプライベートネットワークのアドレスです。必要な場合だけ「詳細な許可」の「プライベートネットワークを許可」を手動で有効にしてください。 / This origin is a private-network address. Enable "Allow private network" in More grants manually only if needed.</p>
+  <p class="error" id="origins-error" role="alert"></p>
+  <details class="group" id="grants-details"><summary>詳細な許可 / More grants</summary>
+  <p class="hint">権限はワークスペース単位です。空の許可リストはアクセスを許可しません。 / Grants apply to this workspace; empty lists allow no access.</p>
+  <div class="row"><label class="check"><input type="checkbox" id="allow-loopback"><span>ループバックを許可 / Allow loopback (localhost)</span></label></div>
+  <div class="row"><label class="check"><input type="checkbox" id="allow-private-network"><span>プライベートネットワークを許可 / Allow private network</span></label></div>
+  <div class="row"><label class="check"><input type="checkbox" id="allow-personal-data"><span>メール・電話番号などの個人データを表示 / Allow revealing email and phone numbers</span></label></div>
   <h4 class="perm-title">サブリソースを許可する origin / Resource origins</h4>
   <p class="hint">画像などの読み込み専用です。ブラウザ移動は許可されません。完全な http(s) origin が必要です。 / Allows subresource loading only, not navigation; exact http(s) origins required.</p>
   <ul class="client-list" id="resource-origins-list" aria-label="Resource origins"></ul>
   <div class="actions"><input id="resource-origin-input" type="text" inputmode="url" placeholder="https://cdn.example.com" aria-label="Resource origin to allow"><button id="resource-origin-add">追加 / Add</button></div>
-  <p class="error" id="origins-error" role="alert"></p>
-  <h4 class="perm-title">現在の実効権限 / Effective permissions</h4>
-  <ul class="permissions" id="permissions"></ul>
+  </details>
   <div class="row"><label for="operation-mode">操作の権限段階 / Operation permission tier</label><select id="operation-mode" aria-label="Operation permission tier"><option value="read_only">読み取り専用 / Read only</option><option value="standard">標準 / Standard</option><option value="ask">都度承認 / Ask each time</option><option value="all">すべて許可 / Allow all (legacy)</option></select></div>
   <p class="hint">都度承認はブラウザー操作と、許可したデスクトップアプリの重要なネイティブ操作（削除・送信など）に適用されます。機密コントロールは承認できません。「すべて許可」は、フォーム送信・削除・購入や支払い・認証情報の入力を確認なしで許可します。有効にする前に内容を確認する画面が表示されます。 / Ask applies to browser actions and to consequential native actions (delete, send, ...) in the granted desktop app; sensitive native controls are never approved. Allow all lets the AI submit forms, delete, buy or pay, and enter credentials without asking; a confirmation dialog lists the details before it is enabled.</p>
   <p class="error" id="operation-mode-error" role="alert"></p>
   <p class="hint" id="permissions-hint"></p>
-  <details class="advanced-settings"><summary>詳細設定 / Advanced settings</summary>
+  <details class="group" id="permissions-details"><summary>現在の実効権限 / Effective permissions</summary>
+  <ul class="permissions" id="permissions"></ul>
+  </details>
+  <details class="group advanced-settings" id="advanced-details"><summary>詳細設定 / Advanced settings</summary>
+  <p class="hint">Node と helper を同梱しています。Chrome を検出し、必要な場合は専用 Chromium を取得します。 / Node and helpers are bundled. Chrome is detected, with dedicated Chromium downloaded when needed.</p>
   <div class="row runtime-row"><label for="session-idle-minutes">セッションのアイドル期限 / Session idle timeout</label><input id="session-idle-minutes" type="number" min="1" max="60" step="1" aria-label="分 / Minutes"><span>分 / minutes</span></div>
   <div class="row"><label class="check"><input id="browser-headless" type="checkbox"><span>ヘッドレスで起動 / Run headless</span></label></div>
   <label class="field-label" for="browser-proxy-server">公開プロキシ origin / Public proxy origin</label>
@@ -142,9 +157,6 @@ export class SettingsPanelProvider implements vscode.WebviewViewProvider {
   <p class="status" id="session-idle-effective" role="status"></p>
   <p class="error" id="runtime-settings-error" role="alert"></p>
   </details>
-  <p class="error" id="enabled-error" role="alert"></p>
-  <p class="status" id="mcp-status" role="status"></p>
-  <p class="error" id="mcp-error" role="alert"></p>
   <div class="browser-setup" id="browser-setup" hidden>
     <h4 class="perm-title">ブラウザの準備 / Browser setup</h4>
     <p class="status" id="browser-setup-status" role="status"></p>
@@ -160,7 +172,7 @@ export class SettingsPanelProvider implements vscode.WebviewViewProvider {
   </div>
 </section>
 <section class="section" aria-labelledby="desktop-title">
-  <h3 id="desktop-title">デスクトップアプリ / Desktop app</h3>
+  <details class="group section-group" id="desktop-details"><summary><span class="group-title" id="desktop-title">デスクトップアプリ / Desktop app</span><span class="summary-state" id="desktop-state"></span></summary>
   <p class="hint">AI が観測・操作できるネイティブアプリを 1 つだけ指定します。ワークスペースごとの信頼設定で、信頼したワークスペースでのみ保存できます。 / Name the one native app the AI may observe and operate. A trusted per-workspace setting that can only be saved in a trusted workspace.</p>
   <p class="hint" id="desktop-os-hint"></p>
   <label class="field-label" for="desktop-app-id">アプリ ID / App ID</label>
@@ -174,26 +186,29 @@ export class SettingsPanelProvider implements vscode.WebviewViewProvider {
   <p class="hint">AI が本物のマウス・スクロール操作を OS 全体に送れるようになります。人の操作と区別されず、前面の別のウィンドウに届く恐れがあります。無加工の画像の許可も必要です。 / Lets the AI send real mouse and scroll input to the whole desktop. It is not isolated from your own input and could reach another window in front. Needs unredacted images too.</p>
   <div class="row"><label class="check"><input type="checkbox" id="allow-unredacted-images"><span>無加工のネイティブ画像を許可 / Allow unredacted native images</span></label></div>
   <p class="hint">アプリのウィンドウ画像を、秘密情報のマスクなしで AI に送ります。パスワード、個人情報、他のウィンドウの内容が写る恐れがあります。 / Sends the app window image to the AI without masking secrets. Passwords, personal data or other content in the window may be visible.</p>
+  </details>
 </section>
 <section class="section" aria-labelledby="clients-title">
-  <h3 id="clients-title">AI クライアント / AI clients</h3>
+  <details class="group section-group" id="clients-details"><summary><span class="group-title" id="clients-title">AI クライアント / AI clients</span><span class="summary-state" id="clients-state"></span></summary>
   <p class="hint">インストール済みクライアントを検出します。一括有効にすると、このワークスペースの権限を共有します。 / Installed clients are detected automatically. Enabling all shares this workspace's permissions.</p>
   <div class="actions"><button id="clients-enable">すべて有効 / Enable all</button><button id="clients-disable" class="secondary">すべて無効 / Disable all</button><button id="clients-refresh" class="secondary">再検出 / Detect again</button></div>
   <ul class="client-list" id="clients-list" aria-label="AIクライアントの登録状態 / AI client registration status"></ul>
   <p class="status" id="clients-status" role="status"></p>
   <p class="error" id="clients-error" role="alert"></p>
   <p class="hint">反映には再接続や再起動が必要な場合があります。同名の手動設定は保持します。最後に一括有効にしたワークスペースが接続を管理します。 / Reconnect or restart clients if needed. Existing entries with the same name are preserved. The workspace that last enabled all clients manages the connection.</p>
+  </details>
 </section>
 <section class="section" aria-labelledby="updates-title">
-  <h3 id="updates-title">拡張機能の更新 / Extension updates</h3>
+  <details class="group section-group" id="updates-details"><summary><span class="group-title" id="updates-title">拡張機能の更新 / Extension updates</span></summary>
   <p class="hint">すべてのワークスペースに適用されます。 / Applies to all workspaces.</p>
   <div class="row"><label class="check"><input type="checkbox" id="auto-update"><span>自動更新を有効にする / Enable automatic updates</span></label></div>
   <div class="row"><label class="check"><input type="checkbox" id="check-updates"><span>新しいバージョンを確認する / Check for new versions</span></label></div>
   <p class="hint">起動後と 6 時間ごとに確認します。更新の反映には VS Code の再読み込みが必要です。 / Checks after startup and every 6 hours. Reload VS Code to apply an update.</p>
-  <p class="status" id="update-status" role="status"></p>
   <div class="actions"><button id="check-now" class="secondary">今すぐ確認 / Check now</button></div>
+  <p class="hint"><span data-i18n-ja>更新元は GitHub の公式リポジトリ（<span id="update-source">Takayuki-Ishimaru/AgentDeskLink</span>）に固定されています。設定は不要です。</span><span data-i18n-en>Updates use the official GitHub repository; no source configuration is needed.</span></p>
+  </details>
+  <p class="status" id="update-status" role="status"></p>
 </section>
-<p class="hint"><span data-i18n-ja>更新元は GitHub の公式リポジトリ（<span id="update-source">Takayuki-Ishimaru/AgentDeskLink</span>）に固定されています。設定は不要です。</span><span data-i18n-en>Updates use the official GitHub repository; no source configuration is needed.</span></p>
 <section class="section support">
   <div class="actions"><button id="open-logs" class="secondary">ログを開く / Open logs</button><button id="open-settings" class="secondary">設定を開く / Open Settings</button></div>
   <p class="error" id="global-error" role="alert"></p>

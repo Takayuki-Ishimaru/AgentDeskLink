@@ -164,7 +164,8 @@ test(
       p = await f.engine.observe(f.id, { token_budget: 8000 });
       const select = p.elements!.find(e => e.name === 'Color')!;
       assert.deepEqual(
-        select.options?.map(o => [o.label, o.value, o.disabled]),
+        // Lean options: a flag is present only when true.
+        select.options?.map(o => [o.label, o.value, o.disabled === true]),
         [
           ['赤', 'r', false],
           ['青', 'b', false],
@@ -281,7 +282,8 @@ test('select option metadata and its selected value share secret redaction', { t
     assert.ok(!JSON.stringify(p).includes('CANARY_OPTION_VALUE'));
     const field = p.elements!.find(e => e.role === 'combobox')!;
     assert.equal(field.value, '[redacted]');
-    assert.ok(field.options?.every(o => o.value === '[redacted]'));
+    // Label and value are both masked, and a value equal to its label is omitted from the lean option.
+    assert.deepEqual(field.options, [{ label: '[redacted]', selected: true }, { label: '[redacted]' }]);
   } finally {
     await f.close();
   }
@@ -499,7 +501,8 @@ test(
         await f.engine.act(f.id, { action: 'select', element_id: field.id, value: 'Destination 042' }, state.revision);
         state = await f.engine.observe(f.id, { token_budget: 8000 });
         assert.equal(state.elements!.find(e => e.id === field.id)!.value, 'd042');
-        const compact = await f.engine.observe(f.id, { scope: `id:${field.id}`, token_budget: 1800 });
+        // Lean options are about half the size of the full shape, so the budget must be small for 100 of them to overflow.
+        const compact = await f.engine.observe(f.id, { scope: `id:${field.id}`, token_budget: 800 });
         assert.equal(compact.elements![0]!.name, name);
         assert.equal(compact.elements![0]!.value, 'd042');
         assert.equal(compact.elements![0]!.options_truncated, true);
@@ -516,7 +519,11 @@ test(
         },
         state.revision,
       );
-      assert.equal((await f.engine.observe(f.id)).elements!.find(e => e.id === notes.id)!.value, 'Updated note');
+      // Lean options fit in the default budget, so the later fields can sit on a following page: ask for a larger one.
+      assert.equal(
+        (await f.engine.observe(f.id, { token_budget: 8000 })).elements!.find(e => e.id === notes.id)!.value,
+        'Updated note',
+      );
     } finally {
       await f.close();
     }
@@ -554,7 +561,7 @@ test(
       const select = state.elements!.find(e => e.role === 'combobox')!;
       assert.equal(select.name, 'Destination');
       assert.equal(select.value, 'Ordinary');
-      assert.equal(select.options![1]!.value, '[redacted]');
+      assert.deepEqual(select.options![1], { label: '[redacted]' }, 'a classified option is masked, label and value');
       const frame = await f.engine.capture(f.id, { max_dimension: 2048, max_pixels: 4194304 });
       const crop = await f.engine.capture(f.id, {
         frame_id: frame.metadata.frame_id,

@@ -5,6 +5,17 @@ import type { ElementHandle, Page } from 'playwright';
 import { preflightBrowserInput } from '../src/browser-preflight.js';
 import { AdlError, type Action } from '../src/types.js';
 
+const rectOf = (left: number, top: number, right: number, bottom: number) => ({
+  x: left,
+  y: top,
+  left,
+  top,
+  right,
+  bottom,
+  width: right - left,
+  height: bottom - top,
+});
+
 function fixture(action: 'click' | 'fill' = 'click') {
   const state = {
     occluded: false,
@@ -17,6 +28,10 @@ function fixture(action: 'click' | 'fill' = 'click') {
     origin: 'https://example.com',
     name: 'Reference',
     events: [] as string[],
+    // Layout fragments [left, top, right, bottom] of the target (default: one box) and rectangles that cover the points inside them.
+    fragments: null as number[][] | null,
+    covers: [] as number[][],
+    hoverArgs: [] as unknown[],
     onHover: () => {},
     onFocus: () => {},
     onEvaluate: () => {},
@@ -57,10 +72,19 @@ function fixture(action: 'click' | 'fill' = 'click') {
       return state.name;
     }
     getBoundingClientRect() {
-      return { x: 10, y: 20, left: 10, top: 20, right: 210, bottom: 60, width: 200, height: 40 };
+      const f = state.fragments;
+      if (!f) return rectOf(10, 20, 210, 60);
+      return rectOf(
+        Math.min(...f.map(r => r[0]!)),
+        Math.min(...f.map(r => r[1]!)),
+        Math.max(...f.map(r => r[2]!)),
+        Math.max(...f.map(r => r[3]!)),
+      );
     }
     getClientRects() {
-      return [this.getBoundingClientRect()];
+      return state.fragments
+        ? state.fragments.map(r => rectOf(r[0]!, r[1]!, r[2]!, r[3]!))
+        : [this.getBoundingClientRect()];
     }
     checkVisibility() {
       return true;
@@ -104,13 +128,14 @@ function fixture(action: 'click' | 'fill' = 'click') {
     querySelector() {
       return state.replaced ? other : element;
     }
-    elementFromPoint() {
-      return state.occluded || state.occludedStack ? other : element;
+    elementFromPoint(x = 0, y = 0) {
+      return state.occluded || state.occludedStack || covered(x, y) ? other : element;
     }
-    elementsFromPoint() {
-      return state.occludedStack ? [other, element] : [state.occluded ? other : element];
+    elementsFromPoint(x = 0, y = 0) {
+      return state.occludedStack || covered(x, y) ? [other, element] : [state.occluded ? other : element];
     }
   }
+  const covered = (x: number, y: number) => state.covers.some(c => x >= c[0]! && x < c[2]! && y >= c[1]! && y < c[3]!);
   // activeElement is a prototype accessor (real documents expose it that way); the instance keeps the focused element.
   Object.defineProperty(FakeDocument.prototype, 'activeElement', {
     get(this: { focused?: FakeElement | null }) {
@@ -151,8 +176,9 @@ function fixture(action: 'click' | 'fill' = 'click') {
       state.onEvaluate();
       return value;
     },
-    hover: async () => {
+    hover: async (...args: unknown[]) => {
       state.events.push('hover');
+      state.hoverArgs.push(...args);
       state.onHover();
     },
     focus: async () => {
@@ -278,4 +304,59 @@ test('browser preflight stops on cancellation and document invalidation', async 
     { code: 'E_STALE_STATE' },
   );
   assert.equal(g.state.events.length, 0);
+});
+test('browser preflight reports the verified click point and hovers exactly there', async () => {
+  const f = fixture();
+  const p = await preflightBrowserInput(f.page, f.handle, f.request, '#target', f.signal, () => {});
+  // One fragment: the pixel centre of the box centre (110, 40), measured from the box origin (10, 20).
+  assert.deepEqual(p.click, { offset: { x: 100.5, y: 20.5 }, position: { x: 100.5, y: 20.5 } });
+  assert.deepEqual(f.state.hoverArgs, [{ position: { x: 100.5, y: 20.5 } }]);
+});
+test('browser preflight uses a layout fragment when the bounding-box centre is over other content', async () => {
+  const f = fixture();
+  // A link wrapped over two lines: the box centre (85, 40) lies between the fragments, under some other element.
+  f.state.fragments = [
+    [100, 20, 160, 40],
+    [10, 40, 70, 60],
+  ];
+  f.state.covers = [[75, 30, 95, 50]];
+  const p = await preflightBrowserInput(f.page, f.handle, f.request, '#target', f.signal, () => {});
+  assert.deepEqual(p.click.offset, { x: 120.5, y: 10.5 });
+  assert.deepEqual(f.state.hoverArgs, [{ position: { x: 120.5, y: 10.5 } }]);
+});
+test('browser preflight clicks the free fragment when the first one is covered', async () => {
+  const f = fixture();
+  f.state.fragments = [
+    [100, 20, 160, 40],
+    [10, 40, 70, 60],
+  ];
+  f.state.covers = [[100, 20, 160, 40]];
+  const p = await preflightBrowserInput(f.page, f.handle, f.request, '#target', f.signal, () => {});
+  assert.deepEqual(p.click.offset, { x: 30.5, y: 30.5 });
+  assert.deepEqual(f.state.hoverArgs, [{ position: { x: 30.5, y: 30.5 } }]);
+});
+test('browser preflight still refuses an element whose every fragment is covered', async () => {
+  const f = fixture();
+  f.state.fragments = [
+    [100, 20, 160, 40],
+    [10, 40, 70, 60],
+  ];
+  f.state.covers = [[0, 0, 1000, 700]];
+  await assert.rejects(
+    preflightBrowserInput(f.page, f.handle, f.request, '#target', f.signal, () => {}),
+    { code: 'E_NOT_INTERACTABLE', reason: 'occluded' },
+  );
+  assert.equal(f.state.events.length, 0);
+});
+test('browser preflight tests fragment centres clipped to the viewport and skips empty or offscreen fragments', async () => {
+  const f = fixture();
+  // Empty, fully offscreen, then a fragment partly left of the viewport: only the visible part counts (x 0..40, y 20..60).
+  f.state.fragments = [
+    [10, 20, 10, 60],
+    [2000, 20, 2100, 60],
+    [-60, 20, 40, 60],
+  ];
+  const p = await preflightBrowserInput(f.page, f.handle, f.request, '#target', f.signal, () => {});
+  // bbox origin is (-60, 20); the visible part's pixel centre is (20.5, 40.5).
+  assert.deepEqual(p.click.offset, { x: 80.5, y: 20.5 });
 });

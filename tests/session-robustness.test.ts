@@ -62,9 +62,9 @@ async function page(
     },
   };
 }
-const REPLACING_PAGE = `<!doctype html><body><input id="todo" type="checkbox" aria-label="Buy milk"><button id="save">Save</button><input id="notes" aria-label="Notes">
+const REPLACING_PAGE = `<!doctype html><body><input id="todo" type="checkbox" aria-label="Water plants"><button id="save">Save</button><input id="notes" aria-label="Notes">
 <script>
-document.getElementById('todo').addEventListener('click',()=>{const old=document.getElementById('todo'),n=document.createElement('input');n.type='checkbox';n.id='todo2';n.checked=true;n.setAttribute('aria-label','Buy milk');old.replaceWith(n);});
+document.getElementById('todo').addEventListener('click',()=>{const old=document.getElementById('todo'),n=document.createElement('input');n.type='checkbox';n.id='todo2';n.checked=true;n.setAttribute('aria-label','Water plants');old.replaceWith(n);});
 document.getElementById('save').addEventListener('click',()=>{const old=document.getElementById('save'),n=document.createElement('button');n.id='save2';n.textContent='Saved';old.replaceWith(n);});
 </script></body>`;
 
@@ -76,7 +76,7 @@ test(
     try {
       const session = await f.open();
       let observed = await f.engine.observe(session.session_id);
-      const checkbox = observed.elements!.find(e => e.name === 'Buy milk')!;
+      const checkbox = observed.elements!.find(e => e.name === 'Water plants')!;
       const result = (await f.engine.act(
         session.session_id,
         { action: 'check', element_id: checkbox.id, checked: true },
@@ -90,7 +90,7 @@ test(
       assert.equal(result.network_blocked, undefined);
       assert.equal(f.engine.listSessions().sessions.length, 1, 'the session must survive');
       observed = await f.engine.observe(session.session_id);
-      assert.equal(observed.elements!.find(e => e.name === 'Buy milk')!.checked, true);
+      assert.equal(observed.elements!.find(e => e.name === 'Water plants')!.checked, true);
       const notes = observed.elements!.find(e => e.name === 'Notes')!;
       await f.engine.act(
         session.session_id,
@@ -142,7 +142,7 @@ test(
           {
             session_id: session.session_id,
             action: 'check',
-            element_id: observed.elements!.find(e => e.name === 'Buy milk')!.id,
+            element_id: observed.elements!.find(e => e.name === 'Water plants')!.id,
             checked: true,
           },
         ],
@@ -544,6 +544,45 @@ test('safeError keeps carrying workspace setting hints consistently', () => {
   const plain = safeError(new AdlError('E_INVALID_ARGUMENT'));
   assert.equal(plain.argument, undefined);
   assert.equal(plain.limit, undefined);
+});
+
+test('safeError reports the retry revision only when the error carries one', () => {
+  const asked = new AdlError('E_APPROVAL_REQUIRED', 'form_submission_requires_approval', { revision: 7 });
+  asked.requestId = 'r-1';
+  const safe = safeError(asked);
+  assert.equal(safe.revision, 7);
+  assert.equal(safe.request_id, 'r-1');
+  assert.equal(safe.retryable, true);
+  assert.equal(safe.workspace_setting, 'agentdesklink.operationMode');
+  assert.equal(
+    'revision' in safeError(new AdlError('E_APPROVAL_REQUIRED', 'form_submission_requires_approval')),
+    false,
+  );
+  assert.equal(
+    'revision' in safeError(new AdlError('E_INVALID_ARGUMENT', 'invalid_argument', { argument: 'x' })),
+    false,
+  );
+  assert.equal('revision' in safeError(new Error('boom')), false);
+});
+
+test('safeError: a human denial or a withdrawal is final, and read_only_mode names no policy file setting', () => {
+  for (const reason of ['approval_denied', 'approval_invalidated'] as const) {
+    const safe = safeError(new AdlError('E_POLICY_DENIED', reason));
+    assert.equal(safe.retryable, false, reason);
+    assert.equal(safe.reason, reason);
+    assert.equal(safe.workspace_setting, undefined, reason);
+    assert.equal(safe.policy_setting, undefined, reason);
+  }
+  assert.match(safeError(new AdlError('E_POLICY_DENIED', 'approval_denied')).safe_message, /rejected.*Do not retry/);
+  const readOnly = safeError(new AdlError('E_POLICY_DENIED', 'read_only_mode'));
+  assert.equal(readOnly.workspace_setting, 'agentdesklink.operationMode');
+  assert.equal(readOnly.policy_setting, undefined);
+  assert.match(readOnly.safe_message, /read_only/);
+  // The legacy controls refusal keeps its policy file hint.
+  assert.equal(
+    safeError(new AdlError('E_APPROVAL_REQUIRED', 'operation_not_granted')).policy_setting,
+    'browserTargets[].controls',
+  );
 });
 
 test('stdio clients receive specific reasons instead of "Invalid input"', { timeout: 60000 }, async () => {

@@ -40,9 +40,9 @@ test('clipped text sets text_clipped and never claims that elements were omitted
   store.record('s', 1, raw([el('a', 'x'.repeat(512), { name_truncated: true, text_length: 900 }), el('b', 'plain')]));
   const clipped = store.observe('s', 1, { token_budget: 1800 });
   assert.equal(clipped.truncated, false);
-  assert.equal(clipped.elements_truncated, false);
+  assert.ok(!('elements_truncated' in clipped), 'elements_truncated no longer exists');
   assert.equal(clipped.text_clipped, true);
-  assert.equal(clipped.next_cursor, null);
+  assert.ok(!('next_cursor' in clipped), 'next_cursor appears only when more elements follow');
   const projected = store.observe('s', 1, { token_budget: 1800, include: ['id'] });
   assert.equal(projected.text_clipped, true, 'the flag does not depend on the projected fields');
   assert.equal(
@@ -53,21 +53,19 @@ test('clipped text sets text_clipped and never claims that elements were omitted
   store.record('t', 1, raw([el('a', 'plain')], { truncated: true }));
   const omitted = store.observe('t', 1, { token_budget: 1800 });
   assert.equal(omitted.truncated, true);
-  assert.equal(omitted.elements_truncated, true);
   assert.equal(omitted.text_clipped, undefined);
-  assert.equal(omitted.next_cursor, null);
+  assert.equal(omitted.next_cursor, undefined);
   store.record('u', 1, raw(Array.from({ length: 60 }, (_, i) => el(`e${i}`, `Item ${i} ${'y'.repeat(60)}`))));
   let page = store.observe('u', 1, { token_budget: 256 }),
     pages = 1;
   assert.equal(page.truncated, true);
-  assert.equal(page.elements_truncated, true);
   assert.ok(page.next_cursor);
   while (page.next_cursor) {
     page = store.observe('u', 1, { token_budget: 256, cursor: page.next_cursor });
     assert.ok(++pages < 100);
   }
   assert.equal(page.truncated, false);
-  assert.equal(page.elements_truncated, false);
+  assert.ok(!('next_cursor' in page));
 });
 
 test('budget-shortened names report text_clipped on the final page without truncated', () => {
@@ -76,7 +74,7 @@ test('budget-shortened names report text_clipped on the final page without trunc
   const page = store.observe('s', 1, { token_budget: 256 });
   assert.ok(Buffer.byteLength(JSON.stringify(page)) <= 1024);
   assert.equal(page.truncated, false);
-  assert.equal(page.next_cursor, null);
+  assert.equal(page.next_cursor, undefined);
   const big = page.elements!.find(e => e.id === 'big')!;
   assert.equal(big.name_truncated, true);
   assert.equal(big.value_truncated, true);
@@ -377,8 +375,7 @@ test('long text is reported by text_clipped, not by truncated or a missing curso
   try {
     const state = await f.engine.observe(f.session.session_id, { token_budget: 8000 });
     assert.equal(state.truncated, false);
-    assert.equal(state.elements_truncated, false);
-    assert.equal(state.next_cursor, null);
+    assert.equal(state.next_cursor, undefined);
     assert.equal(state.text_clipped, true);
     const paragraph = state.elements!.find(e => e.role === 'text')!;
     assert.equal(paragraph.name_truncated, true);
@@ -593,7 +590,6 @@ test('adl_observe documents the scope grammar and failure reasons through stdio'
     const tool = (await client.listTools()).tools.find(t => t.name === 'adl_observe')!;
     for (const word of [
       'text_clipped',
-      'elements_truncated',
       'text:"v1.0: fixed, rc2"',
       '512 characters',
       'invalid_scope',
@@ -616,7 +612,7 @@ test('adl_observe documents the scope grammar and failure reasons through stdio'
       ['Release v1.0: fixed'],
     );
     assert.equal(found.truncated, false);
-    assert.equal(found.elements_truncated, false);
+    assert.ok(!('elements_truncated' in found));
     const bad = await call({ session_id: session.session_id, scope: 'text:"broken' });
     assert.equal(bad.error.code, 'E_INVALID_ARGUMENT');
     assert.equal(bad.error.reason, 'invalid_scope');

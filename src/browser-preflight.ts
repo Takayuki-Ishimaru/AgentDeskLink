@@ -2,12 +2,18 @@ import type { ElementHandle, Page } from 'playwright';
 import { AdlError, type Action, type ErrorCode, type ErrorReason } from './types.js';
 import { SECRET_LABEL_PATTERN, BROWSER_PRIVACY_RULES } from './privacy.js';
 import type { BrowserIntegrity } from './browser-integrity.js';
-import { hitPointOf } from './browser-approval.js';
+import { offsetPointOf } from './browser-approval.js';
 
 export interface PreflightResult {
   target: { role: string; name: string; enabled: boolean };
   pointer_on_target: true;
   focus_matches_target: boolean;
+  /**
+   * The click point the final probe proved to be the topmost hit on the target (the centre of one of its layout fragments), in two
+   * equivalent forms: `offset` from the border-box origin that boundingBox() reports, and `position`, the same point measured from the
+   * padding box as Playwright's click/hover `position` option expects. Input must be dispatched at this point and nowhere else.
+   */
+  click: { offset: { x: number; y: number }; position: { x: number; y: number } };
 }
 
 interface Probe {
@@ -21,7 +27,18 @@ interface Probe {
   visible?: boolean;
   inViewport?: boolean;
   hit?: boolean;
+  /** Verified click point: offset from the border-box origin plus the border widths Playwright adds to reach the padding box. */
+  click?: { dx: number; dy: number; borderLeft: number; borderTop: number };
 }
+
+const clickPoint = (p: Probe): PreflightResult['click'] => {
+  const c = p.click;
+  if (!c || ![c.dx, c.dy, c.borderLeft, c.borderTop].every(Number.isFinite)) throw new AdlError('E_STALE_STATE');
+  return {
+    offset: { x: c.dx, y: c.dy },
+    position: { x: c.dx - c.borderLeft, y: c.dy - c.borderTop },
+  };
+};
 
 interface ProbeArgs {
   secretLabelPattern: string;
@@ -99,6 +116,12 @@ function probe(el: Element, a: ProbeArgs): Probe {
     const roleAttr = attr(e, 'role'),
       id = attr(e, 'id') || '';
     if ((roleAttr?.length ?? 0) > 100 || id.length > 512) return deny('E_RESOURCE_LIMIT');
+    // Mirrors snapshotPageFn: an editing host (own contenteditable, editable parent excluded) is a textbox named by its label, not by its text.
+    const hostParent = r(e, 'parentElement') as Element | null;
+    const editingHost =
+      has(e, 'contenteditable') &&
+      r(e, 'isContentEditable') === true &&
+      !(hostParent && r(hostParent, 'isContentEditable') === true);
     let role = roleAttr || '';
     if (!role) {
       if (tag === 'BUTTON') role = 'button';
@@ -113,7 +136,11 @@ function probe(el: Element, a: ProbeArgs): Probe {
                 ? 'button'
                 : type === 'file'
                   ? 'file'
-                  : 'textbox';
+                  : type === 'range'
+                    ? 'slider'
+                    : type === 'number'
+                      ? 'spinbutton'
+                      : 'textbox';
       else if (tag === 'TEXTAREA') role = 'textbox';
       else if (tag === 'SELECT') role = 'combobox';
       else
@@ -137,6 +164,7 @@ function probe(el: Element, a: ProbeArgs): Probe {
                           : isText
                             ? 'text'
                             : 'generic';
+      if (editingHost && (role === 'generic' || role === 'text')) role = 'textbox';
     }
     const label =
       tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT'
@@ -201,9 +229,11 @@ function probe(el: Element, a: ProbeArgs): Probe {
       referenceText ||
       attr(e, 'aria-label') ||
       labelText ||
-      (isText && !['BUTTON', 'A', 'INPUT', 'TEXTAREA', 'SELECT'].includes(tag) && !clickable && !roleAttr
-        ? directText(e)
-        : descendantText(e)) ||
+      (editingHost
+        ? ''
+        : isText && !['BUTTON', 'A', 'INPUT', 'TEXTAREA', 'SELECT'].includes(tag) && !clickable && !roleAttr
+          ? directText(e)
+          : descendantText(e)) ||
       attr(e, 'alt') ||
       attr(e, 'placeholder') ||
       attr(e, 'title') ||
@@ -234,42 +264,65 @@ function probe(el: Element, a: ProbeArgs): Probe {
       }
     }
     const win = (r(doc, 'defaultView') as Window | null) ?? window;
-    const cx = rect.left + rect.width / 2,
-      cy = rect.top + rect.height / 2;
-    const inViewport =
-      visible &&
-      rect.bottom > 0 &&
-      rect.right > 0 &&
-      rect.top < win.innerHeight &&
-      rect.left < win.innerWidth &&
-      cx >= 0 &&
-      cy >= 0 &&
-      cx < win.innerWidth &&
-      cy < win.innerHeight;
-    let hit = false;
-    if (inViewport) {
-      // Every shadow host must itself be the topmost hit in its parent root.
-      // Checking only the inner root misses overlays covering the host.
+    // Candidate click points: the centre of each non-empty layout fragment clipped to the viewport. An inline element wrapped over
+    // several lines has one fragment per line box, and the centre of its bounding box can lie on whitespace or another element.
+    // A point is the centre of the pixel holding the span's midpoint, so the CDP integer hit-test, Playwright's rounded position and
+    // the mouse event all name the same pixel (an identical helper is pixelCentre in browser-approval.ts).
+    const centreOf = (low: number, high: number) => {
+      const middle = (low + high) / 2,
+        pixel = Math.floor(middle) + 0.5;
+      return pixel > low && pixel < high ? pixel : middle;
+    };
+    const points: { x: number; y: number }[] = [];
+    if (visible) {
+      const fragments = m(e, 'getClientRects') as ArrayLike<DOMRect>;
+      for (let i = 0; i < fragments.length && i < 64; i++) {
+        const f = fragments[i]!,
+          left = Math.max(f.left, 0),
+          top = Math.max(f.top, 0),
+          right = Math.min(f.right, win.innerWidth),
+          bottom = Math.min(f.bottom, win.innerHeight);
+        if (f.width > 0 && f.height > 0 && right > left && bottom > top)
+          points.push({ x: centreOf(left, right), y: centreOf(top, bottom) });
+      }
+    }
+    const inViewport = visible && points.length > 0;
+    // Every shadow host must itself be the topmost hit in its parent root.
+    // Checking only the inner root misses overlays covering the host.
+    const topmostAt = (px: number, py: number): boolean => {
       let current: Element = el;
       for (let depth = 0; depth < 128; depth++) {
         const root = m(current, 'getRootNode') as Document | ShadowRoot;
         const stack =
-          typeof r(root, 'elementsFromPoint') === 'function' ? (m(root, 'elementsFromPoint', cx, cy) as Element[]) : [];
-        const top = stack[0] ?? (m(root, 'elementFromPoint', cx, cy) as Element | null);
-        if (!top || !(top === current || m(current, 'contains', top))) {
-          hit = false;
-          break;
-        }
-        if (root === doc) {
-          hit = true;
-          break;
-        }
-        if (!(root instanceof ShadowRoot) || root.mode !== 'open') {
-          hit = false;
-          break;
-        }
+          typeof r(root, 'elementsFromPoint') === 'function' ? (m(root, 'elementsFromPoint', px, py) as Element[]) : [];
+        const top = stack[0] ?? (m(root, 'elementFromPoint', px, py) as Element | null);
+        if (!top || !(top === current || m(current, 'contains', top))) return false;
+        if (root === doc) return true;
+        if (!(root instanceof ShadowRoot) || root.mode !== 'open') return false;
         current = root.host;
       }
+      return false;
+    };
+    // Only the topmost element at a point counts: the first fragment whose point passes is where the click is dispatched
+    // (the caller receives its offset, and nothing is recomputed from the bounding box afterwards).
+    let hit = false,
+      click: Probe['click'];
+    for (const point of inViewport ? points : []) {
+      if (!topmostAt(point.x, point.y)) continue;
+      // Playwright measures a click `position` from the padding box: border box origin plus the truncated border widths.
+      const border = (value: unknown) => Math.trunc(Number.parseFloat(String(value))) || 0;
+      let left = 0,
+        top = 0;
+      try {
+        const style = getComputedStyle(e);
+        left = border(style.borderLeftWidth);
+        top = border(style.borderTopWidth);
+      } catch {
+        left = top = 0;
+      }
+      hit = true;
+      click = { dx: point.x - rect.left, dy: point.y - rect.top, borderLeft: left, borderTop: top };
+      break;
     }
     const autocomplete = attr(e, 'autocomplete') || '';
     if (autocomplete.length > 512) return deny('E_RESOURCE_LIMIT');
@@ -317,7 +370,7 @@ function probe(el: Element, a: ProbeArgs): Probe {
     if (a.requireHit && !hit) return deny('E_NOT_INTERACTABLE', 'occluded');
     if (a.integrityKey && !(window as unknown as Record<string, BrowserIntegrity>)[a.integrityKey]?.check())
       return deny('E_PRIVACY_BLOCKED', 'untrusted_dom_api');
-    return { ok: true, role, name, enabled, unique: true, visible, inViewport, hit };
+    return { ok: true, role, name, enabled, unique: true, visible, inViewport, hit, click };
   } catch {
     return deny('E_STALE_STATE');
   }
@@ -382,13 +435,16 @@ export async function preflightBrowserInput(
 
   // hover() is a virtual mouse move and may trigger overlays or replacement.
   // nativeInput: an ancestor form shadows DOM APIs Playwright's hover/focus read (see browser-native-input.ts); use the CDP/prototype equivalents.
+  // The pointer goes to the point the probe just verified, never to Playwright's own choice (the first fragment, or the box centre): a
+  // fragment other than the first may be the only unobstructed one.
+  const hoverAt = clickPoint(first);
   onHover?.();
   if (nativeInput) {
     const box = await el.boundingBox(),
-      point = box && hitPointOf(box, page.viewportSize());
+      point = box && offsetPointOf(box, hoverAt.offset, page.viewportSize());
     if (!point) throw new AdlError('E_STALE_STATE', 'not_visible');
     await page.mouse.move(point.x, point.y);
-  } else await el.hover();
+  } else await el.hover({ position: hoverAt.position });
   guard(signal, assertCurrent);
   assertProbe(await runProbe(anchorRole, anchorName));
 
@@ -422,5 +478,6 @@ export async function preflightBrowserInput(
     target: { role: String(final.role), name: String(final.name), enabled: final.enabled === true },
     pointer_on_target: true,
     focus_matches_target: focusMatchesTarget,
+    click: clickPoint(final),
   };
 }

@@ -1986,3 +1986,61 @@ test('the browser recovery section disappears when MCP is disabled again and nev
   assert.ok(broken.posts.at(-1).status.mcpError, 'the runtime bundle error is still shown');
   assert.equal(broken.posts.at(-1).browser.failed, false, 'but it is not mistaken for a browser download failure');
 });
+test('consequential label lists are trusted window settings: declared, transported, validated, and a change revokes the policy', async () => {
+  const props = require('../../package.json').contributes.configuration.properties;
+  for (const key of ['consequentialAllowLabels', 'consequentialDenyLabels']) {
+    const property = props[`agentdesklink.${key}`];
+    assert.equal(property.type, 'array', key);
+    assert.deepEqual(property.items, { type: 'string' }, key);
+    assert.deepEqual(property.default, [], key);
+    assert.equal(property.scope, 'window', key);
+    assert.match(property.description, /信頼できるワークスペース設定/, key);
+    assert.match(property.description, /Trusted per-workspace setting/, key);
+  }
+  // Defaults add nothing to the transported grants.
+  const plain = harness({ enabled: true, browserOrigins: ['https://example.com'] });
+  await plain.ready;
+  const [plainDefinition] = await plain.providers.get('agentdesklink.mcp').provideMcpServerDefinitions();
+  const plainGrants = JSON.parse(plainDefinition.env.ADL_MCP_PERMISSIONS);
+  assert.equal('consequentialAllowLabels' in plainGrants, false);
+  assert.equal('consequentialDenyLabels' in plainGrants, false);
+
+  const h = harness({
+    enabled: true,
+    browserOrigins: ['https://example.com'],
+    consequentialAllowLabels: ['Delete'],
+    consequentialDenyLabels: ['Sort order'],
+  });
+  await h.ready;
+  const provider = h.providers.get('agentdesklink.mcp');
+  const [first] = await provider.provideMcpServerDefinitions();
+  const grants = JSON.parse(first.env.ADL_MCP_PERMISSIONS);
+  assert.deepEqual(grants.consequentialAllowLabels, ['Delete']);
+  assert.deepEqual(grants.consequentialDenyLabels, ['Sort order']);
+  assert.deepEqual(grants.browserOrigins, ['https://example.com']);
+  // A change revokes the policy: the epoch rotates, so pending approvals cannot outlive it.
+  for (const key of ['consequentialAllowLabels', 'consequentialDenyLabels']) {
+    const [before] = await provider.provideMcpServerDefinitions();
+    h.config[key] = [...(h.config[key] ?? []), `Extra ${key}`];
+    h.changes.fire({ affectsConfiguration: name => name === 'agentdesklink' || name === `agentdesklink.${key}` });
+    const [after] = await provider.provideMcpServerDefinitions();
+    assert.notEqual(after.env.ADL_OPERATION_EPOCH, before.env.ADL_OPERATION_EPOCH, key);
+    assert.ok(JSON.parse(after.env.ADL_MCP_PERMISSIONS)[key].includes(`Extra ${key}`), key);
+  }
+  // A malformed list denies every grant instead of yielding a partial one.
+  h.config.consequentialDenyLabels = Array.from({ length: 65 }, (_, i) => `label ${i}`);
+  h.changes.fire({
+    affectsConfiguration: name => name === 'agentdesklink' || name === 'agentdesklink.consequentialDenyLabels',
+  });
+  const [denied] = await provider.provideMcpServerDefinitions();
+  const deniedGrants = JSON.parse(denied.env.ADL_MCP_PERMISSIONS);
+  assert.deepEqual(deniedGrants.browserOrigins, []);
+  assert.equal('consequentialAllowLabels' in deniedGrants, false);
+  const panel = await h.panel();
+  assert.match(
+    JSON.stringify(h.posts.at(-1)),
+    /consequentialDenyLabels/,
+    'the settings panel reports which setting is malformed',
+  );
+  assert.ok(panel);
+});

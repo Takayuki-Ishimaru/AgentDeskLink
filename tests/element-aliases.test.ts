@@ -74,8 +74,12 @@ test(
       assert.ok(json.elements!.some(e => e.parent_id !== undefined));
       const lines = await f.engine.observe(f.id, { token_budget: 8000, format: 'lines' });
       assert.ok(
-        lines.lines!.every(l => /^"e[0-9]+" /.test(l)),
+        lines.lines!.every(l => /^e[0-9]+ [a-z]+ "/.test(l)),
         lines.lines!.join('\n'),
+      );
+      assert.ok(
+        lines.lines!.some(l => / parent_id=e[0-9]+(?: |$)/.test(l)),
+        'parent_id aliases are bare in lines',
       );
       const compact = await f.engine.observe(f.id, { token_budget: 8000, format: 'compact' });
       assert.ok(compact.elements!.every(e => ALIAS.test(e.id)));
@@ -110,7 +114,10 @@ test(
           bad,
         );
       // wait condition.element_id, directly and through the wait_for action
-      assert.equal((await f.engine.wait(f.id, { element_id: go.id }, 2000)).matched, true);
+      const waited = await f.engine.wait(f.id, { element_id: go.id }, 2000);
+      assert.equal(waited.matched, true);
+      assert.deepEqual(Object.keys(waited), ['ok', 'revision', 'matched']);
+      assert.ok(!('session_id' in filled), 'the session id is the caller own argument');
       await assert.rejects(f.engine.wait(f.id, { element_id: 'e9999' }, 500), { code: 'E_TARGET_NOT_FOUND' });
       await assert.rejects(f.engine.act(f.id, { action: 'wait_for', element_id: 'e9999' }, after.revision), {
         code: 'E_TARGET_NOT_FOUND',
@@ -120,6 +127,9 @@ test(
       const text = await f.engine.observe(f.id, { text: { element_id: para.id, length: 100 } });
       assert.equal(text.text!.element_id, para.id);
       assert.match(text.text!.content, /Long text/);
+      // A text read repeats neither the session id nor text.truncated; empty envelope fields are absent.
+      assert.deepEqual(Object.keys(text), ['ok', 'revision', 'truncated', 'text']);
+      assert.deepEqual(Object.keys(text.text!), ['element_id', 'offset', 'content', 'total_length', 'next_offset']);
       await assert.rejects(f.engine.observe(f.id, { text: { element_id: 'e9999' } }), { code: 'E_TARGET_NOT_FOUND' });
       // scope id:/element_id: terms use the alias
       for (const term of [`id:${go.id}`, `element_id:${go.id}`]) {
@@ -211,6 +221,8 @@ test('deltas, cursors and since_revision keep working with aliases', { timeout: 
       elements?: { id: string }[];
     };
     assert.ok([...(obs.changes ?? []), ...(obs.elements ?? [])].every(c => ALIAS.test(c.id)));
+    for (const dropped of ['ok', 'session_id', 'revision', 'warnings'])
+      assert.ok(!(dropped in obs), `the nested observation carries no ${dropped}`);
     // cursors page through lines with aliases and reconstruct the full list
     const current = await f.engine.observe(f.id, { token_budget: 8000 });
     const seen: string[] = [];
@@ -218,7 +230,7 @@ test('deltas, cursors and since_revision keep working with aliases', { timeout: 
     for (let i = 0; i < 50; i++) {
       const page = await f.engine.observe(f.id, { token_budget: 300, format: 'lines', ...(cursor ? { cursor } : {}) });
       for (const line of page.lines!) {
-        const m = /^"(e[0-9]+)"/.exec(line);
+        const m = /^(e[0-9]+) /.exec(line);
         assert.ok(m, line);
         seen.push(m[1]!);
       }

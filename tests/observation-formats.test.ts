@@ -11,8 +11,9 @@ const source = (elements: Element[], extra: Partial<RawSnapshot> = {}): RawSnaps
 });
 const page = (store: SnapshotStore, revision: number, format: ObservationFormat, budget = 8000) =>
   store.observe('s', revision, { token_budget: budget, format });
-test('compact defaults are explicit, smaller and reconstruct full states across deltas', () => {
+test('defaults are omitted in every format, compact is an alias of json, and states reconstruct across deltas', () => {
   const store = new SnapshotStore();
+  const defaults = { enabled: true, value: '' };
   const elements = Array.from({ length: 50 }, (_, i) => ({
     id: 'e' + i,
     role: 'button',
@@ -23,11 +24,12 @@ test('compact defaults are explicit, smaller and reconstruct full states across 
   store.record('s', 1, source(elements));
   const full = page(store, 1, 'json'),
     compact = page(store, 1, 'compact');
-  assert.deepEqual(compact.defaults, { enabled: true, value: '' });
-  assert.ok(Buffer.byteLength(JSON.stringify(compact)) < Buffer.byteLength(JSON.stringify(full)));
+  assert.equal(JSON.stringify(compact), JSON.stringify(full), 'compact is an alias of json');
+  assert.ok(full.elements!.every(e => !('enabled' in e) && !('value' in e)));
+  assert.ok(!('format' in compact) && !('defaults' in compact), 'the encoding is not echoed');
   assert.deepEqual(
-    compact.elements!.map(e => ({ ...compact.defaults, ...e })),
-    full.elements,
+    compact.elements!.map(e => ({ ...defaults, ...e })),
+    elements,
   );
   store.record(
     's',
@@ -44,13 +46,15 @@ test('compact defaults are explicit, smaller and reconstruct full states across 
     since_revision: 1,
     representation: 'delta',
   });
-  const rebuilt = new Map(compact.elements!.map(e => [e.id, { ...compact.defaults, ...e }]));
+  const rebuilt = new Map(compact.elements!.map(e => [e.id, { ...defaults, ...e }]));
   for (const c of delta.changes!)
     if (c.op === 'removed') rebuilt.delete(c.id);
-    else rebuilt.set(c.id, { ...delta.defaults, ...c.element! });
+    else rebuilt.set(c.id, { ...defaults, ...c.element! });
   assert.deepEqual(
     [...rebuilt.values()].sort((a, b) => a.id.localeCompare(b.id)),
-    page(store, 2, 'json').elements!.sort((a, b) => a.id.localeCompare(b.id)),
+    [...store.observe('s', 2, { token_budget: 8000 }).elements!.map(e => ({ ...defaults, ...e }))].sort((a, b) =>
+      a.id.localeCompare(b.id),
+    ),
   );
 });
 
@@ -73,7 +77,8 @@ test('line rows escape untrusted newlines and preserve redaction and delta opera
   store.record('s', 2, source([{ id: 'e1', role: 'text', name: 'Changed', enabled: true }]));
   const delta = store.observe('s', 2, { token_budget: 8000, format: 'lines', since_revision: 1 });
   assert.ok(delta.lines!.some(s => s.startsWith('~ ')));
-  assert.ok(delta.lines!.some(s => s === '- "e2"'));
+  assert.ok(delta.lines!.some(s => s === '- e2'));
+  assert.ok(delta.lines!.some(s => s.startsWith('~ e1 text "Changed"')));
   assert.equal(delta.changes, undefined);
 });
 
@@ -146,10 +151,61 @@ test('new link and safety fields are escaped in lines, kept in compact and flagg
   assert.ok(lines.lines![0]!.includes('href="'));
   assert.ok(lines.lines![1]!.includes('hidden_text=true'));
   assert.equal(lines.truncated, false);
-  assert.equal(lines.elements_truncated, false);
+  assert.ok(!('elements_truncated' in lines));
   assert.equal(lines.text_clipped, true);
   const compact = page(store, 1, 'compact');
   assert.equal(compact.elements![1]!.hidden_text, true);
   assert.equal(compact.text_clipped, true);
   assert.ok(compact.elements![0]!.href!.startsWith('https://docs.example.test/'));
+});
+
+test('slider and spinbutton bounds survive both compact formats, projection and deltas; absent bounds stay out', () => {
+  const store = new SnapshotStore();
+  const volume: Element = {
+    id: 'v',
+    role: 'slider',
+    name: 'Volume',
+    enabled: true,
+    value: '4',
+    min: 0,
+    max: 10,
+    step: 2,
+  };
+  const free: Element = { id: 'f', role: 'spinbutton', name: 'Free', enabled: true, value: '5' };
+  const any: Element = { id: 'a', role: 'spinbutton', name: 'Any', enabled: true, value: '1.5', step: 'any' };
+  store.record('s', 1, source([volume, free, any]));
+  const compact = page(store, 1, 'compact');
+  assert.deepEqual(
+    compact.elements!.map(e => [e.id, e.min, e.max, e.step]),
+    [
+      ['v', 0, 10, 2],
+      ['f', undefined, undefined, undefined],
+      ['a', undefined, undefined, 'any'],
+    ],
+  );
+  assert.ok(!('min' in compact.elements![1]!) && !('step' in compact.elements![1]!));
+  const lines = page(store, 1, 'lines').lines!;
+  assert.equal(lines[0], 'v slider "Volume" value="4" min=0 max=10 step=2');
+  assert.equal(lines[1], 'f spinbutton "Free" value="5"');
+  assert.equal(lines[2], 'a spinbutton "Any" value="1.5" step="any"');
+  const slim = store.observe('s', 1, { token_budget: 8000, include: ['id', 'min', 'max', 'step'] });
+  assert.deepEqual(slim.elements, [{ id: 'v', min: 0, max: 10, step: 2 }, { id: 'f' }, { id: 'a', step: 'any' }]);
+  store.record('s', 2, source([{ ...volume, value: '6' }, free, any]));
+  const delta = store.observe('s', 2, { token_budget: 8000, format: 'lines', since_revision: 1 });
+  assert.deepEqual(delta.lines, ['~ v slider "Volume" value="6" min=0 max=10 step=2']);
+});
+
+test('http_status reaches every format only for an error status', () => {
+  const store = new SnapshotStore();
+  const el: Element = { id: 'e', role: 'text', name: 'Not found', enabled: true };
+  store.record('s', 1, source([el], { url: 'https://app.example.test/missing', http_status: 404 }));
+  for (const format of ['json', 'compact', 'lines'] as const)
+    assert.equal(page(store, 1, format).http_status, 404, format);
+  store.record('s', 2, source([el], { url: 'https://app.example.test/', http_status: 200 }));
+  assert.ok(!('http_status' in page(store, 2, 'json')), 'a success status is never reported');
+  store.record('s', 3, source([el]));
+  assert.ok(!('http_status' in page(store, 3, 'json')));
+  assert.equal(store.observe('s', 1, { token_budget: 256 }).http_status, 404, 'it fits the smallest budget');
+  store.record('s', 4, source([el], { http_status: 12345 }));
+  assert.ok(!('http_status' in page(store, 4, 'json')), 'an implausible status is dropped');
 });

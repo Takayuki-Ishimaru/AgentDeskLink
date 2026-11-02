@@ -12,10 +12,10 @@ AgentDeskLink is an MCP server that connects AI agents to your local browser and
 
 [Get started](release-docs/INSTALL_en.md) · [What you can do](#what-you-can-do) · [Supported environments](#supported-environments) · [Release guide](release-docs/README_en.md) · [MIT License](LICENSE)
 
-> **0.1.7 / Beta**\
+> **0.1.8 / Beta**\
 > This beta is intended for a limited range of use. Before installing, review [supported environments and known limitations](release-docs/KNOWN_ISSUES_en.md).
 
-This version adds Linux desktop control and desktop permission tiers with one-shot approvals, and improves browser actions, observations and setup. See [what changed](release-docs/RELEASE_NOTES_en.md) and the [operation settings and approval guide](release-docs/OPERATIONS.md).
+This version reduces false positives in consequential-action checks, runs Standard-mode Delete buttons with network restrictions, and keeps the session alive across 204 / 205 responses and redirects to origins you have allowed (such as SSO sign-ins). The settings panel and Linux desktop control also improved. See [what changed](release-docs/RELEASE_NOTES_en.md) and the [operation settings and approval guide](release-docs/OPERATIONS.md).
 
 ## What you can do
 
@@ -30,7 +30,7 @@ Drag inside the browser, touch swipes and timestamped continuous frame capture a
 
 ## Get started in VS Code
 
-1. Download the common `agentdesklink-0.1.7.vsix` package, then install it with "Extensions: Install from VSIX".
+1. Download the common `agentdesklink-0.1.8.vsix` package, then install it with "Extensions: Install from VSIX".
 2. Open a folder and trust the workspace.
 3. Open **AgentDeskLink** in the activity bar.
 4. Choose **Open Settings** and configure the allowed browser origins or desktop app and the operation permissions you need.
@@ -69,7 +69,7 @@ Which actions are available depends on your OS, app and display setup. See [supp
 - **Keep it apart from your everyday browser.** No human profile or sign-in state is shared.
 - **Physical input uses a dedicated mode.** `interactive_desktop` uses your real mouse and keyboard, so do not run it alongside your own input.
 
-Choose **Read only / Standard / Ask**. Standard permits ordinary input, clicks and forms handled within JavaScript. Real GET/POST form submissions require approval. Ask binds each approval to the exact target, input and form contents. In the main document, unrelated clock updates preserve approval; target, form or document changes, expiry and emergency stop invalidate it. Open Shadow DOM and same-origin iframes are supported. The same tiers apply to native actions in the granted desktop app (macOS, Windows and Linux): Standard operates only non-sensitive, non-consequential controls, and Ask approves consequential controls such as delete or send one at a time, bound to the target, control name and observed revision. Sensitive controls such as password fields are never operated, even with approval. Closed shadow roots and out-of-process iframe proofs remain unsupported. The legacy explicit all-operations setting takes precedence when enabled.
+Choose **Read only / Standard / Ask**. Standard permits ordinary input, clicks and forms handled within JavaScript. Real GET/POST form submissions require approval, and Ask asks only when a submission actually happens. Consequential actions are recognised by the control's verb (delete, send, pay, unsubscribe, log out…) and by real form submissions; links that only navigate within the same origin and a dialog's Cancel are ordinary. Adjust the classification with `consequentialAllowLabels` / `consequentialDenyLabels`. Ask binds each approval to the exact target, input and form contents. In the main document, unrelated clock updates preserve approval; target, form or document changes, expiry and emergency stop invalidate it. Open Shadow DOM and same-origin iframes are supported. The same tiers apply to native actions in the granted desktop app (macOS, Windows and Linux): Standard operates only non-sensitive, non-consequential controls, and Ask approves consequential controls such as delete or send one at a time, bound to the target, control name and observed revision. Sensitive controls such as password fields are never operated, even with approval. Closed shadow roots and out-of-process iframe proofs remain unsupported. The legacy explicit all-operations setting takes precedence when enabled.
 
 Configure trusted grants near the top of the panel. `browserOrigins` grants navigation targets; `browserResourceOrigins` separately grants CDN assets for GET/HEAD loading. Localhost needs both its exact origin and `allowLoopback`. Personal data is masked by default; explicitly enable `allowPersonalData` to reveal email addresses and phone numbers. Credentials and explicitly protected regions remain protected.
 
@@ -81,7 +81,7 @@ The panel also configures a visible browser, idle timeout and an HTTP(S) proxy w
 
 Bundled Node starts with `--use-system-ca`. Destination DNS/IP validation remains local, including through a proxy, so hosts resolvable only by the proxy are unsupported. Pages whose DOM APIs cannot be verified fail closed with `untrusted_dom_api`. See [supported environments and known limitations](release-docs/KNOWN_ISSUES_en.md).
 
-`adl_observe` supports `format: "compact"` to omit declared defaults and `"lines"` for escaped rows. JSON remains the default; diffs, scope and cursors work in all formats. `scope` searches the page: quote with `text:"v1.0: fixed"`, or use `role:` / `name:` / `id:` (see [operation settings](release-docs/OPERATIONS.md)). Links include `href`, images and canvas with a text alternative appear as `img`, and elements containing text that is hard for people to see carry `hidden_text: true`. Coordinate clicks use `adl_act` with `point: {frame_id,x,y}` in source CSS pixels from the latest retained capture. Capture again when geometry or the target changes.
+`adl_observe` returns JSON without default values (such as `enabled: true` or empty values) and `format: "lines"` for escaped rows; diffs, scope and cursors work in all formats. `scope` searches the page: quote with `text:"v1.0: fixed"`, or use `role:` / `name:` / `id:` (see [operation settings](release-docs/OPERATIONS.md)). Links include `href`, images and canvas with a text alternative appear as `img`, and elements containing text that is hard for people to see carry `hidden_text: true`. Coordinate clicks use `adl_act` with `point: {frame_id,x,y}` in source CSS pixels from the latest retained capture. Capture again when geometry or the target changes.
 
 Browser regions marked `data-adl-sensitive` or `data-adl-classification="SECRET"` / `"UNKNOWN"` protect their descendants as well. Neither a child marked `PUBLIC` nor `allowAllOperations` removes that protection. Semantic observations redact protected content, and actions within these regions are denied. Browser captures and retained crops mask them. These explicit markers complement automatic detection.
 

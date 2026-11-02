@@ -1,4 +1,4 @@
-import { parsePolicy } from './policy.js';
+import { parsePolicy, normalizeLabelList } from './policy.js';
 import { AdlError, type PolicyConfig } from './types.js';
 import { dirname, resolve } from 'node:path';
 
@@ -39,6 +39,10 @@ export interface ExtensionPermissions {
   allowUnredactedImages: boolean;
   allowLoopback: boolean;
   allowPrivateNetwork: boolean;
+  /** Labels never treated as consequential (clears label-derived risk only). Omitted when empty. */
+  consequentialAllowLabels?: string[];
+  /** Labels always treated as consequential. Omitted when empty. */
+  consequentialDenyLabels?: string[];
 }
 
 const GRANT_KEYS = [
@@ -53,9 +57,13 @@ const GRANT_KEYS = [
   'allowUnredactedImages',
   'allowLoopback',
   'allowPrivateNetwork',
+  'consequentialAllowLabels',
+  'consequentialDenyLabels',
 ] as const;
 
 const MAX_ORIGINS = 64;
+const MAX_LABELS = 64;
+const MAX_LABEL_LENGTH = 64;
 const MAX_ORIGIN_LENGTH = 2048;
 
 function isAbsolutePath(value: string): boolean {
@@ -118,6 +126,33 @@ export function normalizePermissions(value: unknown): ExtensionPermissions {
       invalidGrant(key, `a string of at most ${max} characters without NUL / NULを含まない文字列`);
     return v;
   };
+  // Same rules as the policy schema: at most 64 labels of 1-64 characters, no control characters, 2+ characters once normalized.
+  // The raw entries are kept; parsePolicy normalizes them exactly once.
+  const labelList = (key: 'consequentialAllowLabels' | 'consequentialDenyLabels'): string[] => {
+    const v = p[key];
+    if (v === undefined) return [];
+    const expected = 'an array of at most 64 labels, 1-64 characters each / 1〜64文字のラベル最大64件の配列';
+    if (!Array.isArray(v) || v.length > MAX_LABELS) invalidGrant(key, expected);
+    const labels: string[] = [];
+    for (const entry of v) {
+      if (
+        typeof entry !== 'string' ||
+        entry.length < 1 ||
+        entry.length > MAX_LABEL_LENGTH ||
+        /[\u0000-\u001f\u007f]/.test(entry)
+      )
+        invalidGrant(key, expected);
+      try {
+        normalizeLabelList([entry]);
+      } catch {
+        invalidGrant(key, expected);
+      }
+      if (!labels.includes(entry)) labels.push(entry);
+    }
+    return labels;
+  };
+  const allowLabels = labelList('consequentialAllowLabels');
+  const denyLabels = labelList('consequentialDenyLabels');
   const rawOrigins = p.browserOrigins;
   if (rawOrigins !== undefined && (!Array.isArray(rawOrigins) || rawOrigins.length > MAX_ORIGINS))
     invalidGrant('browserOrigins', `an array of at most ${MAX_ORIGINS} exact http(s) origins / 完全なオリジンの配列`);
@@ -166,6 +201,9 @@ export function normalizePermissions(value: unknown): ExtensionPermissions {
     allowUnredactedImages: flag('allowUnredactedImages'),
     allowLoopback: flag('allowLoopback'),
     allowPrivateNetwork: flag('allowPrivateNetwork'),
+    // Serialized only when set, so the default grants (and the MCP definition they travel in) are unchanged.
+    ...(allowLabels.length ? { consequentialAllowLabels: allowLabels } : {}),
+    ...(denyLabels.length ? { consequentialDenyLabels: denyLabels } : {}),
   };
 }
 
@@ -356,6 +394,8 @@ export function extensionPolicy(
     allowPersonalData: grants.allowPersonalData === true,
     allowLoopback: grants.allowLoopback,
     allowPrivateNetwork: grants.allowPrivateNetwork,
+    consequentialAllowLabels: grants.consequentialAllowLabels ?? [],
+    consequentialDenyLabels: grants.consequentialDenyLabels ?? [],
     browserTargets: targets,
     ...(desktop && platform === 'darwin'
       ? { macos: desktop }
@@ -429,6 +469,8 @@ export function effectivePermissions(
     allowUnredactedImages: native?.visual?.enabled === true,
     allowLoopback: policy.allowLoopback === true,
     allowPrivateNetwork: policy.allowPrivateNetwork === true,
+    ...(policy.consequentialAllowLabels?.length ? { consequentialAllowLabels: policy.consequentialAllowLabels } : {}),
+    ...(policy.consequentialDenyLabels?.length ? { consequentialDenyLabels: policy.consequentialDenyLabels } : {}),
     reasons,
   };
 }

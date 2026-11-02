@@ -178,3 +178,73 @@ test('bundled setup grants no targets or desktop access by default', () => {
   assert.equal(policy.allowLoopback, false);
   assert.equal(policy.allowPrivateNetwork, false);
 });
+
+// ---- consequentialAllowLabels / consequentialDenyLabels grants (design V0.1.7 Part A) ----
+import {
+  describePermissionError,
+  effectivePermissions,
+  normalizePermissions,
+  parsePermissionsEnv,
+} from '../src/bundled-policy.js';
+
+test('label lists travel in the grants only when set, and reach the policy normalized', () => {
+  // Defaults leave the serialized grants (and so the MCP definition) unchanged.
+  assert.equal('consequentialAllowLabels' in normalizePermissions({}), false);
+  assert.equal('consequentialDenyLabels' in normalizePermissions({ consequentialAllowLabels: [] }), false);
+  const grants = normalizePermissions({
+    browserOrigins: ['https://example.com'],
+    consequentialAllowLabels: ['Delete', 'Delete', '削除する'],
+    consequentialDenyLabels: ['Sort order'],
+  });
+  assert.deepEqual(grants.consequentialAllowLabels, ['Delete', '削除する']);
+  assert.deepEqual(grants.consequentialDenyLabels, ['Sort order']);
+  const policy = extensionPolicy(undefined, 'linux', grants);
+  assert.deepEqual(policy.consequentialAllowLabels, ['delete', '削除']);
+  assert.deepEqual(policy.consequentialDenyLabels, ['sort order']);
+  assert.deepEqual(extensionPolicy(undefined, 'linux', {}).consequentialAllowLabels, []);
+  const effective = effectivePermissions(grants, undefined, 'linux');
+  assert.deepEqual(effective.consequentialAllowLabels, ['delete', '削除']);
+  assert.deepEqual(effective.consequentialDenyLabels, ['sort order']);
+  assert.equal('consequentialAllowLabels' in effectivePermissions({}, undefined, 'linux'), false);
+  // The environment transport round-trips them.
+  const decoded = parsePermissionsEnv(JSON.stringify(grants));
+  assert.deepEqual(decoded.consequentialAllowLabels, ['Delete', '削除する']);
+});
+
+test('malformed label lists deny every grant and name the setting', () => {
+  const bad: unknown[] = [
+    Array.from({ length: 65 }, (_, i) => `label ${i}`),
+    ['x'.repeat(65)],
+    [''],
+    ['bad\u0000label'],
+    ['bad\u001flabel'],
+    ['a'],
+    ['×'],
+    ['ﷺ'.repeat(4)],
+    'Delete',
+    [1],
+    [null],
+  ];
+  for (const key of ['consequentialAllowLabels', 'consequentialDenyLabels'] as const)
+    for (const value of bad) {
+      const grants = { browserOrigins: ['https://example.com'], allowAllOperations: true, [key]: value };
+      let caught: unknown;
+      try {
+        normalizePermissions(grants);
+      } catch (error) {
+        caught = error;
+      }
+      assert.ok(caught, `${key} ${JSON.stringify(value)}`);
+      assert.equal((caught as { code: string }).code, 'E_INVALID_ARGUMENT');
+      assert.match(describePermissionError(caught), new RegExp(`agentdesklink\\.${key}`));
+      // The environment decoder fails closed: no origins, no operation grant.
+      const env = parsePermissionsEnv(JSON.stringify(grants));
+      assert.deepEqual(env.browserOrigins, []);
+      assert.equal(env.allowAllOperations, false);
+    }
+  // The boundary is valid.
+  normalizePermissions({
+    consequentialAllowLabels: Array.from({ length: 64 }, (_, i) => `label ${i}`),
+    consequentialDenyLabels: ['x'.repeat(63) + 'y'],
+  });
+});

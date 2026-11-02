@@ -4,10 +4,11 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 
-function panel(language = 'ja') {
+function panel(language = 'ja', savedWebviewState = {}) {
   const elements = new Map(),
     messages = [],
-    listeners = new Map();
+    listeners = new Map(),
+    webview = { state: savedWebviewState };
   const make = () => ({
     value: '',
     _text: '',
@@ -57,7 +58,13 @@ function panel(language = 'ja') {
       ),
   };
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../../media/settings.js'), 'utf8'), {
-    acquireVsCodeApi: () => ({ postMessage: data => messages.push(data), getState: () => ({}), setState() {} }),
+    acquireVsCodeApi: () => ({
+      postMessage: data => messages.push(data),
+      getState: () => webview.state,
+      setState: value => {
+        webview.state = value;
+      },
+    }),
     document,
     window: { addEventListener: (type, listener) => listeners.set(type, listener) },
     URL,
@@ -69,6 +76,7 @@ function panel(language = 'ja') {
     get,
     messages,
     document,
+    webview,
     state: data => listeners.get('message')({ data: { type: 'state', ...data } }),
     raw: data => listeners.get('message')({ data }),
   };
@@ -751,4 +759,441 @@ test('the proxy hostname toggle posts its own message, mirrors saved state and s
   assert.match(p.get('session-idle-effective').textContent, /CONNECT by hostname/);
   p.state({ trusted: false, hasFolder: true, busy: { runtime: false } });
   assert.equal(toggle.disabled, true);
+});
+
+// ---- AI summary, first-run checklist and collapsed groups ----
+
+// A complete host state the way publishState() posts it; `over` tweaks the interesting parts.
+function hostState(over = {}) {
+  const {
+    enabled = true,
+    origins = ['https://example.com'],
+    mode = 'read_only',
+    effectiveMode = mode,
+    effectiveOrigins = origins,
+    desktopAppId = '',
+    flags = {},
+    stopped = false,
+    trusted = true,
+    mcpError = null,
+    reasons = [],
+    status = {},
+    settings = {},
+  } = over;
+  const eff = {
+    browserOrigins: effectiveOrigins,
+    desktopAppId,
+    allowAllOperations: effectiveMode === 'all',
+    operationMode: effectiveMode,
+    allowPhysicalInput: false,
+    allowUnredactedImages: false,
+    allowLoopback: false,
+    allowPrivateNetwork: false,
+    allowPersonalData: false,
+    reasons,
+    ...flags,
+  };
+  return {
+    trusted,
+    hasFolder: true,
+    stopped,
+    busy: {},
+    settings: { enabled, browserOrigins: origins, operationMode: mode, desktopAppId, ...settings },
+    permissions: { requested: { operationMode: mode }, effective: eff },
+    status: { mcpError, runtimeError: '', desktopError: '', ...status },
+  };
+}
+const summaryOf = p => p.get('ai-summary').textContent;
+
+test('the summary states what the AI can do for read only, standard, ask and allow-all, and nothing more', () => {
+  const p = panel('ja');
+  p.state(hostState({ mode: 'read_only' }));
+  assert.equal(
+    summaryOf(p),
+    'AI は example.com を閲覧できます。クリックや入力はできません（読み取り専用）。',
+    'read only can view but never click or type',
+  );
+  p.state(hostState({ mode: 'standard' }));
+  assert.equal(
+    summaryOf(p),
+    'AI は example.com を閲覧し、通常のクリックや入力ができます。送信や削除などの重要な操作は拒否されます（標準）。',
+  );
+  p.state(hostState({ mode: 'ask' }));
+  assert.equal(
+    summaryOf(p),
+    'AI は example.com を閲覧し、通常のクリックや入力ができます。送信や削除などの重要な操作は、VS Code の確認画面で承認した場合のみ実行されます（都度承認）。',
+  );
+  p.state(hostState({ mode: 'read_only', effectiveMode: 'all' }));
+  assert.match(summaryOf(p), /^AI は example\.com で、確認なしにあらゆる操作.*（すべて許可・旧設定）。$/);
+  const en = panel('en');
+  en.state(hostState({ mode: 'read_only' }));
+  assert.equal(summaryOf(en), 'The AI can view example.com. It cannot click or type (read only).');
+  en.state(hostState({ mode: 'standard' }));
+  assert.match(
+    summaryOf(en),
+    /^The AI can view example\.com and click or type in ordinary controls\..*denied \(standard\)\.$/,
+  );
+  en.state(hostState({ mode: 'ask' }));
+  assert.match(summaryOf(en), /run only after you approve each one in VS Code \(ask each time\)\.$/);
+});
+
+test('the summary covers emergency stop, disabled MCP, missing origins and an untrusted workspace without claiming access', () => {
+  const p = panel('ja');
+  p.state(hostState({ mode: 'standard' }));
+  assert.match(summaryOf(p), /閲覧し/);
+  p.state(hostState({ mode: 'standard', stopped: true }));
+  assert.equal(summaryOf(p), '緊急停止中です。操作を再開するまで、AI は何も実行できません。');
+  assert.equal(p.get('ai-summary-extra').hidden, true);
+  p.state(hostState({ mode: 'standard', stopped: false }));
+  assert.match(summaryOf(p), /閲覧し/, 'resuming restores the grant description');
+  p.state(hostState({ enabled: false, mode: 'ask' }));
+  assert.equal(summaryOf(p), 'このワークスペースでは MCP が無効です。AI は何もできません。');
+  p.state(hostState({ origins: [], mode: 'ask' }));
+  assert.equal(summaryOf(p), 'MCP は有効ですが、許可された Web サイトがないため、AI はブラウザーを操作できません。');
+  p.state(hostState({ mode: 'ask', trusted: false }));
+  assert.match(summaryOf(p), /^信頼済みのフォルダーを開くまで MCP は使えません。/);
+  assert.doesNotMatch(summaryOf(p), /閲覧|クリック/);
+  const en = panel('en');
+  en.state(hostState({ stopped: true }));
+  assert.equal(summaryOf(en), 'Emergency stop is active. The AI cannot do anything until you resume operations.');
+  en.state(hostState({ stopped: false, enabled: false }));
+  assert.equal(summaryOf(en), 'MCP is off in this workspace, so the AI can do nothing.');
+  en.state(hostState({ origins: [] }));
+  assert.equal(summaryOf(en), 'MCP is on, but no websites are allowed, so the AI cannot use the browser.');
+});
+
+test('the summary follows the effective permissions, not the requested settings', () => {
+  const p = panel('ja');
+  // Saved settings ask for standard on example.com, but the host's effective grants deny everything (invalid grants).
+  p.state(
+    hostState({ mode: 'standard', effectiveOrigins: [], effectiveMode: 'read_only', reasons: ['grants denied'] }),
+  );
+  assert.doesNotMatch(summaryOf(p), /閲覧|クリック/);
+  assert.match(summaryOf(p), /許可された Web サイトがない/);
+  p.state(hostState({ mode: 'standard', effectiveMode: 'read_only' }));
+  assert.match(summaryOf(p), /クリックや入力はできません（読み取り専用）/, 'a lower effective tier wins');
+  p.state(hostState({ mode: 'standard', status: { mcpError: '権限設定が無効です。' } }));
+  assert.match(summaryOf(p), /^MCP の設定に問題があります。/);
+  assert.doesNotMatch(summaryOf(p), /閲覧|クリック/, 'a configuration error claims no capability');
+  assert.equal(p.get('ai-summary-extra').hidden, true);
+});
+
+test('the summary lists origins as text, abbreviates long lists and names other grants that are on', () => {
+  const p = panel('ja');
+  p.state(
+    hostState({ origins: ['https://example.com', 'http://localhost:3000', 'https://a.example', 'https://b.example'] }),
+  );
+  assert.match(summaryOf(p), /^AI は example\.com、http:\/\/localhost:3000 ほか 2 件 を閲覧できます。/);
+  assert.equal(p.get('ai-summary-extra').hidden, true, 'nothing extra is on');
+  p.state(hostState({ origins: ['<img src=x onerror=alert(1)> / x'] }));
+  // The " / " separator would split the bilingual text, so it is flattened inside origin names.
+  assert.ok(summaryOf(p).includes('<img src=x onerror=alert(1)>/x'), 'hostile text stays literal text');
+  assert.equal(p.get('ai-summary').innerHTML, undefined, 'summary text never goes through innerHTML');
+  p.state(
+    hostState({
+      desktopAppId: 'com.example.app',
+      flags: {
+        allowPhysicalInput: true,
+        allowLoopback: true,
+        allowPrivateNetwork: true,
+        allowPersonalData: true,
+        allowUnredactedImages: true,
+      },
+    }),
+  );
+  const extra = p.get('ai-summary-extra');
+  assert.equal(extra.hidden, false);
+  assert.equal(
+    extra.textContent,
+    'ほかに有効な設定: デスクトップアプリ com.example.app、物理入力、無加工のネイティブ画像、ループバック、プライベートネットワーク、個人データの表示。',
+  );
+  p.state(hostState({ desktopAppId: '', flags: { allowPhysicalInput: false } }));
+  assert.equal(extra.hidden, true);
+  assert.equal(extra.textContent, '');
+});
+
+test('the summary is re-rendered when the display language changes and posts nothing to the host', async () => {
+  const p = panel('ja');
+  p.state(hostState({ mode: 'ask', desktopAppId: 'app.id' }));
+  const messages = p.messages.length;
+  p.get('ui-language').value = 'en';
+  await p.get('ui-language').trigger('change');
+  assert.match(summaryOf(p), /^The AI can view example\.com and click or type/);
+  assert.equal(p.get('ai-summary-extra').textContent, 'Also on: desktop app app.id.');
+  assert.equal(p.messages.length, messages);
+});
+
+test('the checklist is shown on a fresh install, states done and to-do in words, and hides itself when setup is complete', () => {
+  const p = panel('ja');
+  assert.equal(p.get('setup-checklist').hidden, undefined, 'no state yet: the static markup keeps it hidden');
+  p.state(hostState({ enabled: false, origins: [], mode: 'read_only' }));
+  assert.equal(p.get('setup-checklist').hidden, false);
+  assert.equal(p.get('setup-reopen').hidden, true);
+  for (const name of ['mcp', 'origin', 'tier']) {
+    assert.equal(p.get(`setup-state-${name}`).textContent, '未完了', `${name} states its status in words`);
+    assert.equal(p.get(`setup-mark-${name}`).textContent, '○');
+    assert.equal(p.get(`setup-go-${name}`).hidden, false, `${name} offers a way to the control`);
+    assert.equal(p.get(`setup-step-${name}`).dataset.done, 'false');
+  }
+  assert.equal(p.get('setup-progress').textContent, '0/3 完了');
+  p.state(hostState({ enabled: true, origins: [], mode: 'read_only' }));
+  assert.equal(p.get('setup-state-mcp').textContent, '完了');
+  assert.equal(p.get('setup-mark-mcp').textContent, '✓');
+  assert.equal(p.get('setup-go-mcp').hidden, true, 'a finished step has no button');
+  assert.equal(p.get('setup-go-origin').hidden, false);
+  assert.equal(p.get('setup-progress').textContent, '1/3 完了');
+  p.state(hostState({ enabled: true, origins: ['https://example.com'], mode: 'read_only' }));
+  assert.equal(p.get('setup-checklist').hidden, false, 'read only keeps the third step open');
+  assert.equal(p.get('setup-state-tier').textContent, '未完了');
+  assert.equal(p.get('setup-progress').textContent, '2/3 完了');
+  p.state(hostState({ enabled: true, origins: ['https://example.com'], mode: 'standard' }));
+  assert.equal(p.get('setup-checklist').hidden, true, 'complete setup hides the checklist');
+  assert.equal(p.get('setup-reopen').hidden, true);
+  for (const name of ['mcp', 'origin', 'tier']) assert.equal(p.get(`setup-state-${name}`).textContent, '完了');
+  p.state(hostState({ enabled: true, origins: ['https://example.com'], mode: 'ask' }));
+  assert.equal(p.get('setup-checklist').hidden, true);
+  p.state(hostState({ enabled: true, origins: ['https://example.com'], mode: 'read_only', effectiveMode: 'all' }));
+  assert.equal(p.get('setup-checklist').hidden, true, 'the legacy allow-all tier counts as chosen');
+  const en = panel('en');
+  en.state(hostState({ enabled: false, origins: [], mode: 'read_only' }));
+  assert.equal(en.get('setup-state-mcp').textContent, 'To do');
+  assert.equal(en.get('setup-progress').textContent, '0 of 3 done');
+});
+
+test('the checklist can be dismissed, stays dismissed through the webview state API, and can be shown again', async () => {
+  const unfinished = hostState({ enabled: true, origins: ['https://example.com'], mode: 'read_only' });
+  const p = panel('ja', { other: 'kept' });
+  p.state(unfinished);
+  assert.equal(p.get('setup-checklist').hidden, false);
+  const focused = [];
+  p.get('setup-reopen').focus = () => focused.push('reopen');
+  await p.get('setup-dismiss').trigger('click');
+  assert.equal(p.get('setup-checklist').hidden, true);
+  assert.equal(p.get('setup-reopen').hidden, false, 'a dismissed unfinished setup stays reachable');
+  assert.deepEqual(plain(p.webview.state), { other: 'kept', setupDismissed: true }, 'persisted without a new setting');
+  assert.deepEqual(focused, ['reopen'], 'focus moves to the reopen control instead of being lost');
+  assert.deepEqual(
+    p.messages.map(m => m.type),
+    ['ready'],
+    'dismissing posts nothing to the host',
+  );
+  p.state(unfinished);
+  assert.equal(p.get('setup-checklist').hidden, true, 'later state updates keep it dismissed');
+  // A new webview (sidebar reopened) restores the dismissal from the saved state.
+  const again = panel('ja', plain(p.webview.state));
+  again.state(unfinished);
+  assert.equal(again.get('setup-checklist').hidden, true);
+  assert.equal(again.get('setup-reopen').hidden, false);
+  again.get('setup-go-tier').focus = () => focused.push('tier');
+  await again.get('setup-reopen').trigger('click');
+  assert.equal(again.get('setup-checklist').hidden, false);
+  assert.equal(again.get('setup-reopen').hidden, true);
+  assert.equal(again.webview.state.setupDismissed, false);
+  assert.deepEqual(focused.slice(1), ['tier'], 'showing it again focuses the first open step');
+  // Completing setup while dismissed leaves neither the checklist nor the reopen link.
+  again.state(hostState({ enabled: true, origins: ['https://example.com'], mode: 'standard' }));
+  assert.equal(again.get('setup-checklist').hidden, true);
+  assert.equal(again.get('setup-reopen').hidden, true);
+});
+
+test('checklist buttons open any collapsed group, scroll to and focus the right control, and change no setting', async () => {
+  const p = panel('ja');
+  p.state(hostState({ enabled: false, origins: [], mode: 'read_only' }));
+  const calls = [];
+  const group = { open: false };
+  for (const id of ['enabled', 'origin-input', 'operation-mode']) {
+    const el = p.get(id);
+    el.closest = selector => (selector === 'details' ? group : null);
+    el.scrollIntoView = () => calls.push(`scroll:${id}`);
+    el.focus = () => calls.push(`focus:${id}`);
+  }
+  await p.get('setup-go-mcp').trigger('click');
+  await p.get('setup-go-origin').trigger('click');
+  await p.get('setup-go-tier').trigger('click');
+  assert.deepEqual(calls, [
+    'scroll:enabled',
+    'focus:enabled',
+    'scroll:origin-input',
+    'focus:origin-input',
+    'scroll:operation-mode',
+    'focus:operation-mode',
+  ]);
+  assert.equal(group.open, true, 'a control inside a collapsed group is revealed first');
+  assert.equal(p.get('enabled').checked, false, 'the checklist never flips the setting itself');
+  assert.deepEqual(
+    p.messages.map(m => m.type),
+    ['ready'],
+    'and posts nothing to the host',
+  );
+});
+
+test('collapsed groups open by themselves for problems and elevated grants, once, so the user can close them', () => {
+  const p = panel('ja');
+  const open = id => p.get(id).open === true;
+  p.state(hostState());
+  for (const id of ['grants-details', 'permissions-details', 'advanced-details', 'desktop-details', 'clients-details'])
+    assert.equal(open(id), false, `${id} starts collapsed`);
+  p.state(hostState({ flags: { allowLoopback: true } }));
+  assert.equal(open('grants-details'), true, 'an elevated grant reveals its toggle');
+  p.get('grants-details').open = false;
+  p.state(hostState({ flags: { allowLoopback: true } }));
+  assert.equal(open('grants-details'), false, 'a repeated state does not fight the user');
+  p.state(hostState({ reasons: ['Native runtime is not ready'] }));
+  assert.equal(open('permissions-details'), true, 'effective-permission warnings stay visible');
+  p.state(hostState({ status: { runtimeError: '設定値が無効です。' } }));
+  assert.equal(open('advanced-details'), true, 'runtime errors are not hidden in the collapsed group');
+  p.state(hostState({ settings: { allowPhysicalInput: true } }));
+  assert.equal(open('desktop-details'), true, 'physical input shows its warning');
+  p.state({
+    clients: {
+      busy: false,
+      error: '',
+      rows: [{ name: 'Codex', detected: true, status: 'conflict', message: 'exists' }],
+    },
+  });
+  assert.equal(open('clients-details'), true, 'a client conflict is visible');
+  assert.equal(p.get('clients-state').textContent, '0 件に登録済み', 'the collapsed heading carries the client count');
+  p.state(hostState({ settings: { desktopAppId: 'com.example.app' } }));
+  assert.equal(p.get('desktop-state').textContent, 'com.example.app');
+  p.state(hostState({ settings: { desktopAppId: '' } }));
+  assert.equal(p.get('desktop-state').textContent, '未設定');
+  // The loopback suggestion points at the toggle inside More grants, so it reveals the group.
+  const q = panel('ja');
+  q.state(hostState({ settings: { allowLoopback: false } }));
+  q.get('origin-input').value = 'http://localhost:3000';
+  q.get('origin-input').listeners.get('input')();
+  assert.equal(q.get('grants-details').open, true);
+});
+
+// The real panel HTML, built from src/extension/panel.ts with a stubbed `vscode`.
+async function panelHtml(language = 'ja') {
+  const esbuild = require('esbuild');
+  const stub = `export const Uri={joinPath:(base,...parts)=>({toString:()=>'media/'+parts.join('/')})};
+export const ConfigurationTarget={Global:1,Workspace:2,WorkspaceFolder:3};export const env={language:${JSON.stringify(language)}};
+export const workspace={};export const window={};`;
+  const result = await esbuild.build({
+    entryPoints: [path.join(__dirname, '../../src/extension/panel.ts')],
+    bundle: true,
+    write: false,
+    format: 'cjs',
+    platform: 'node',
+    logLevel: 'silent',
+    plugins: [
+      {
+        name: 'vscode-stub',
+        setup(build) {
+          build.onResolve({ filter: /^vscode$/ }, () => ({ path: 'vscode', namespace: 'vscode-stub' }));
+          build.onLoad({ filter: /.*/, namespace: 'vscode-stub' }, () => ({ contents: stub, loader: 'js' }));
+        },
+      },
+    ],
+  });
+  const mod = { exports: {} };
+  new Function('module', 'exports', 'require', result.outputFiles[0].text)(mod, mod.exports, require);
+  const provider = new mod.exports.SettingsPanelProvider({}, {});
+  return provider.html({ cspSource: 'vscode-webview:', asWebviewUri: uri => uri });
+}
+const detailsBlocks = html => [...html.matchAll(/<details\b[\s\S]*?<\/details>/g)].map(match => match[0]);
+
+test('every control the panel had before is still present with the same ID', async () => {
+  const html = await panelHtml();
+  // IDs of the panel before the summary/checklist/collapsed-groups rework (v0.1.6 base).
+  const ids =
+    `allow-loopback allow-personal-data allow-physical-input allow-private-network allow-unredacted-images auto-update
+    browser-compat browser-headless browser-hosts browser-installed browser-installed-empty browser-proxy-connect-hostname browser-proxy-server
+    browser-retry browser-setup browser-setup-status browser-use-auto check-now check-updates clients-disable clients-enable clients-error
+    clients-list clients-refresh clients-status clients-title desktop-app-id desktop-app-path desktop-browse desktop-clear desktop-error
+    desktop-notice desktop-os-hint desktop-save desktop-title emergency-stop enabled enabled-error enabled-hint global-error loopback-suggestion
+    mcp-error mcp-status open-logs open-settings operation-mode operation-mode-error origin-add origin-input origins-error origins-list
+    permissions permissions-hint private-network-suggestion resource-origin-add resource-origin-input resource-origins-list resume-operations
+    runtime-settings-error session-idle-effective session-idle-minutes stopped-status ui-language update-source update-status updates-title
+    version workspace-title`.split(/\s+/);
+  assert.equal(ids.length, 68);
+  for (const id of ids) assert.equal(html.split(`id="${id}"`).length, 2, `${id} appears exactly once`);
+  // Every ID the script looks up exists in the markup (a typo would silently disable a control).
+  const script = fs.readFileSync(path.join(__dirname, '../../media/settings.js'), 'utf8');
+  for (const [, id] of script.matchAll(/\$\('([a-z0-9-]+)'\)/g))
+    assert.ok(html.includes(`id="${id}"`), `script id ${id} exists`);
+  for (const name of ['mcp', 'origin', 'tier'])
+    for (const kind of ['step', 'mark', 'state', 'go'])
+      assert.ok(html.includes(`id="setup-${kind}-${name}"`), `setup-${kind}-${name}`);
+});
+
+test('the emergency stop, the permission tier and the summary are never inside a collapsed group', async () => {
+  const html = await panelHtml();
+  const groups = detailsBlocks(html);
+  assert.ok(groups.length >= 5, 'the rarely changed controls sit in groups');
+  const always = [
+    'emergency-stop',
+    'resume-operations',
+    'stopped-status',
+    'operation-mode',
+    'operation-mode-error',
+    'permissions-hint',
+    'enabled',
+    'origin-input',
+    'origins-error',
+    'ai-summary',
+    'setup-checklist',
+    'mcp-error',
+    'enabled-error',
+  ];
+  for (const group of groups) {
+    for (const id of always) assert.ok(!group.includes(`id="${id}"`), `${id} stays outside <details>`);
+    assert.doesNotMatch(
+      group.slice(0, group.indexOf('>') + 1),
+      /\sopen\b/,
+      'groups start collapsed; the script opens them',
+    );
+  }
+  // The Allow-all warning is not attached to a collapsed control, so it stays in the always-visible part.
+  const visible = html.replace(/<details\b[\s\S]*?<\/details>/g, '');
+  assert.match(visible, /Allow all lets the AI submit forms, delete, buy or pay/);
+  // Error lines inside groups are revealed by the script when they have text (see the auto-open test).
+  for (const id of ['clients-error', 'desktop-error', 'runtime-settings-error'])
+    assert.ok(
+      groups.some(group => group.includes(`id="${id}"`)),
+      `${id} lives in a group that opens when it has text`,
+    );
+});
+
+test('the summary is a polite status region and the checklist is real text with keyboard-focusable buttons', async () => {
+  const html = await panelHtml();
+  const region =
+    /<div id="ai-summary-box" role="status" aria-live="polite" aria-atomic="true" aria-labelledby="ai-summary-label">/;
+  assert.match(html, region, 'screen readers hear the summary when the state changes');
+  assert.match(html, /<p class="summary-label" id="ai-summary-label">/);
+  assert.match(
+    html,
+    /<div class="checklist" id="setup-checklist" role="group" aria-labelledby="setup-checklist-title" hidden>/,
+  );
+  assert.match(html, /<h4 class="checklist-title" id="setup-checklist-title">/);
+  assert.match(html, /<ol class="checklist-items">/, 'the steps are a real ordered list');
+  const checklist = html.slice(html.indexOf('id="setup-checklist"'), html.indexOf('id="enabled"'));
+  const buttons = [...checklist.matchAll(/<button\b[^>]*>/g)].map(match => match[0]);
+  assert.equal(buttons.length, 4, 'dismiss plus one button per step');
+  for (const button of buttons) {
+    assert.match(button, /\btype="button"/);
+    assert.match(button, /aria-label="[^"]* \/ [^"]*"/, 'each button has a bilingual accessible name');
+    assert.doesNotMatch(button, /tabindex="-1"/, 'buttons stay keyboard focusable');
+  }
+  // Status never relies on colour alone: each step carries a mark and a text label element.
+  for (const name of ['mcp', 'origin', 'tier'])
+    assert.ok(checklist.includes(`id="setup-state-${name}"`) && checklist.includes(`id="setup-mark-${name}"`));
+  assert.match(html, /id="setup-reopen" class="link-button" hidden/);
+});
+
+test('every new Japanese string has an English twin in the data-i18n pattern', async () => {
+  for (const language of ['ja', 'en']) {
+    const html = (await panelHtml(language)).replace(/<p class="hint"><span data-i18n-ja>更新元[\s\S]*?<\/p>/, '');
+    const text = html
+      .replace(/<option\b[\s\S]*?<\/option>/g, '')
+      .replace(/<span data-i18n-ja>[^<]*<\/span>/g, '')
+      .replace(/<[^>]*>/g, '>');
+    assert.doesNotMatch(text, /[぀-ヿ一-鿿]/, 'Japanese text only appears inside data-i18n-ja spans');
+    assert.equal((html.match(/data-i18n-ja/g) ?? []).length, (html.match(/data-i18n-en/g) ?? []).length);
+  }
+  const html = await panelHtml();
+  assert.match(html, /<span data-i18n-ja>いまの AI の権限<\/span><span data-i18n-en>What the AI can do now<\/span>/);
+  assert.match(html, /<span data-i18n-ja>はじめの設定<\/span><span data-i18n-en>First-time setup<\/span>/);
 });

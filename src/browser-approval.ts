@@ -3,6 +3,13 @@ import type { ElementHandle, Frame } from 'playwright';
 import { AdlError, type Action } from './types.js';
 import { BROWSER_PRIVACY_RULES, SECRET_LABEL_PATTERN } from './privacy.js';
 import { describeApprovalForm } from './approval-summary.js';
+import {
+  classifyLabel,
+  isContainable,
+  type ActionFacts,
+  type LabelLists,
+  type LabelVerdict,
+} from './action-classifier.js';
 
 export type ActionRisk = 'ordinary' | 'credential' | 'consequential';
 export interface ActionProof {
@@ -14,6 +21,9 @@ export interface ActionProof {
   details?: string[];
   network?: { url: string; method: string; body: string };
   /** Consequential only because it submits a form: dispatchable in standard mode under the submission guard. */ submission?: 'plain';
+  /** Consequential only through a verb that may stay in the session: dispatchable in standard mode with the network closed. */ contained?: boolean;
+  /** Why the label classifier decided as it did (internal; never sent to the approval broker). */
+  classification?: LabelVerdict['reason'];
 }
 
 // CDP supplies a backend node identity from the hit-test. We compare candidate
@@ -62,6 +72,63 @@ export function hitPointOf(
   if (x < 0 || y < 0 || (viewport && (x >= viewport.width || y >= viewport.height))) return undefined;
   return { x, y };
 }
+// The click point a preflight verified, as an offset from the border-box origin that boundingBox() reports, in viewport coordinates.
+// The offset is relative so it stays valid for elements inside iframes (boundingBox() already includes the frame origin).
+export function offsetPointOf(
+  box: { x: number; y: number },
+  offset: { x: number; y: number },
+  viewport: { width: number; height: number } | null,
+): { x: number; y: number } | undefined {
+  const x = box.x + offset.x,
+    y = box.y + offset.y;
+  if (!Number.isFinite(x) || !Number.isFinite(y) || x < 0 || y < 0) return undefined;
+  if (viewport && (x >= viewport.width || y >= viewport.height)) return undefined;
+  return { x, y };
+}
+// Click points on a clipped span: the centre of the pixel containing its midpoint (so CDP's integer hit-test, Playwright's rounding of
+// positions and the mouse event all name the same pixel); the exact midpoint when that pixel centre lies outside a sub-pixel span.
+// browser-preflight.ts carries an identical copy inside the page-side probe.
+function pixelCentre(low: number, high: number): number {
+  const middle = (low + high) / 2,
+    pixel = Math.floor(middle) + 0.5;
+  return pixel > low && pixel < high ? pixel : middle;
+}
+// Layout fragments of an element in its frame's viewport coordinates, read through prototype accessors (form named properties
+// and page expandos cannot substitute them). Serialized into the page: must not close over module scope.
+function pageFragments(node: Element) {
+  const r = (o: object, k: string): any => Reflect.get(Object.getPrototypeOf(o), k, o),
+    m = (o: object, k: string, ...a: unknown[]): any => Reflect.apply(r(o, k), o, a);
+  const rect = m(node, 'getBoundingClientRect') as DOMRect,
+    list = m(node, 'getClientRects') as ArrayLike<DOMRect>,
+    fragments: number[][] = [];
+  for (let i = 0; i < list.length && i < 64; i++) {
+    const f = list[i]!;
+    fragments.push([f.left, f.top, f.right, f.bottom]);
+  }
+  return { left: rect.left, top: rect.top, fragments };
+}
+// The centre of every non-empty layout fragment inside the viewport, in the coordinates of boundingBox(). An inline element wrapped
+// over several lines has one fragment per line box; the centre of its bounding box can lie on whitespace or another element.
+async function fragmentPointsOf(
+  el: ElementHandle,
+  box: { x: number; y: number },
+  viewport: { width: number; height: number } | null,
+): Promise<{ x: number; y: number }[]> {
+  const info = await el.evaluate(pageFragments).catch(() => undefined);
+  if (!info) return [];
+  const dx = box.x - info.left,
+    dy = box.y - info.top,
+    points: { x: number; y: number }[] = [];
+  for (const [fl, ft, fr, fb] of info.fragments as [number, number, number, number][]) {
+    const left = Math.max(0, fl + dx),
+      top = Math.max(0, ft + dy),
+      right = Math.min(viewport?.width ?? fr + dx, fr + dx),
+      bottom = Math.min(viewport?.height ?? fb + dy, fb + dy);
+    if (fr > fl && fb > ft && right > left && bottom > top)
+      points.push({ x: pixelCentre(left, right), y: pixelCentre(top, bottom) });
+  }
+  return points;
+}
 export async function isolatedCollect<T>(
   el: ElementHandle,
   collect: (node: Element, args: any) => T,
@@ -86,159 +153,185 @@ export async function isolatedCollect<T>(
   const box = await el.boundingBox();
   if (!box || box.width <= 0 || box.height <= 0) throw new AdlError('E_STALE_STATE');
   const viewport = page.viewportSize();
-  const point = hitPointOf(box, viewport);
-  if (!point) throw new AdlError('E_STALE_STATE');
-  const { x, y } = point;
-  if (expectPoint && (expectPoint.x !== x || expectPoint.y !== y)) throw new AdlError('E_STALE_STATE');
+  // expectPoint is the exact point about to be clicked: the proof is made at that point and no other. Without it the proof accepts the
+  // element when any ordinary click point of it resolves to it: the centre of its box, then the centre of each layout fragment.
+  let points: { x: number; y: number }[];
+  if (expectPoint) {
+    if (!offsetPointOf(expectPoint, { x: 0, y: 0 }, viewport)) throw new AdlError('E_STALE_STATE');
+    points = [expectPoint];
+  } else {
+    const centre = hitPointOf(box, viewport);
+    points = [
+      ...(centre ? [centre] : []),
+      ...(await fragmentPointsOf(el, box, viewport)).filter(p => !centre || p.x !== centre.x || p.y !== centre.y),
+    ];
+  }
+  if (points.length === 0) throw new AdlError('E_STALE_STATE');
   const cdp = await page.context().newCDPSession(page),
     objectGroup = 'adl-proof-' + randomUUID();
+  type Host = { backend: number; frameId: string; path: PathStep[] };
+  type Candidate = {
+    backend: number;
+    parent?: Candidate;
+    path: PathStep[];
+    frameId: string;
+    hosts: Host[];
+    unavailableFrame: boolean;
+  };
   try {
-    // boundingBox() is viewport-relative; DOM.getNodeForLocation takes document
-    // coordinates. A wrong offset only fails closed through the identity proof.
-    const scroll = (await cdp.send('Page.getLayoutMetrics')).cssVisualViewport;
-    const hit = await cdp.send('DOM.getNodeForLocation', {
-      x: Math.floor(x + scroll.pageX),
-      y: Math.floor(y + scroll.pageY),
-      includeUserAgentShadowDOM: false,
-      ignorePointerEventsNone: false,
-    });
-    const tree = await cdp.send('Page.getFrameTree');
-    const frameInfo = new Map<string, typeof tree.frameTree.frame>();
-    const framePending = [tree.frameTree];
-    while (framePending.length) {
-      const item = framePending.pop()!;
-      frameInfo.set(item.frame.id, item.frame);
-      framePending.push(...(item.childFrames ?? []));
-    }
-    const mainInfo = tree.frameTree.frame,
-      hitInfo = frameInfo.get(hit.frameId);
-    // Descendants require explicit exact-origin authorization and an in-process
-    // CDP document. Opaque origins and OOPIFs fail closed.
-    if (
-      frame !== page.mainFrame() &&
-      (!hitInfo ||
-        mainInfo.securityOrigin !== new URL(page.url()).origin ||
-        !permittedOrigins.has(hitInfo.securityOrigin))
-    )
-      throw new AdlError('E_POLICY_DENIED', 'iframe_action_proof_unavailable');
-    const dom = await cdp.send('DOM.getDocument', { depth: -1, pierce: true });
-    type Host = { backend: number; frameId: string; path: PathStep[] };
-    type Candidate = {
-      backend: number;
-      parent?: Candidate;
-      path: PathStep[];
-      frameId: string;
-      hosts: Host[];
-      unavailableFrame: boolean;
-    };
-    const pending: { node: typeof dom.root; parent?: Candidate; path: PathStep[]; frameId: string; hosts: Host[] }[] = [
-      { node: dom.root, path: [], frameId: mainInfo.id, hosts: [] },
-    ];
-    let found: Candidate | undefined,
-      visited = 0;
-    while (pending.length) {
-      const item = pending.pop()!;
-      if (++visited > 10000) throw new AdlError('E_RESOURCE_LIMIT');
-      if (item.node.shadowRootType === 'closed' || item.node.shadowRootType === 'user-agent') continue;
-      const current: Candidate = {
-        backend: item.node.backendNodeId,
-        parent: item.parent,
-        path: item.path,
-        frameId: item.frameId,
-        hosts: item.hosts,
-        unavailableFrame: !!item.node.frameId && !item.node.contentDocument,
-      };
-      if (current.backend === hit.backendNodeId && item.frameId === hit.frameId) {
-        found = current;
-        break;
+    // Resolves the element under one viewport point to the candidate that is, or contains, the retained element.
+    const locate = async (x: number, y: number): Promise<Candidate> => {
+      // boundingBox() is viewport-relative; DOM.getNodeForLocation takes document
+      // coordinates. A wrong offset only fails closed through the identity proof.
+      const scroll = (await cdp.send('Page.getLayoutMetrics')).cssVisualViewport;
+      const hit = await cdp.send('DOM.getNodeForLocation', {
+        x: Math.floor(x + scroll.pageX),
+        y: Math.floor(y + scroll.pageY),
+        includeUserAgentShadowDOM: false,
+        ignorePointerEventsNone: false,
+      });
+      const tree = await cdp.send('Page.getFrameTree');
+      const frameInfo = new Map<string, typeof tree.frameTree.frame>();
+      const framePending = [tree.frameTree];
+      while (framePending.length) {
+        const item = framePending.pop()!;
+        frameInfo.set(item.frame.id, item.frame);
+        framePending.push(...(item.childFrames ?? []));
       }
-      let index = 0;
-      for (const child of item.node.children ?? []) {
-        if (child.nodeType !== 1) continue;
-        index++;
-        pending.push({
-          node: child,
-          parent: current,
+      const mainInfo = tree.frameTree.frame,
+        hitInfo = frameInfo.get(hit.frameId);
+      // Descendants require explicit exact-origin authorization and an in-process
+      // CDP document. Opaque origins and OOPIFs fail closed.
+      if (
+        frame !== page.mainFrame() &&
+        (!hitInfo ||
+          mainInfo.securityOrigin !== new URL(page.url()).origin ||
+          !permittedOrigins.has(hitInfo.securityOrigin))
+      )
+        throw new AdlError('E_POLICY_DENIED', 'iframe_action_proof_unavailable');
+      const dom = await cdp.send('DOM.getDocument', { depth: -1, pierce: true });
+      const pending: { node: typeof dom.root; parent?: Candidate; path: PathStep[]; frameId: string; hosts: Host[] }[] =
+        [{ node: dom.root, path: [], frameId: mainInfo.id, hosts: [] }];
+      let found: Candidate | undefined,
+        visited = 0;
+      while (pending.length) {
+        const item = pending.pop()!;
+        if (++visited > 10000) throw new AdlError('E_RESOURCE_LIMIT');
+        if (item.node.shadowRootType === 'closed' || item.node.shadowRootType === 'user-agent') continue;
+        const current: Candidate = {
+          backend: item.node.backendNodeId,
+          parent: item.parent,
+          path: item.path,
           frameId: item.frameId,
           hosts: item.hosts,
-          path: item.node.nodeType === 11 ? [...item.path, 0, index] : [...item.path, index],
-        });
-      }
-      for (const shadow of item.node.shadowRoots ?? [])
-        pending.push({ node: shadow, parent: current, path: item.path, frameId: item.frameId, hosts: item.hosts });
-      if (item.node.contentDocument && item.node.frameId) {
-        const childInfo = frameInfo.get(item.node.frameId);
-        if (childInfo && permittedOrigins.has(childInfo.securityOrigin))
+          unavailableFrame: !!item.node.frameId && !item.node.contentDocument,
+        };
+        if (current.backend === hit.backendNodeId && item.frameId === hit.frameId) {
+          found = current;
+          break;
+        }
+        let index = 0;
+        for (const child of item.node.children ?? []) {
+          if (child.nodeType !== 1) continue;
+          index++;
           pending.push({
-            node: item.node.contentDocument,
-            path: [],
-            frameId: item.node.frameId,
-            hosts: [...item.hosts, { backend: current.backend, frameId: item.frameId, path: current.path }],
+            node: child,
+            parent: current,
+            frameId: item.frameId,
+            hosts: item.hosts,
+            path: item.node.nodeType === 11 ? [...item.path, 0, index] : [...item.path, index],
           });
-      }
-    }
-    // A selector is meaningful only in its original frame. Prove every CDP
-    // iframe owner is the exact Playwright owner before using frame.locator.
-    const chain: (typeof frame)[] = [];
-    for (let f: typeof frame | null = frame; f?.parentFrame(); f = f.parentFrame()) chain.unshift(f);
-    let frameMatches = !!found && found.hosts.length === chain.length;
-    if (frameMatches && found) {
-      for (let i = 0; i < chain.length; i++) {
-        const child = chain[i]!,
-          host = found.hosts[i]!,
-          parent = child.parentFrame();
-        if (!parent) {
-          frameMatches = false;
-          break;
         }
-        const actual = await child.frameElement(),
-          candidate = await resolvePath(parent, host.path);
-        try {
-          if (!candidate || !(await actual.evaluate((node, other) => node === other, candidate))) frameMatches = false;
-        } finally {
-          await actual.dispose();
-          await candidate?.dispose();
+        for (const shadow of item.node.shadowRoots ?? [])
+          pending.push({ node: shadow, parent: current, path: item.path, frameId: item.frameId, hosts: item.hosts });
+        if (item.node.contentDocument && item.node.frameId) {
+          const childInfo = frameInfo.get(item.node.frameId);
+          if (childInfo && permittedOrigins.has(childInfo.securityOrigin))
+            pending.push({
+              node: item.node.contentDocument,
+              path: [],
+              frameId: item.node.frameId,
+              hosts: [...item.hosts, { backend: current.backend, frameId: item.frameId, path: current.path }],
+            });
         }
-        if (!frameMatches) break;
       }
-    }
-    let selected: Candidate | undefined;
-    for (
-      let candidate = frameMatches ? found : undefined, depth = 0;
-      candidate?.path.length && depth++ < 128;
-      candidate = candidate.parent
-    ) {
-      const other = await resolvePath(frame, candidate.path);
-      if (!other) continue;
-      try {
-        if (await el.evaluate((node, otherNode) => node === otherNode, other)) {
-          selected = candidate;
-          break;
-        }
-      } finally {
-        await other.dispose().catch(() => undefined);
-      }
-    }
-    if (!selected) {
-      if (!(await el.evaluate(node => node.isConnected))) throw new AdlError('E_STALE_STATE');
-      // When the hit is the actual frame owner but CDP has no child document,
-      // Chromium has not exposed an in-process identity proof (typically OOPIF).
-      if (found?.unavailableFrame)
-        for (const child of chain) {
-          const parent = child.parentFrame();
-          if (!parent) continue;
+      // A selector is meaningful only in its original frame. Prove every CDP
+      // iframe owner is the exact Playwright owner before using frame.locator.
+      const chain: (typeof frame)[] = [];
+      for (let f: typeof frame | null = frame; f?.parentFrame(); f = f.parentFrame()) chain.unshift(f);
+      let frameMatches = !!found && found.hosts.length === chain.length;
+      if (frameMatches && found) {
+        for (let i = 0; i < chain.length; i++) {
+          const child = chain[i]!,
+            host = found.hosts[i]!,
+            parent = child.parentFrame();
+          if (!parent) {
+            frameMatches = false;
+            break;
+          }
           const actual = await child.frameElement(),
-            other = await resolvePath(parent, found.path);
+            candidate = await resolvePath(parent, host.path);
           try {
-            if (other && (await actual.evaluate((node, candidate) => node === candidate, other)))
-              throw new AdlError('E_POLICY_DENIED', 'iframe_action_proof_unavailable');
+            if (!candidate || !(await actual.evaluate((node, other) => node === other, candidate)))
+              frameMatches = false;
           } finally {
             await actual.dispose();
-            await other?.dispose();
+            await candidate?.dispose();
           }
+          if (!frameMatches) break;
         }
-      throw new AdlError('E_NOT_INTERACTABLE', 'occluded');
+      }
+      let selected: Candidate | undefined;
+      for (
+        let candidate = frameMatches ? found : undefined, depth = 0;
+        candidate?.path.length && depth++ < 128;
+        candidate = candidate.parent
+      ) {
+        const other = await resolvePath(frame, candidate.path);
+        if (!other) continue;
+        try {
+          if (await el.evaluate((node, otherNode) => node === otherNode, other)) {
+            selected = candidate;
+            break;
+          }
+        } finally {
+          await other.dispose().catch(() => undefined);
+        }
+      }
+      if (!selected) {
+        if (!(await el.evaluate(node => node.isConnected))) throw new AdlError('E_STALE_STATE');
+        // When the hit is the actual frame owner but CDP has no child document,
+        // Chromium has not exposed an in-process identity proof (typically OOPIF).
+        if (found?.unavailableFrame)
+          for (const child of chain) {
+            const parent = child.parentFrame();
+            if (!parent) continue;
+            const actual = await child.frameElement(),
+              other = await resolvePath(parent, found.path);
+            try {
+              if (other && (await actual.evaluate((node, candidate) => node === candidate, other)))
+                throw new AdlError('E_POLICY_DENIED', 'iframe_action_proof_unavailable');
+            } finally {
+              await actual.dispose();
+              await other?.dispose();
+            }
+          }
+        throw new AdlError('E_NOT_INTERACTABLE', 'occluded');
+      }
+      return selected;
+    };
+    // The first point that resolves to the element decides; when none does, the first point's refusal is the answer.
+    let selected: Candidate | undefined, refusal: unknown;
+    for (const point of points) {
+      try {
+        selected = await locate(point.x, point.y);
+        break;
+      } catch (error) {
+        if (!(error instanceof AdlError) || error.code === 'E_RESOURCE_LIMIT') throw error;
+        refusal ??= error;
+      }
     }
+    if (!selected) throw refusal;
     const contexts = new Map<string, number>();
     const isolatedWorld = async (frameId: string) => {
       let id = contexts.get(frameId);
@@ -290,8 +383,15 @@ export async function isolatedCollect<T>(
     await cdp.detach().catch(() => undefined);
   }
 }
-// The raw form values remain inside the adapter and are hashed before return.
-export async function inspectBrowserAction(el: ElementHandle, action: Action, frameHint?: Frame): Promise<ActionProof> {
+// The raw form values remain inside the adapter and are hashed before return. `point` pins the CDP hit-test identity proof to the exact
+// viewport point about to be clicked; without it any ordinary click point of the element (box centre, then each fragment) may prove it.
+export async function inspectBrowserAction(
+  el: ElementHandle,
+  action: Action,
+  frameHint?: Frame,
+  lists: LabelLists = { allow: [], deny: [] },
+  point?: { x: number; y: number },
+): Promise<ActionProof> {
   const collect = (node: Element, args: { rules: typeof BROWSER_PRIVACY_RULES; pattern: string; action: Action }) => {
     // Isolated-world prototypes are pristine, but form named properties (input
     // name="action") shadow instance APIs in every world. Reads on nodes that may
@@ -465,15 +565,17 @@ export async function inspectBrowserAction(el: ElementHandle, action: Action, fr
       detail(value);
     }
     let network: { url: string; method: string; body: string } | undefined;
+    // Enter in a field is the default button's click (implicit submission): that button's own attributes and name/value shape the request.
+    const owner: Element | null = args.action.action === 'press' ? submitter : e;
     if (
       submit &&
-      type !== 'image' &&
+      str(owner && r(owner, 'type')).toLowerCase() !== 'image' &&
       form &&
-      args.action.action === 'click' &&
-      (attr(e, 'formenctype') || r(form, 'enctype')) === 'application/x-www-form-urlencoded'
+      (args.action.action === 'click' || args.action.action === 'press') &&
+      ((owner && attr(owner, 'formenctype')) || r(form, 'enctype')) === 'application/x-www-form-urlencoded'
     ) {
-      const method = (attr(e, 'formmethod') || str(r(form, 'method')) || 'get').toUpperCase();
-      const url = new URL(attr(e, 'formaction') || str(r(form, 'action')), doc.location.href);
+      const method = ((owner && attr(owner, 'formmethod')) || str(r(form, 'method')) || 'get').toUpperCase();
+      const url = new URL((owner && attr(owner, 'formaction')) || str(r(form, 'action')), doc.location.href);
       if (method === 'POST' && url.origin === doc.location.origin && !url.username && !url.password) {
         const params = new URLSearchParams();
         const append = (key: string, value: string) =>
@@ -486,7 +588,7 @@ export async function inspectBrowserAction(el: ElementHandle, action: Action, fr
           if (!['input', 'select', 'textarea', 'button', 'fieldset', 'output'].includes(fieldTag)) fail();
           if (field.matches(':disabled') || !field.name || ['fieldset', 'output'].includes(fieldTag)) continue;
           if (fieldTag === 'button' || ['submit', 'image', 'button', 'reset'].includes(fieldType)) {
-            if (item === e) append(field.name, field.value);
+            if (item === owner) append(field.name, field.value);
             continue;
           }
           if (fieldType === 'file') fail();
@@ -502,7 +604,8 @@ export async function inspectBrowserAction(el: ElementHandle, action: Action, fr
         network = { url: url.href, method, body: params.toString() };
       }
     }
-    const method = submit && form ? (attr(e, 'formmethod') || str(r(form, 'method')) || 'get').toUpperCase() : '';
+    const method =
+      submit && form ? ((owner && attr(owner, 'formmethod')) || str(r(form, 'method')) || 'get').toUpperCase() : '';
     const humanName = normalize(name),
       submitterName =
         submitter && submitter !== e
@@ -522,17 +625,8 @@ export async function inspectBrowserAction(el: ElementHandle, action: Action, fr
           item =>
             item instanceof HTMLInputElement && (item.type === 'search' || /^(?:q|query|search)$/i.test(item.name)),
         ));
-    const labelled = (label: string) =>
-      (!searchForm && /\bsubmit\b/i.test(label)) ||
-      /\b(?:delete|remove(?!\s+filter\b)|upload|send|purchase|checkout|pay|payment|login|log\s*in|sign\s*in|sign\s*up|register|withdraw|transfer|confirm|cancel|order)\b/i.test(
-        label,
-      ) ||
-      /(?:削除|購入|注文|支払|決済|送信|登録|取消|取り消|キャンセル|振込|送金|転送|申込|申し込|解約|確定|ログイン)/u.test(
-        label,
-      );
-    const labelRisk = labelled(humanName) || labelled(submitterName),
-      submitRisk = submit && (method !== 'GET' || !searchForm);
-    const consequential = submitRisk || labelRisk;
+    // Label risk is decided in Node by classifyLabel from these facts; only the form-submission and credential parts stay here.
+    const submitRisk = submit && (method !== 'GET' || !searchForm);
     const role =
       attr(e, 'role') ||
       (tag === 'input'
@@ -547,23 +641,97 @@ export async function inspectBrowserAction(el: ElementHandle, action: Action, fr
     const details =
       submit && form
         ? {
-            method: (attr(e, 'formmethod') || str(r(form, 'method')) || 'get').toUpperCase(),
-            url: new URL(attr(e, 'formaction') || str(r(form, 'action')), doc.location.href).href,
+            method: ((owner && attr(owner, 'formmethod')) || str(r(form, 'method')) || 'get').toUpperCase(),
+            url: new URL((owner && attr(owner, 'formaction')) || str(r(form, 'action')), doc.location.href).href,
             fields: formDetails,
           }
         : undefined;
-    const risk = secret || (submit && formCredential) ? 'credential' : consequential ? 'consequential' : 'ordinary';
-    // A submit that is consequential only because it submits may be dispatched
-    // under the adapter's submission guard; labelled, credential or secret
-    // submits never are.
+    // Navigation facts of a link, resolved like a click would (document base URL included) and bounded.
+    let link: ActionFacts['link'] = null;
+    if ((tag === 'a' || tag === 'area') && attr(e, 'href') !== null) {
+      try {
+        const resolved = r(e, 'href');
+        if (typeof resolved !== 'string' || resolved.length > 8192) throw new Error('href');
+        const u = new URL(resolved);
+        const segments = u.pathname
+          .split('/')
+          .filter(Boolean)
+          .map(part => {
+            try {
+              part = decodeURIComponent(part);
+            } catch {
+              /* keep the raw segment */
+            }
+            return part
+              .toLowerCase()
+              .replace(/\.[a-z0-9]{1,8}$/, '')
+              .slice(0, 64);
+          });
+        link = {
+          protocol: u.protocol,
+          sameOrigin: u.origin === doc.location.origin,
+          download: m(e, 'hasAttribute', 'download') === true,
+          // A long path keeps both ends: an action word cannot hide behind padding segments.
+          segments: segments.length > 32 ? [...segments.slice(0, 16), ...segments.slice(-16)] : segments,
+          actionValues: [...u.searchParams]
+            .filter(([key]) => /^(?:action|act|cmd|op|do|_method|method|task)$/i.test(key))
+            .slice(0, 8)
+            .map(([, value]) => value.toLowerCase().slice(0, 64)),
+        };
+      } catch {
+        link = { protocol: 'invalid', sameOrigin: false, download: false, segments: [], actionValues: [] };
+      }
+    }
+    // The accessible name of the enclosing dialog, if any: an affirmative button inherits its verdict.
+    let dialog: ActionFacts['dialog'] = null;
+    for (
+      let n: Element | null =
+          (r(e, 'parentElement') as Element | null) ?? (m(e, 'getRootNode') as ShadowRoot).host ?? null,
+        depth = 0;
+      n && depth++ < args.rules.ancestorCap;
+      n = (r(n, 'parentElement') as Element | null) ?? (m(n, 'getRootNode') as ShadowRoot).host ?? null
+    ) {
+      if (!m(n, 'matches', 'dialog,[role="dialog" i],[role="alertdialog" i]')) continue;
+      const dialogRoot = m(n, 'getRootNode') as Document | ShadowRoot;
+      const ids = (attr(n, 'aria-labelledby') ?? '').trim().split(/\s+/).filter(Boolean);
+      if (ids.length > 16) fail();
+      const named = ids
+        .map(id => m(dialogRoot, 'getElementById', id) as Element | null)
+        .filter((x): x is Element => !!x);
+      const heading = m(n, 'querySelector', 'h1,h2,h3,h4,h5,h6,[role="heading"]') as Element | null;
+      if ([...named, ...(heading ? [heading] : [])].some(protectedNode)) fail();
+      dialog = {
+        name: normalize(
+          (attr(n, 'aria-label') || named.map(text).filter(Boolean).join(' ') || (heading ? text(heading) : '')).slice(
+            0,
+            512,
+          ),
+        ),
+      };
+      break;
+    }
+    const facts: ActionFacts = {
+      tag,
+      type,
+      role,
+      name: humanName,
+      submitterName,
+      submit,
+      method,
+      searchForm,
+      inForm: !!form,
+      link,
+      dialog,
+    };
     return {
-      risk,
+      credential: secret || (submit && formCredential),
+      submitRisk,
+      facts,
       role,
       name,
       origin: doc.location.origin,
       network,
       details,
-      submission: risk === 'consequential' && submitRisk && !labelRisk ? ('plain' as const) : undefined,
       proof: JSON.stringify([
         doc.location.href,
         tag,
@@ -573,6 +741,8 @@ export async function inspectBrowserAction(el: ElementHandle, action: Action, fr
         targetValue,
         r(e, 'checked') === true,
         form ? [str(r(form, 'action')), str(r(form, 'method')), attrs(form), formControls] : null,
+        link,
+        dialog,
       ]),
     };
   };
@@ -582,17 +752,29 @@ export async function inspectBrowserAction(el: ElementHandle, action: Action, fr
     { rules: BROWSER_PRIVACY_RULES, pattern: SECRET_LABEL_PATTERN, action },
     [],
     frameHint,
+    point,
   );
   if (data.proof.length > 1048576) throw new AdlError('E_RESOURCE_LIMIT');
   const details = data.details ? describeApprovalForm(data.details) : undefined;
+  // Label risk comes from the shared classifier; a real submission, credentials and every other
+  // protection above never consult the allow list.
+  const verdict = classifyLabel(data.facts, action, lists);
+  const labelRisk = verdict.consequential;
+  const risk: ActionRisk = data.credential ? 'credential' : data.submitRisk || labelRisk ? 'consequential' : 'ordinary';
   return {
     proof: createHash('sha256').update(data.proof).digest('hex'),
-    risk: data.risk as ActionRisk,
+    risk,
     role: data.role,
     name: data.name,
     origin: data.origin,
     ...(details ? { details } : {}),
     ...(data.network ? { network: data.network } : {}),
-    ...(data.submission ? { submission: data.submission } : {}),
+    // A submit that is consequential only because it submits may be dispatched under the adapter's
+    // submission guard; labelled, credential or secret submits never are.
+    ...(risk === 'consequential' && data.submitRisk && !labelRisk ? { submission: 'plain' as const } : {}),
+    ...(risk === 'consequential' && !data.submitRisk && isContainable(data.facts, action, verdict)
+      ? { contained: true }
+      : {}),
+    classification: verdict.reason,
   };
 }
