@@ -9,6 +9,7 @@ import {
   PERSONAL_DATA_REDACTION_RULES,
   BROWSER_PRIVACY_RULES,
 } from './privacy.js';
+import { POLICY_LABEL_PATTERN, NATIVE_LABEL_PATTERN, normalizeLabel } from './action-classifier.js';
 
 const MAX_BATCH_STEPS = 20;
 const MAX_TEXT = 512;
@@ -26,11 +27,10 @@ const SUPPORTED_ACTIONS: ActionName[] = [
   'back',
   'hover',
 ];
-const CONSEQUENTIAL =
-  /\b(?:delete|remove(?!\s+filters?\b)|upload|send|submit|purchase|checkout|pay|payment|login|log\s*in|sign\s*in|sign\s*up|register|withdraw|transfer)\b|削除|購入|注文|決済|支払|送信|申込|申し込|登録|解約|振込|送金|確定|ログイン/iu;
+// The vocabularies are frozen in action-classifier.ts: authorizeAction (legacy browser path and native pre-check) and the native tiers keep deciding exactly as before.
+const CONSEQUENTIAL = new RegExp(POLICY_LABEL_PATTERN, 'iu');
 // The native helpers' own vocabulary (Linux CONSEQUENTIAL, Windows IsConsequentialText, macOS consequentialLabels): the browser terms plus confirm/cancel/order.
-const NATIVE_CONSEQUENTIAL =
-  /\b(?:delete|remove(?!\s+filters?\b)|upload|send|submit|purchase|checkout|pay|payment|login|log\s*in|sign\s*in|sign\s*up|register|withdraw|transfer|confirm|cancel|order)\b|削除|購入|注文|支払|決済|送信|登録|取消|取り消|キャンセル|振込|送金|転送|申込|申し込|解約|確定|ログイン/iu;
+const NATIVE_CONSEQUENTIAL = new RegExp(NATIVE_LABEL_PATTERN, 'iu');
 
 const origin = z
   .string()
@@ -138,6 +138,18 @@ const desktopConfig = z
   })
   .strict();
 
+// Trusted per-workspace label lists: 1-64 characters each, no control characters, at most 64 entries.
+const consequentialLabels = z
+  .array(
+    z
+      .string()
+      .min(1)
+      .max(64)
+      .refine(v => !/[\u0000-\u001f\u007f]/.test(v)),
+  )
+  .max(64)
+  .default([]);
+
 const policySchema = z
   .object({
     allowAllOperations: z.boolean().optional(),
@@ -150,6 +162,8 @@ const policySchema = z
       .default(''),
     browserProxyConnectByHostname: z.boolean().default(false),
     operationMode: z.enum(['read_only', 'standard', 'ask']).optional(),
+    consequentialAllowLabels: consequentialLabels,
+    consequentialDenyLabels: consequentialLabels,
     allowedOrigins: z.array(origin).max(64).default([]),
     resourceOrigins: z.array(origin).max(64).default([]),
     allowPersonalData: z.boolean().default(false),
@@ -252,6 +266,17 @@ function originKey(u: URL): string {
   return `${u.protocol}//${host.toLowerCase()}${port}`;
 }
 
+/** Normalized, de-duplicated list entries. An entry that normalizes to fewer than 2 or more than 64 characters is invalid. */
+export function normalizeLabelList(list: readonly string[]): string[] {
+  const out = new Set<string>();
+  for (const entry of list) {
+    const normalized = normalizeLabel(entry);
+    if (normalized.length < 2 || normalized.length > 64) throw new AdlError('E_INVALID_ARGUMENT');
+    out.add(normalized);
+  }
+  return [...out];
+}
+
 export function parsePolicy(input: unknown): PolicyConfig {
   const parsed = policySchema.safeParse(input ?? {});
   if (!parsed.success) throw new AdlError('E_INVALID_ARGUMENT');
@@ -282,8 +307,12 @@ export function parsePolicy(input: unknown): PolicyConfig {
       if (target.gestures.enabled && !target.visual?.enabled) throw new AdlError('E_INVALID_ARGUMENT');
     }
   }
+  const hidden = value.browserTargets.filter(t => t.classification !== 'PUBLIC' && t.classification !== 'INTERNAL');
   return {
     ...value,
+    ...(hidden.length ? { hiddenTargetOrigins: [...new Set(hidden.map(t => new URL(t.url).origin))] } : {}),
+    consequentialAllowLabels: normalizeLabelList(value.consequentialAllowLabels ?? []),
+    consequentialDenyLabels: normalizeLabelList(value.consequentialDenyLabels ?? []),
     allowedOrigins: [...new Set(value.allowedOrigins.map(o => new URL(o).origin))],
     resourceOrigins: [...new Set((value.resourceOrigins ?? []).map(o => new URL(o).origin))],
     browserTargets: value.browserTargets.filter(t => t.classification === 'PUBLIC' || t.classification === 'INTERNAL'),
@@ -609,6 +638,8 @@ export function authorizeAction(action: Action, element?: Element, allowAllOpera
     return;
   }
   if (action.action === 'back') return;
+  // Page scroll (browser only; the engine validates the surface and direction) reads and changes no element.
+  if (action.action === 'scroll' && action.element_id === undefined && !element) return;
   if (
     action.action === 'press' &&
     ![

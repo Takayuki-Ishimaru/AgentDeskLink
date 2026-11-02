@@ -36,6 +36,8 @@ export interface Settings {
   allowUnredactedImages: boolean;
   allowLoopback: boolean;
   allowPrivateNetwork: boolean;
+  consequentialAllowLabels: string[];
+  consequentialDenyLabels: string[];
 }
 
 export function readSettings(): Settings {
@@ -60,6 +62,8 @@ export function readSettings(): Settings {
     allowUnredactedImages: c.get<boolean>('allowUnredactedImages', false),
     allowLoopback: c.get<boolean>('allowLoopback', false),
     allowPrivateNetwork: c.get<boolean>('allowPrivateNetwork', false),
+    consequentialAllowLabels: c.get<string[]>('consequentialAllowLabels', []),
+    consequentialDenyLabels: c.get<string[]>('consequentialDenyLabels', []),
   };
 }
 
@@ -77,6 +81,8 @@ function grantInput(s: Settings): ExtensionPermissions {
     allowUnredactedImages: s.allowUnredactedImages,
     allowLoopback: s.allowLoopback,
     allowPrivateNetwork: s.allowPrivateNetwork,
+    consequentialAllowLabels: s.consequentialAllowLabels,
+    consequentialDenyLabels: s.consequentialDenyLabels,
   };
 }
 function resolvePermissions(s: Settings): { grants: ExtensionPermissions; error: string | null } {

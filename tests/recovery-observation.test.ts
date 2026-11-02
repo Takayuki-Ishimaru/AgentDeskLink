@@ -340,7 +340,7 @@ test(
       assert.ok(names.some(name => name.includes('Public notes') && name.includes('[redacted]')));
       assert.ok(!JSON.stringify(state).includes('CANARY_'));
       assert.equal(state.truncated, false);
-      assert.equal(state.elements_truncated, false);
+      assert.ok(!('elements_truncated' in state));
       assert.equal(state.text_clipped, true);
     } finally {
       await f.close();

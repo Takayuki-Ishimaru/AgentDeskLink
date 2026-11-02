@@ -272,6 +272,34 @@ class Gtk4Test(ScenarioBase):
         snapshot = helper.ok('snapshot', target_id=target['target_id'], session_id=session_id)
         self.assertEqual(self.act(helper, target, session_id, snapshot, 'textbox', 'Password', action='fill', value='x')['error']['code'], 'E_PRIVACY_BLOCKED')
 
+    def test_button_label_children_fold_into_the_button(self):
+        # GTK 4 exposes a button's label as a child accessible with the same text; it is not listed a second time.
+        helper = self.helper()
+        _target, _session_id, snapshot = self.session(helper)
+        elements = snapshot['elements']
+        for name in ('Run', 'Async', 'Pair'):
+            self.assertIsNotNone(by(elements, role='button', name=name), name)
+            self.assertEqual([e['role'] for e in elements if e.get('name') == name], ['button'], name)
+        # A separate label beside a button is still listed.
+        self.assertIsNotNone(by(elements, role='text', name='Pair note'))
+
+    def test_action_result_includes_the_update_that_follows_it(self):
+        # The click handler runs on a later main-loop turn and the label changes 80 ms after it: the helper waits for
+        # the tree to settle, so a snapshot taken right after the act already shows the change under a new revision.
+        helper = self.helper()
+        target, session_id, snapshot = self.session(helper)
+        before = by(snapshot['elements'], role='text', name_prefix='Async:')['name']
+        started = time.monotonic()
+        self.assertEqual(self.act(helper, target, session_id, snapshot, 'button', 'Async', action='click').get('result'), {'applied': True})
+        after = helper.ok('snapshot', target_id=target['target_id'], session_id=session_id)
+        elapsed = time.monotonic() - started
+        shown = by(after['elements'], role='text', name_prefix='Async:')['name']
+        self.assertNotEqual(shown, before)
+        self.assertTrue(shown.startswith('Async: done '), shown)
+        self.assertGreater(after['revision'], snapshot['revision'])
+        # Measured in the headless desktop; the bound leaves room for a slower CI machine.
+        self.assertLess(elapsed, 1.5, 'act + snapshot took %.2f s' % elapsed)
+
 
 class QtTest(ScenarioBase):
     script = os.path.join(FIXTURES, 'fixture_qt.py')

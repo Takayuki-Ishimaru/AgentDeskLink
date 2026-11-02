@@ -73,6 +73,22 @@ type Task = {
   error?: ReturnType<typeof safeError>;
   created: number;
 };
+type ApprovalProof = {
+  proof: string;
+  risk: 'ordinary' | 'credential' | 'consequential';
+  role: string;
+  name: string;
+  origin?: string;
+  application?: string;
+  details?: string[];
+};
+type TerminalApproval = 'denied' | 'consumed' | 'invalidated' | 'expired';
+/** A human's rejection is final (approval_denied); an expiry asks to observe again; everything else was withdrawn or already used. */
+function approvalRefusal(status: TerminalApproval) {
+  return status === 'expired'
+    ? new AdlError('E_STALE_STATE', 'approval_expired')
+    : new AdlError('E_POLICY_DENIED', status === 'denied' ? 'approval_denied' : 'approval_invalidated');
+}
 type PendingApproval = {
   request_id: string;
   binding: string;
@@ -95,6 +111,19 @@ function canonical(value: unknown): unknown {
 }
 function invalid(argument: string, reason: ErrorReason = 'invalid_argument') {
   return new AdlError('E_INVALID_ARGUMENT', reason, { argument });
+}
+/** A browser scroll without element_id scrolls the page itself (the main frame's scrolling element). */
+function isPageScroll(action: Action, surface: 'browser' | 'desktop'): boolean {
+  return action.action === 'scroll' && surface === 'browser' && action.element_id === undefined && !action.point;
+}
+/** An approval request error for a form submission: the request id stays, the response names the revision the identical retry must use. */
+function submissionRequest(error: AdlError, revision: number) {
+  const next = new AdlError(error.code, error.reason ?? 'form_submission_requires_approval', {
+    ...error.detail,
+    revision,
+  });
+  if (error.requestId) next.requestId = error.requestId;
+  return next;
 }
 function badArgument(error: { issues: readonly { path: readonly PropertyKey[] }[] }, known: readonly string[]) {
   const key = error.issues[0]?.path[0];
@@ -128,7 +157,8 @@ export class Engine {
   private readonly approvalKey = randomBytes(32);
   private readonly approvalServerId = randomUUID();
   private readonly approvalPending = new Map<string, PendingApproval>();
-  private readonly approvalTerminal = new Map<string, number>();
+  /** Bindings whose request ended (until it would have expired): what ended it decides the refusal an identical retry gets. */
+  private readonly approvalTerminal = new Map<string, { expires: number; status: TerminalApproval }>();
   private queue: Promise<unknown> = Promise.resolve();
   private readonly sessionQueues = new Map<string, Promise<unknown>>();
   private desktopLane: Promise<unknown> | undefined;
@@ -270,7 +300,7 @@ export class Engine {
         same_origin_iframe: true,
         cross_origin_iframe_approval: false,
       },
-      version: '0.1.7',
+      version: '0.1.8',
       transport: 'stdio',
       modes: [
         'strict_isolated',
@@ -561,7 +591,7 @@ export class Engine {
     const entry = this.approvalPending.get(sessionId);
     if (!entry) return;
     this.approvalPending.delete(sessionId);
-    this.approvalTerminal.set(entry.binding, entry.expires_at);
+    this.approvalTerminal.set(entry.binding, { expires: entry.expires_at, status: 'invalidated' });
     await this.approval?.request('DELETE', `/v1/requests/${entry.request_id}`, entry).catch(() => undefined);
   }
   private stopAdapter(adapter: AdapterSession): Promise<void> {
@@ -707,6 +737,18 @@ export class Engine {
       }
     return undefined;
   }
+  // A configured target id (application_id) also resolves as an alias while exactly one listed
+  // target uses it. Desktop ids resolve only after listTargets refreshed the catalogue, so
+  // resolution never calls discover and never creates targets; a resolved alias goes through the
+  // same openInternal checks as a generated id.
+  private resolveConfiguredAlias(alias: string): Target | undefined {
+    const live = new Set([...this.sessions.values()].map(x => x.target.target_id));
+    const matches = [
+      ...this.targets.values(),
+      ...[...this.urlTargets.values()].map(entry => entry.target).filter(t => live.has(t.target_id)),
+    ].filter(t => t.application_id === alias);
+    return matches.length === 1 ? matches[0] : undefined;
+  }
   private openGranted(parsed: URL): Target {
     const origin = parsed.origin;
     // A bounded per-process target catalogue lets clients open a URL without a policy file.
@@ -760,7 +802,7 @@ export class Engine {
   }
   open(target_id: string, mode: Mode = 'strict_isolated', cancel?: AbortSignal) {
     return this.enqueue(async () => {
-      const target = this.findTarget(target_id);
+      const target = this.findTarget(target_id) ?? this.resolveConfiguredAlias(target_id);
       if (!target) throw new AdlError('E_TARGET_NOT_FOUND', 'unknown_target', { argument: 'target_id' });
       return target.surface === 'desktop'
         ? this.enqueueDesktop(() => this.openInternal(target, mode, cancel))
@@ -825,6 +867,8 @@ export class Engine {
         revision: 1,
         capabilities: instance.capabilities ?? target.capabilities,
         mode,
+        // Reported only for an error response (400 or higher), so an opened 404 page is not mistaken for a real one.
+        ...(raw.http_status !== undefined ? { http_status: raw.http_status } : {}),
       };
     } catch (error) {
       if (instance) await this.stopAdapter(instance);
@@ -864,7 +908,7 @@ export class Engine {
         s.target.surface === 'desktop' && this.platform === 'linux' ? 'platform_unsupported' : undefined,
       );
     const config = s.target.surface === 'browser' ? this.browserConfig(s.target.application_id) : this.desktopConfig();
-    if (!config?.visual?.enabled) throw new AdlError('E_PRIVACY_BLOCKED');
+    if (!config?.visual?.enabled) throw new AdlError('E_PRIVACY_BLOCKED', 'capture_not_enabled');
   }
   private desktopConfig() {
     return this.platform === 'darwin'
@@ -1214,20 +1258,18 @@ export class Engine {
         const make = (count: number): ObserveResult => {
           const content = chars.slice(0, count).join(''),
             next = offset + content.length < read.total_length ? offset + content.length : null;
+          const redactions = (content.match(/\[redacted\]/g) ?? []).length;
           return {
             ok: true,
-            session_id: s.id,
             revision: s.revision,
-            redactions: (content.match(/\[redacted\]/g) ?? []).length,
+            ...(redactions > 0 ? { redactions } : {}),
             truncated: read.truncated || next !== null,
-            next_cursor: null,
             text: {
               element_id,
               offset,
               content,
               total_length: read.total_length,
               next_offset: next,
-              truncated: read.truncated || next !== null,
             },
           };
         };
@@ -1248,38 +1290,75 @@ export class Engine {
       });
     });
   }
-  async approvals(requestId?: string) {
-    if (!this.approval) return { ok: true, requests: [] };
-    const rows = [...this.approvalPending.values()].filter(p => !requestId || p.request_id === requestId);
-    const requests = [];
-    for (const entry of rows) {
-      const reply = await this.approval.request('GET', `/v1/requests/${entry.request_id}`, entry);
-      requests.push({
-        request_id: entry.request_id,
-        status: reply.status,
-        expires_at: entry.expires_at,
-        summary: entry.summary,
-      });
+  /**
+   * Reports this engine's own approval requests. With waitMs (0-30000) it polls the broker every 500 ms until a request is decided, withdrawn or
+   * expired, the wait ends, or the caller / engine cancels: timed_out:true means every request it reported is still pending. It only reads: it never
+   * decides, consumes or withdraws a request, and it holds no session lane.
+   */
+  async approvals(requestId?: string, waitMs = 0, cancel?: AbortSignal) {
+    if (!Number.isInteger(waitMs) || waitMs < 0 || waitMs > 30000) throw invalid('wait_ms');
+    const started = Date.now(),
+      deadline = started + waitMs;
+    const signal = AbortSignal.any([this.master.signal, ...(cancel ? [cancel] : [])]);
+    const cancelled = () =>
+      new AdlError('E_CANCELLED', this.stopped || !this.operationAllowed() ? 'emergency_stop' : undefined);
+    let waited = false;
+    for (;;) {
+      if (signal.aborted) throw cancelled();
+      const requests = [];
+      if (this.approval)
+        for (const entry of [...this.approvalPending.values()].filter(p => !requestId || p.request_id === requestId)) {
+          // The broker forgets a request once it has expired, so one past its expiry is reported without asking.
+          const status =
+            entry.expires_at <= Date.now()
+              ? ('expired' as const)
+              : (await this.approval.request('GET', `/v1/requests/${entry.request_id}`, entry)).status;
+          requests.push({ request_id: entry.request_id, status, expires_at: entry.expires_at, summary: entry.summary });
+        }
+      const pending = requests.length > 0 && requests.every(r => r.status === 'pending');
+      if (!pending || Date.now() >= deadline)
+        return {
+          ok: true,
+          requests,
+          waited_ms: waited ? Date.now() - started : 0,
+          ...(pending && waitMs > 0 ? { timed_out: true } : {}),
+        };
+      waited = true;
+      try {
+        await delay(Math.min(500, Math.max(0, deadline - Date.now())), undefined, { signal });
+      } catch {
+        throw cancelled();
+      }
     }
-    return { ok: true, requests };
   }
+  /** Creates (or resolves) the approval for an action: always throws E_APPROVAL_REQUIRED with the new request id, or returns the expiry of the approval it consumed. */
   private async approvalFor(
     s: Session,
     action: Omit<Action, 'action'> & { action: string },
     expected: number,
-    proof: {
-      proof: string;
-      risk: 'ordinary' | 'credential' | 'consequential';
-      role: string;
-      name: string;
-      origin?: string;
-      application?: string;
-      details?: string[];
-    },
+    proof: ApprovalProof,
     actionEvidence?: { navigation: string; element?: string },
-  ) {
+  ): Promise<number> {
+    return (await this.resolveApproval(s, action, expected, proof, actionEvidence, true))!;
+  }
+  /**
+   * Resolves the pending approval for this session's identical action: pending -> E_APPROVAL_REQUIRED with the same request id, denied, expired or
+   * withdrawn -> refusal, approved -> consumed (the expiry is returned). Without an entry, create=true opens a new request (and throws
+   * E_APPROVAL_REQUIRED with its id) while create=false returns undefined and neither contacts the broker nor changes any state.
+   */
+  private async resolveApproval(
+    s: Session,
+    action: Omit<Action, 'action'> & { action: string },
+    expected: number,
+    proof: ApprovalProof,
+    actionEvidence: { navigation: string; element?: string } | undefined,
+    create: boolean,
+  ): Promise<number | undefined> {
     if (!this.operationAllowed()) throw new AdlError('E_CANCELLED', 'emergency_stop');
-    if (!this.approval) throw new AdlError('E_APPROVAL_REQUIRED', 'approval_unavailable');
+    if (!this.approval) {
+      if (!create) return undefined;
+      throw new AdlError('E_APPROVAL_REQUIRED', 'approval_unavailable');
+    }
     const existing = this.approvalPending.get(s.id);
     const freshness = actionEvidence
       ? { actionEvidence, actionEpoch: s.actionEpoch }
@@ -1304,8 +1383,10 @@ export class Engine {
         ),
       )
       .digest('hex');
-    for (const [key, expires] of this.approvalTerminal) if (expires <= Date.now()) this.approvalTerminal.delete(key);
-    if (this.approvalTerminal.has(binding)) throw new AdlError('E_POLICY_DENIED');
+    for (const [key, tombstone] of this.approvalTerminal)
+      if (tombstone.expires <= Date.now()) this.approvalTerminal.delete(key);
+    const ended = this.approvalTerminal.get(binding);
+    if (ended) throw approvalRefusal(ended.status);
     if (existing) {
       // A different request must not discard a human decision in progress.
       if (existing.binding !== binding && existing.requestKey !== requestKey && existing.expires_at > Date.now())
@@ -1325,8 +1406,13 @@ export class Engine {
         throw error;
       }
       this.approvalPending.delete(s.id);
-      this.approvalTerminal.set(binding, existing.expires_at);
-      if (reply.status !== 'approved' || !this.operationAllowed()) throw new AdlError('E_POLICY_DENIED');
+      // Whatever the broker decided is final for this exact action: remember how it ended (an approval is spent once it is looked at).
+      this.approvalTerminal.set(binding, {
+        expires: existing.expires_at,
+        status: reply.status === 'approved' ? 'consumed' : (reply.status as TerminalApproval),
+      });
+      if (reply.status === 'denied' || reply.status === 'expired') throw approvalRefusal(reply.status);
+      if (reply.status !== 'approved' || !this.operationAllowed()) throw approvalRefusal('invalidated');
       const consumed = await this.approval.request('DELETE', `/v1/requests/${existing.request_id}`, existing);
       if (
         consumed.status !== 'consumed' ||
@@ -1334,9 +1420,10 @@ export class Engine {
         !this.operationAllowed() ||
         existing.expires_at <= Date.now()
       )
-        throw new AdlError('E_POLICY_DENIED');
+        throw approvalRefusal('invalidated');
       return existing.expires_at;
     }
+    if (!create) return undefined;
     for (const entry of this.approvalPending.values())
       if (entry.expires_at <= Date.now()) this.approvalPending.delete(entry.session_id);
     if (this.approvalPending.size >= 8 || this.approvalTerminal.size + this.approvalPending.size >= 128)
@@ -1376,7 +1463,7 @@ export class Engine {
         expires_at: entry.expires_at,
         summary,
       });
-      if (reply.status !== 'pending') throw new AdlError('E_POLICY_DENIED');
+      if (reply.status !== 'pending') throw approvalRefusal(reply.status === 'approved' ? 'invalidated' : reply.status);
     } catch (error) {
       this.approvalPending.delete(s.id);
       throw error;
@@ -1384,6 +1471,78 @@ export class Engine {
     const error = new AdlError('E_APPROVAL_REQUIRED');
     error.requestId = entry.request_id;
     throw error;
+  }
+  /** The action-scoped freshness evidence for a browser action at the expected revision: the page proved unchanged for this target since then, or undefined. */
+  private freshnessFor(
+    s: Session,
+    expected: number,
+    action: Omit<Action, 'action'> & { action: string },
+  ): { navigation: string; element?: string } | undefined {
+    if (
+      s.target.surface !== 'browser' ||
+      action.point ||
+      !['click', 'fill', 'select', 'check', 'press', 'scroll', 'navigate', 'back', 'hover'].includes(action.action)
+    )
+      return undefined;
+    const prior = s.actionHistory.get(expected),
+      current = s.raw.actionEvidence;
+    // Navigation and page scroll depend on the document, not on one element.
+    const navigationOnly =
+      action.action === 'navigate' || action.action === 'back' || isPageScroll(action as Action, s.target.surface);
+    if (
+      prior &&
+      current &&
+      prior.epoch === s.actionEpoch &&
+      prior.evidence.navigation === current.navigation &&
+      (navigationOnly ||
+        (action.element_id &&
+          prior.evidence.elements[action.element_id] !== undefined &&
+          prior.evidence.elements[action.element_id] === current.elements[action.element_id]))
+    )
+      return {
+        navigation: current.navigation,
+        ...(!navigationOnly ? { element: current.elements[action.element_id!] } : {}),
+      };
+    return undefined;
+  }
+  /**
+   * Ask mode dispatches a submit that is consequential only because it submits under the adapter's submission guard. When the guard has stopped a
+   * real submission, nothing has left the browser: refresh, inspect the post-attempt form and open the approval request from that state and revision.
+   * Always throws (the request, or the reason none can be made); the identical retry at the returned revision consumes the approval.
+   */
+  private async requestBlockedSubmission(
+    s: Session,
+    action: Action,
+    blocked: AdlError,
+    signal?: AbortSignal,
+  ): Promise<never> {
+    await this.refresh(s, signal);
+    const revision = s.revision;
+    const element = action.element_id ? s.raw.elements.find(e => e.id === action.element_id) : undefined;
+    // A target the retry could not dispatch on (gone, disabled, protected, now sensitive) is a changed page, not a request to approve.
+    if (!element || element.sensitive) throw new AdlError('E_STALE_STATE');
+    try {
+      authorizeAction(action, element, true);
+    } catch {
+      throw new AdlError('E_STALE_STATE');
+    }
+    const again = await s.adapter.prepareAction!(action, signal ?? this.master.signal);
+    if (again.submission !== 'plain') throw new AdlError('E_STALE_STATE');
+    try {
+      await this.approvalFor(
+        s,
+        action,
+        revision,
+        { ...again, risk: 'consequential' },
+        this.freshnessFor(s, revision, action),
+      );
+    } catch (created) {
+      if (created instanceof AdlError && created.code === 'E_APPROVAL_REQUIRED' && created.requestId)
+        throw submissionRequest(created, revision);
+      throw created;
+    }
+    // approvalFor consumed an approval instead of opening one: the form has not been sent, so report the cancelled submission.
+    throw blocked;
   }
   private async action(s: Session, action: Action, expected: number, signal?: AbortSignal) {
     action = {
@@ -1414,31 +1573,8 @@ export class Engine {
       ))
         throw error;
     }
-    let actionEvidence: { navigation: string; element?: string } | undefined;
-    if (
-      s.target.surface === 'browser' &&
-      !action.point &&
-      ['click', 'fill', 'select', 'check', 'press', 'scroll', 'navigate', 'back', 'hover'].includes(action.action)
-    ) {
-      const prior = s.actionHistory.get(expected),
-        current = s.raw.actionEvidence;
-      const navigationOnly = action.action === 'navigate' || action.action === 'back';
-      if (
-        prior &&
-        current &&
-        prior.epoch === s.actionEpoch &&
-        prior.evidence.navigation === current.navigation &&
-        (navigationOnly ||
-          (action.element_id &&
-            prior.evidence.elements[action.element_id] !== undefined &&
-            prior.evidence.elements[action.element_id] === current.elements[action.element_id]))
-      ) {
-        actionEvidence = {
-          navigation: current.navigation,
-          ...(!navigationOnly ? { element: current.elements[action.element_id!] } : {}),
-        };
-      }
-    }
+    const pageScroll = isPageScroll(action, s.target.surface);
+    const actionEvidence = this.freshnessFor(s, expected, action);
     if (!['read_state', 'wait_for'].includes(action.action) && expected > s.revision)
       throw new AdlError('E_STALE_STATE', 'revision_ahead', { argument: 'expected_revision' });
     if (!['read_state', 'wait_for'].includes(action.action) && s.revision !== expected && !actionEvidence) {
@@ -1460,7 +1596,7 @@ export class Engine {
       !this.policy.allowAllOperations &&
       !['navigate', 'back', 'scroll'].includes(action.action)
     )
-      throw new AdlError('E_POLICY_DENIED', 'operation_not_granted');
+      throw new AdlError('E_POLICY_DENIED', 'read_only_mode');
     if (s.mode === 'interactive_desktop') throw new AdlError('E_UNSUPPORTED_ACTION');
     let pointReference: import('./gesture-types.js').GestureReference | undefined,
       directPoint = false;
@@ -1485,7 +1621,7 @@ export class Engine {
       }
     }
     const element = action.element_id ? s.raw.elements.find(e => e.id === action.element_id) : undefined;
-    if (!directPoint && !['navigate', 'back'].includes(action.action) && !element)
+    if (!directPoint && !pageScroll && !['navigate', 'back'].includes(action.action) && !element)
       throw new AdlError('E_TARGET_NOT_FOUND');
     if (
       action.expected_target &&
@@ -1500,19 +1636,10 @@ export class Engine {
     const modern = tiered && s.target.surface === 'browser' && !['navigate', 'back', 'scroll'].includes(action.action);
     // Native tiers: the same vocabulary gates desktop controls; ask routes consequential controls through the one-shot approval, sensitive controls stay refused.
     const nativeTier = tiered && s.target.surface === 'desktop' && !this.desktopConfig()?.controlsPath;
-    let liveProof:
-      | {
-          proof: string;
-          risk: 'ordinary' | 'credential' | 'consequential';
-          role: string;
-          name: string;
-          origin?: string;
-          application?: string;
-          details?: string[];
-        }
-      | undefined;
+    let liveProof: (ApprovalProof & { submission?: 'plain'; contained?: boolean }) | undefined;
     let approved = false,
-      approvalExpires: number | undefined;
+      approvalExpires: number | undefined,
+      plainAsk = false;
     // A desktop target whose helper grants no mutation at all (read_only) refuses every mutation with the setting to change,
     // before a vocabulary check could suggest an approval. The adapter's advertised capabilities are the grant actually in force.
     const nativeMutations = ['click', 'fill', 'select', 'check', 'scroll'];
@@ -1528,10 +1655,36 @@ export class Engine {
       liveProof = await s.adapter.prepareAction(action, signal ?? this.master.signal);
       if (element?.sensitive) liveProof = { ...liveProof, risk: 'credential' };
       const sensitiveValue = typeof action.value === 'string' && describeApprovalValue(action.value).kind === 'secret';
-      if (liveProof.risk !== 'ordinary' || sensitiveValue) {
+      // Standard mode has nobody to ask: a verb that may stay in the session is dispatched with the network closed (see armContainment).
+      const contained =
+        liveProof.contained && liveProof.risk === 'consequential' && this.policy.operationMode === 'standard';
+      if (sensitiveValue || (liveProof.risk !== 'ordinary' && !contained)) {
         if (this.policy.operationMode !== 'ask') throw new AdlError('E_APPROVAL_REQUIRED', 'requires_ask_mode');
         approvalExpires = await this.approvalFor(s, action, expected, liveProof, actionEvidence);
         approved = true;
+      } else if (this.policy.operationMode === 'ask' && liveProof.submission === 'plain') {
+        // Consequential only because it submits: dispatch under the adapter's submission guard like standard mode, and open the request only if
+        // the guard stops a real submission (see requestBlockedSubmission). An identical retry resolves the request made then: pending returns
+        // the same request id without dispatching again, denied is final, approved is consumed here and dispatched with the body-bound permit.
+        plainAsk = true;
+        try {
+          const decided = await this.resolveApproval(
+            s,
+            action,
+            expected,
+            { ...liveProof, risk: 'consequential' },
+            actionEvidence,
+            false,
+          );
+          if (decided !== undefined) {
+            approvalExpires = decided;
+            approved = true;
+          }
+        } catch (error) {
+          if (error instanceof AdlError && error.code === 'E_APPROVAL_REQUIRED' && error.requestId)
+            throw submissionRequest(error, expected);
+          throw error;
+        }
       }
     } else if (nativeTier) {
       // The helpers also treat confirm/cancel/order as consequential: decide them here so ask mode can still route them through the approval.
@@ -1638,24 +1791,35 @@ export class Engine {
         ...((outcome as AdapterActResult | undefined)?.warnings ?? []),
         ...(s.raw.warnings ?? []),
       ];
-      let observation: ObserveResult | undefined, observation_error: ReturnType<typeof safeError> | undefined;
+      let observation: Omit<ObserveResult, 'ok' | 'revision' | 'warnings'> | undefined,
+        observation_error: ReturnType<typeof safeError> | undefined;
       if (action.include_diff) {
         try {
-          observation = this.snapshots.observe(s.id, s.revision, {
+          // The outer result already carries ok, revision and warnings.
+          const {
+            ok: _ok,
+            revision: _revision,
+            warnings: _warnings,
+            ...nested
+          } = this.snapshots.observe(s.id, s.revision, {
             token_budget: this.policy.defaultTokenBudget,
             since_revision: beforeRevision,
             element_limit: this.policy.maxElements,
             representation: 'auto',
           });
+          observation = nested;
         } catch (error) {
           observation_error = safeError(error);
         }
       }
       return {
         ok: true,
-        session_id: s.id,
         revision: s.revision,
         audit_id,
+        // A navigation that landed on an error page (400 or higher) says so; observations carry the same field.
+        ...((action.action === 'navigate' || action.action === 'back') && s.raw.http_status !== undefined
+          ? { http_status: s.raw.http_status }
+          : {}),
         ...(networkBlocked ? { network_blocked: true } : {}),
         ...(subresourcesBlocked > 0 ? { subresources_blocked: subresourcesBlocked } : {}),
         ...(warnings.length ? { warnings } : {}),
@@ -1672,6 +1836,14 @@ export class Engine {
       )
         safe.mayHaveExecuted = true;
       if (safe.mayHaveExecuted) await this.destroy(s);
+      if (
+        plainAsk &&
+        !approved &&
+        !safe.mayHaveExecuted &&
+        safe.code === 'E_APPROVAL_REQUIRED' &&
+        safe.reason === 'form_submission_requires_approval'
+      )
+        await this.requestBlockedSubmission(s, action, safe, signal);
       throw safe;
     }
   }
@@ -1699,7 +1871,7 @@ export class Engine {
             );
           const matched =
             condition.state === 'hidden' ? !element : condition.state === 'enabled' ? !!element?.enabled : !!element;
-          if (matched) return { ok: true, session_id: s.id, revision: s.revision, matched: true };
+          if (matched) return { ok: true, revision: s.revision, matched: true };
           await delay(50, undefined, { signal });
         }
       },
@@ -1786,12 +1958,17 @@ export class Engine {
         action.element_id)
     )
       throw invalid('point');
+    // A browser scroll without element_id scrolls the page itself and needs the direction.
+    const pageScroll = isPageScroll(action, surface);
     if (
       ['click', 'fill', 'select', 'check', 'scroll', 'press', 'hover'].includes(action.action) &&
       !action.element_id &&
-      !action.point
+      !action.point &&
+      !pageScroll
     )
       throw invalid('element_id');
+    if (pageScroll && (action.direction === undefined || action.expected_target !== undefined))
+      throw invalid(action.direction === undefined ? 'direction' : 'expected_target');
     if (action.direction !== undefined && !['up', 'down'].includes(action.direction)) throw invalid('direction');
     if (action.timeout_ms !== undefined && (!Number.isSafeInteger(action.timeout_ms) || action.timeout_ms < 1))
       throw invalid('timeout_ms');

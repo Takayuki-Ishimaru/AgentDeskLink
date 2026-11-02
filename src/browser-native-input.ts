@@ -1,6 +1,6 @@
 import type { ElementHandle, Frame, Page } from 'playwright';
 import { AdlError } from './types.js';
-import { isolatedCollect, hitPointOf } from './browser-approval.js';
+import { isolatedCollect, hitPointOf, offsetPointOf } from './browser-approval.js';
 import type { BrowserIntegrity } from './browser-integrity.js';
 
 // Playwright's injected actionability code reads properties of the target's
@@ -98,8 +98,9 @@ const sameBox = (
   b: { x: number; y: number; width: number; height: number },
 ) => a.x === b.x && a.y === b.y && a.width === b.width && a.height === b.height;
 
-// Visible, enabled and stable (same box on consecutive reads), scrolled into view; returns the click point.
-async function settle(c: NativeInput): Promise<{ x: number; y: number }> {
+// Visible, enabled and stable (same box on consecutive reads), scrolled into view; returns the click point: the one the preflight
+// verified (its offset from the box origin) or, without one, the centre of the visible box.
+async function settle(c: NativeInput, offset?: { x: number; y: number }): Promise<{ x: number; y: number }> {
   await c.el.scrollIntoViewIfNeeded(c.opts);
   const state = await c.el.evaluate((node, key) => {
     if (!(window as unknown as Record<string, BrowserIntegrity>)[key]?.check()) throw new Error('ADL_UNTRUSTED_DOM');
@@ -127,7 +128,8 @@ async function settle(c: NativeInput): Promise<{ x: number; y: number }> {
     box = next;
   }
   if (!stable || !box) throw new AdlError('E_STALE_STATE');
-  const point = hitPointOf(box, c.page.viewportSize());
+  const viewport = c.page.viewportSize(),
+    point = offset ? offsetPointOf(box, offset, viewport) : hitPointOf(box, viewport);
   if (!point) throw new AdlError('E_STALE_STATE', 'not_visible');
   return point;
 }
@@ -136,8 +138,10 @@ async function settle(c: NativeInput): Promise<{ x: number; y: number }> {
 const proveHit = (c: NativeInput, point: { x: number; y: number }) =>
   isolatedCollect(c.el, () => true, null, c.allowedFrameOrigins, c.frame, point);
 
-export async function nativeClick(c: NativeInput): Promise<void> {
-  const point = await settle(c);
+// `offset` is the click point the preflight proved unobstructed, relative to the element's box origin. The same point is proven by CDP,
+// hovered and clicked: it is never recomputed between those steps.
+export async function nativeClick(c: NativeInput, offset?: { x: number; y: number }): Promise<void> {
+  const point = await settle(c, offset);
   await proveHit(c, point);
   if (c.signal.aborted) throw new AdlError('E_CANCELLED');
   await c.page.mouse.move(point.x, point.y);

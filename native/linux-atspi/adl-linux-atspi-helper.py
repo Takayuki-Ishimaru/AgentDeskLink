@@ -25,6 +25,16 @@ MAX_TARGETS = 32
 MAX_SESSIONS = 32
 WALK_DEADLINE_S = 3.5
 READBACK_S = 0.4
+SETTLE_QUIET_S = 0.15  # the tree must stay unchanged this long after an action before the helper returns
+SETTLE_CAP_S = 0.6  # bounds the wait for apps that never settle (clocks, progress)
+# A toolkit reports a change only after the app's own main loop has caught up (GTK 4 needs ~0.35 s for a label set
+# 80 ms after a click), so the wait must outlast that before concluding "nothing changed"; events seen earlier extend it.
+SETTLE_GRACE_S = 0.45
+SETTLE_INTERVAL_S = 0.02
+# libatspi only receives these and refreshes its cache from them when a client listens; the settle wait uses them
+# as the change signal, which is far cheaper than re-walking the tree and also catches text the app sets later.
+SETTLE_EVENTS = ('object:property-change:accessible-name', 'object:text-changed', 'object:children-changed',
+                 'object:state-changed', 'object:property-change:accessible-value')
 PUBLIC_ROLES = ('button', 'textbox', 'checkbox', 'radio', 'combobox', 'option', 'listitem', 'link', 'tab', 'menuitem', 'slider', 'spinbutton')
 # Qt 5 exposes a top-level QWidget as a "filler" child of the application (there is no frame accessible).
 WINDOW_ROLES = ('frame', 'dialog', 'window', 'filler')
@@ -384,6 +394,10 @@ class Backend:
         self.app_path = os.path.realpath(app_path)
         self.targets = {}
         self.sessions = {}
+        self._toolkit_gtk4 = {}  # application accessible -> is GTK 4 (is_enabled needs it per node without a round trip each time)
+        self._event_listener = None  # registered once per process; libatspi keeps the callback alive through it
+        self._event_pid = None  # pid whose changes the settle wait is watching, None between actions
+        self._event_at = 0.0  # monotonic time of the last event seen for _event_pid
 
     # ---- GLib / AT-SPI plumbing -------------------------------------------------
     @property
@@ -411,7 +425,11 @@ class Backend:
             return True
         try:
             application = node.get_application()
-            return (application.get_toolkit_name() or '').lower() == 'gtk' and (application.get_toolkit_version() or '').startswith('4')
+            cached = self._toolkit_gtk4.get(application)
+            if cached is None:
+                cached = (application.get_toolkit_name() or '').lower() == 'gtk' and (application.get_toolkit_version() or '').startswith('4')
+                self._toolkit_gtk4[application] = cached
+            return cached
         except Exception:
             return False
 
@@ -595,6 +613,7 @@ class Backend:
             raise HelperError('E_UNSUPPORTED_ACTION', 'physical input is unsupported on Linux')
         self.pump()
         self.live_target(target_id)
+        self.watch_events()  # listeners need a round trip to take effect: register while the session opens, not on the first action
         if len(self.sessions) >= MAX_SESSIONS:
             raise HelperError('E_RESOURCE_LIMIT', 'too many sessions')
         session_id = 's_' + secrets.token_hex(12)
@@ -629,6 +648,8 @@ class Backend:
         states = self.states(node)
         if states is None or 'defunct' in states:
             return None
+        if atspi_role == 'label' and parent_role in ('push button', 'toggle button'):
+            return None  # GTK 4 exposes a button's label as a child accessible; the button name already carries that text
         public = ROLE_MAP.get(atspi_role, 'generic')
         if not parent_role and atspi_role in WINDOW_ROLES:
             public = 'window'  # the walk root is the target window whatever role its toolkit gives it
@@ -693,9 +714,7 @@ class Backend:
         state = {'truncated': False}
 
         def visit(node, parent_role, grand_role):
-            if self.has(node, 'DEFUNCT'):
-                return False
-            classified = self.classify(node, parent_role, grand_role)
+            classified = self.classify(node, parent_role, grand_role)  # classify already drops defunct nodes; a second state read here doubled every walk step
             if classified is None:
                 return True
             record, atspi_role, accessible_id, states, raw_name = classified
@@ -724,6 +743,47 @@ class Backend:
             session['fingerprint'] = fingerprint
         session['handles'], session['ids'] = handles, ids
         return {'revision': session['revision'], 'truncated': truncated, 'elements': elements}
+
+    # ---- settle wait --------------------------------------------------------------
+    def watch_events(self):
+        """Register the AT-SPI event listeners once per process: an application emits an event type only when some client listens to it."""
+        if self._event_listener is not None:
+            return
+        try:
+            listener = self.A.EventListener.new(self.on_a11y_event)
+            for event_type in SETTLE_EVENTS:
+                listener.register(event_type)
+        except Exception:
+            return  # without listeners the settle wait just waits out the quiet period; the next snapshot still sees the update
+        self._event_listener = listener
+
+    def on_a11y_event(self, event, *unused):
+        """Runs inside pump(): stamp the last change of the application the settle wait watches."""
+        try:
+            if self._event_pid is not None and event.source is not None and event.source.get_process_id() == self._event_pid:
+                self._event_at = time.monotonic()
+        except Exception:
+            pass
+
+    def wait_for_settle(self, target, quiet_s=SETTLE_QUIET_S, cap_s=SETTLE_CAP_S):
+        """Wait until the target application stops reporting accessibility changes for quiet_s (bounded by cap_s): apps update the tree on later main-loop turns."""
+        self.watch_events()
+        started = time.monotonic()
+        deadline = started + cap_s
+        self._event_at, self._event_pid = started, target['pid']
+        try:
+            while time.monotonic() < deadline:
+                time.sleep(min(SETTLE_INTERVAL_S, max(0.0, deadline - time.monotonic())))
+                self.pump()
+                now = time.monotonic()
+                if self._event_at > started:
+                    if now - self._event_at >= quiet_s:
+                        return
+                elif now - started >= SETTLE_GRACE_S:
+                    return  # the application reported no change at all within the grace period
+        finally:
+            self._event_pid = None
+        self.pump()  # an event that arrived with the cap exhausted must still reach the cache before the snapshot
 
     # ---- focus probe ------------------------------------------------------------
     def focus_signature(self, target):
@@ -782,6 +842,7 @@ class Backend:
             raise
         if dispatched:
             self.pump()
+            self.wait_for_settle(target)
             after = self.focus_signature(target)
             if after != before:
                 self.sessions.pop(session['id'], None)
@@ -840,7 +901,6 @@ class Backend:
             raise HelperError('E_INTERNAL', 'the click action failed', may_have_executed=True)
         if not ok:
             raise HelperError('E_NOT_INTERACTABLE', 'the control refused the click action')
-        time.sleep(0.05)
         return True
 
     def do_fill(self, node, handle, value):

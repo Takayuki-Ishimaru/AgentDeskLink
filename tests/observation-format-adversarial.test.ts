@@ -76,16 +76,9 @@ test('every explicit format value is checked while json stays byte-compatible wi
   const json = JSON.parse(absent);
   assert.equal(json.format, undefined);
   assert.equal(json.defaults, undefined);
-  assert.deepEqual(Object.keys(json), [
-    'ok',
-    'session_id',
-    'revision',
-    'elements',
-    'redactions',
-    'truncated',
-    'elements_truncated',
-    'next_cursor',
-  ]);
+  // No metadata, no redactions and no further page: only the essential keys remain.
+  assert.deepEqual(Object.keys(json), ['ok', 'revision', 'elements', 'truncated']);
+  assert.deepEqual(json.elements, [{ id: 'e1', role: 'button', name: 'Hi' }], 'enabled:true and value:"" are omitted');
 });
 
 test('json, compact and lines keep exact UTF-8 budgets with unicode metadata and cursor pages', () => {
@@ -118,7 +111,9 @@ test('json, compact and lines keep exact UTF-8 budgets with unicode metadata and
   }
 });
 
-test('compact omits only declared defaults and reconstructs json across full and delta pages', () => {
+// Every format omits the documented defaults; format "compact" is an alias of json.
+const DEFAULTS = { enabled: true, value: '' } as const;
+test('every format omits only the documented defaults and reconstructs the stored state across full and delta pages', () => {
   const state = (enabled: boolean, value: string, i: number): Element => ({
     id: `c${enabled ? 'T' : 'F'}${value ? 'V' : 'E'}${i}`,
     role: 'button',
@@ -133,7 +128,7 @@ test('compact omits only declared defaults and reconstructs json across full and
   store.record('s', 2, src(after));
   const compact = store.observe('s', 1, { token_budget: 8000, format: 'compact' });
   const json = store.observe('s', 1, { token_budget: 8000 });
-  assert.deepEqual(compact.defaults, { enabled: true, value: '' });
+  assert.equal(JSON.stringify(compact), JSON.stringify(json), 'compact is an alias of json');
   assert.equal(compact.elements!.length, 4);
   const byId = new Map(compact.elements!.map((e): [string, Element] => [e.id, e]));
   assert.deepEqual([...byId.keys()].sort(), ['cFE3', 'cFV4', 'cTE1', 'cTV2']);
@@ -145,11 +140,8 @@ test('compact omits only declared defaults and reconstructs json across full and
   assert.equal('value' in byId.get('cFE3')!, false);
   assert.equal(byId.get('cFV4')!.enabled, false);
   assert.equal(byId.get('cFV4')!.value, 'stale');
-  const rebuilt = new Map(compact.elements!.map(e => [e.id, { ...compact.defaults!, ...e }]));
-  assert.deepEqual(
-    new Map([...rebuilt].sort()),
-    new Map(json.elements!.map((e): [string, Element] => [e.id, e]).sort()),
-  );
+  const rebuilt = new Map(compact.elements!.map(e => [e.id, { ...DEFAULTS, ...e }]));
+  assert.deepEqual(new Map([...rebuilt].sort()), new Map(before.map((e): [string, Element] => [e.id, e]).sort()));
   assert.equal((rebuilt.get('cFV4') as Element).value, 'stale');
   const deltaCompact = store.observe('s', 2, {
     token_budget: 8000,
@@ -162,17 +154,18 @@ test('compact omits only declared defaults and reconstructs json across full and
   for (const c of deltaCompact.changes!) {
     const twin = deltaJson.changes!.find(x => x.id === c.id)!;
     assert.equal(c.op, twin.op);
-    if (c.element) assert.deepEqual({ ...deltaCompact.defaults!, ...c.element }, twin.element);
+    if (c.element) assert.deepEqual(c.element, twin.element);
   }
-  const merged = new Map(compact.elements!.map(e => [e.id, { ...compact.defaults!, ...e }]));
+  assert.equal(JSON.stringify(deltaCompact), JSON.stringify(deltaJson));
+  const merged = new Map(compact.elements!.map(e => [e.id, { ...DEFAULTS, ...e }]));
   for (const c of deltaCompact.changes!) {
     if (c.op === 'removed') merged.delete(c.id);
-    else merged.set(c.id, { ...deltaCompact.defaults!, ...c.element! });
+    else merged.set(c.id, { ...DEFAULTS, ...c.element! });
   }
   const after2 = store.observe('s', 2, { token_budget: 8000 });
   assert.deepEqual(
     new Map([...merged].sort()),
-    new Map(after2.elements!.map((e): [string, Element] => [e.id, e]).sort()),
+    new Map(after2.elements!.map((e): [string, Element] => [e.id, { ...DEFAULTS, ...e }]).sort()),
   );
   assert.equal((merged.get('cFV3') as Element).enabled, false);
   assert.equal((merged.get('cFV3') as Element).value, 'back');
@@ -198,7 +191,9 @@ test('lines escape page-controlled text so no row is forged and delta ops are pr
   assert.equal(full.elements, undefined);
   assert.equal(full.changes, undefined);
   assert.ok(full.lines!.every(s => !s.includes('\n') && !s.includes('\r') && !s.includes('\t')));
-  assert.ok(full.lines![0]!.startsWith(`${JSON.stringify(evilId)} "text" ${JSON.stringify(evil)} `));
+  // The hostile id does not match the safe pattern, so it is JSON-quoted; the role is bare.
+  assert.ok(full.lines![0]!.startsWith(`${JSON.stringify(evilId)} text ${JSON.stringify(evil)} `));
+  assert.ok(full.lines![1]!.startsWith('e2 textbox "'), full.lines![1]);
   assert.ok(full.lines![0]!.includes('"keep \\"me\\"\\n"'));
   assert.ok(full.lines![0]!.includes('enabled=false'));
   assert.ok(!JSON.stringify(full).includes('CANARY_Lines_Leak'));
@@ -221,8 +216,8 @@ test('lines escape page-controlled text so no row is forged and delta ops are pr
   assert.equal(delta.changes, undefined);
   assert.equal(delta.elements, undefined);
   assert.deepEqual(delta.lines!.map(s => s.slice(0, 2)).sort(), ['+ ', '+ ', '- ', '~ ']);
-  assert.ok(delta.lines!.some(s => s === '- "e2"'));
-  assert.ok(delta.lines!.some(s => s.startsWith('+ ') && s.includes('"e3"')));
+  assert.ok(delta.lines!.some(s => s === '- e2'));
+  assert.ok(delta.lines!.some(s => s.startsWith('+ e3 button ')));
   assert.ok(delta.lines!.some(s => s.startsWith('~ ') && s.includes('Changed')));
   assert.ok(delta.lines!.every(s => !s.includes('\n') && !s.includes('\t')));
   const removed = store.observe('s', 2, {
@@ -232,7 +227,7 @@ test('lines escape page-controlled text so no row is forged and delta ops are pr
     representation: 'delta',
     scope: 'id:e2',
   });
-  assert.deepEqual(removed.lines, ['- "e2"']);
+  assert.deepEqual(removed.lines, ['- e2']);
 });
 
 test('cursors bind format, budget and representation across every format', () => {
@@ -272,7 +267,7 @@ test('cursors bind format, budget and representation across every format', () =>
     const again = store.observe('s', 1, { token_budget: 256, format: from, cursor }) as ObserveResult;
     assert.ok(payload(again) > 0);
     assert.ok(Buffer.byteLength(JSON.stringify(again)) <= 1024);
-    assert.equal(again.format, first.format);
-    assert.deepEqual(again.defaults, first.defaults);
+    assert.equal('format' in again || 'defaults' in again, false, 'the encoding is never echoed');
+    assert.equal('format' in first || 'defaults' in first, false);
   }
 });

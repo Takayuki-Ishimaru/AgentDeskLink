@@ -106,7 +106,8 @@ test('oversized select options preserve identity and state with explicit recover
     value: 'd042',
     enabled: true,
     selected: true,
-    options: Array.from({ length: 100 }, (_, i) => ({
+    // Lean options are about half the size of the full shape, so the list must be longer to stay oversized.
+    options: Array.from({ length: 200 }, (_, i) => ({
       label: `Destination ${String(i).padStart(3, '0')}`,
       value: `d${String(i).padStart(3, '0')}`,
       disabled: false,
@@ -143,7 +144,9 @@ test('oversized select options preserve identity and state with explicit recover
     assert.equal(found.length, 61);
   }
   const recovered = store.observe('s', 2, { token_budget: 8000, scope: 'id:many' }).elements![0]!;
-  assert.equal(recovered.options?.length, 100);
+  assert.equal(recovered.options?.length, 200);
+  assert.deepEqual(recovered.options?.[0], { label: 'Destination 000', value: 'd000' });
+  assert.deepEqual(recovered.options?.[42], { label: 'Destination 042', value: 'd042', selected: true });
   assert.equal((recovered as any).options_truncated, undefined);
   const projected = store.observe('s', 2, {
     token_budget: 1800,

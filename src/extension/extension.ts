@@ -571,6 +571,8 @@ export function activate(context: vscode.ExtensionContext): void {
           'allowUnredactedImages',
           'allowLoopback',
           'allowPrivateNetwork',
+          'consequentialAllowLabels',
+          'consequentialDenyLabels',
         ].some(k => e.affectsConfiguration(`agentdesklink.${k}`))
       ) {
         void revokePolicy();
@@ -595,6 +597,8 @@ export function activate(context: vscode.ExtensionContext): void {
           'allowUnredactedImages',
           'allowLoopback',
           'allowPrivateNetwork',
+          'consequentialAllowLabels',
+          'consequentialDenyLabels',
         ].some(k => e.affectsConfiguration(`agentdesklink.${k}`))
       ) {
         if (readSettings().syncClients) void syncClients();

@@ -17,9 +17,9 @@ html, body {
 }
 
 body {
-  padding: 10px 12px 24px;
+  padding: 8px 12px 16px;
   box-sizing: border-box;
-  line-height: 1.5;
+  line-height: 1.4;
 }
 
 * { box-sizing: border-box; }
@@ -41,14 +41,14 @@ h2 {
 .version { font-size: 0.85em; color: var(--vscode-descriptionForeground); }
 .intro { margin-top: 6px; }
 h3 { font-size: 1em; font-weight: 600; margin: 0 0 6px; }
-.field-label { display: block; margin: 12px 0 4px; }
-.actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.field-label { display: block; margin: 8px 0 3px; }
+.actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
 .options-section summary { cursor: pointer; font-weight: 600; padding: 6px 0; }
 .support { border-top: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.3)); padding-top: 12px; }
 section, details { min-width: 0; }
 
 .section {
-  margin: 14px 0;
+  margin: 10px 0;
 }
 
 .section-title {
@@ -66,7 +66,7 @@ p, label, .row, .status, .error, .hint {
   flex-wrap: wrap;
   align-items: flex-start;
   gap: 6px;
-  margin: 8px 0;
+  margin: 6px 0;
 }
 
 .row label {
@@ -125,7 +125,7 @@ button, a.button {
   display: inline-block;
   min-width: 0;
   max-width: 100%;
-  min-height: 30px;
+  min-height: 26px;
   white-space: normal;
   overflow-wrap: anywhere;
 }
@@ -158,7 +158,7 @@ button.danger:disabled {
   color: var(--vscode-disabledForeground, rgba(127, 127, 127, 0.5));
 }
 
-.emergency-row { margin: 0 0 10px; }
+.emergency-row { margin: 0 0 6px; }
 
 .hint, .scope {
   color: var(--vscode-descriptionForeground);
@@ -203,12 +203,12 @@ dl.status-list dd { margin: 0; color: var(--vscode-foreground); }
   border: 0;
 }
 
-.perm-title{margin:10px 0 4px;font-size:12px}
+.perm-title{margin:8px 0 3px;font-size:12px}
 ul.permissions{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:2px}
 ul.permissions li{display:flex;justify-content:space-between;gap:8px;font-size:11px}
 .permissions .perm-label{opacity:.8}
 .permissions .perm-value{opacity:.9;word-break:break-all;text-align:right}
-.client-list {list-style:none;padding:0;margin:10px 0;display:flex;flex-direction:column;gap:4px}
+.client-list {list-style:none;padding:0;margin:6px 0;display:flex;flex-direction:column;gap:4px}
 .client-list li {display:flex;justify-content:space-between;gap:12px;font-size:12px}
 .client-list li span:last-child {color:var(--vscode-descriptionForeground);text-align:right}
 
@@ -226,3 +226,34 @@ html[lang="ja"] [data-i18n-en],html[lang="en"] [data-i18n-ja]{display:none!impor
 .client-list.stacked li .browser-path{font-family:var(--vscode-editor-font-family,monospace);font-size:11px;color:var(--vscode-descriptionForeground);text-align:left}
 .client-list.stacked li .browser-note{color:var(--vscode-list-warningForeground,var(--vscode-editorWarning-foreground));font-size:11px;text-align:left}
 .client-list.stacked li{padding:4px 0;border-bottom:1px solid var(--vscode-panel-border,rgba(128,128,128,.2))}
+
+/* What the AI can do now: a text summary (status role, polite live region), not colour-only. */
+.summary-card{margin:6px 0;padding:6px 8px;border-left:3px solid var(--vscode-focusBorder,#007fd4);background:var(--vscode-textBlockQuote-background,rgba(127,127,127,.12))}
+.summary-label{margin:0 0 2px;font-size:.85em;font-weight:600;color:var(--vscode-descriptionForeground)}
+.summary-text,.summary-extra{margin:2px 0;overflow-wrap:anywhere}
+.summary-text:empty{display:none}
+.summary-extra{color:var(--vscode-descriptionForeground);font-size:.92em}
+
+/* First-run checklist: mark, text label and button; done/not-done is always stated in words. */
+.checklist{margin:6px 0;padding:6px 8px;border:1px solid var(--vscode-panel-border,rgba(128,128,128,.4))}
+.checklist-head{display:flex;flex-wrap:wrap;align-items:center;gap:2px 8px}
+.checklist-title{margin:0;font-size:1em;font-weight:600;flex:1 1 auto}
+.checklist-progress{font-size:.92em;color:var(--vscode-descriptionForeground)}
+.checklist-items{list-style:none;margin:4px 0 0;padding:0;display:flex;flex-direction:column;gap:4px}
+.checklist-items li{display:grid;grid-template-columns:1.2em minmax(0,1fr) auto;align-items:center;gap:6px}
+.step-mark{font-weight:700;text-align:center}
+.step-body{min-width:0;overflow-wrap:anywhere}
+.step-state{white-space:nowrap;font-size:.92em;font-weight:600;color:var(--vscode-descriptionForeground)}
+.checklist-items li[data-done="true"] .step-state{color:var(--vscode-testing-iconPassed,var(--vscode-charts-green))}
+button.compact{min-height:24px;padding:1px 8px}
+button.link-button{display:block;margin:2px 0 4px;padding:0;min-height:24px;border:0;background:none;color:var(--vscode-textLink-foreground,#3794ff);text-decoration:underline}
+button.link-button:hover{background:none;color:var(--vscode-textLink-activeForeground,var(--vscode-textLink-foreground))}
+
+/* Collapsed groups keep rarely changed controls out of the way; their summary stays one tappable line. */
+details.group{margin:6px 0;border-top:1px solid var(--vscode-panel-border,rgba(128,128,128,.3))}
+details.group>summary{cursor:pointer;padding:5px 0;font-weight:600}
+details.group[open]>summary{padding-bottom:2px}
+details.section-group>summary{font-size:1em}
+.summary-state{margin-left:8px;font-weight:400;font-size:.92em;color:var(--vscode-descriptionForeground);overflow-wrap:anywhere}
+.summary-state:empty{display:none}
+.section:has(>details.section-group){margin:6px 0}

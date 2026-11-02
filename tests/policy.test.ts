@@ -255,3 +255,52 @@ test('native interactive policy requires image permission and bounds trusted sur
       parsePolicy({ windows: { ...base, visual: { enabled: true }, interactive: { enabled: true, surfaces } } }),
     );
 });
+
+// ---- consequentialAllowLabels / consequentialDenyLabels (design V0.1.7 Part A) ----
+const LABEL_KEYS = ['consequentialAllowLabels', 'consequentialDenyLabels'] as const;
+
+test('label lists default to empty and are normalized and de-duplicated', () => {
+  const p = parsePolicy({});
+  assert.deepEqual(p.consequentialAllowLabels, []);
+  assert.deepEqual(p.consequentialDenyLabels, []);
+  const q = parsePolicy({
+    consequentialAllowLabels: ['Delete', 'delete', ' ＤＥＬＥＴＥ… ', '削除する', 'Delete Item'],
+    consequentialDenyLabels: ['ＤｅｌｅｔｅＩｔｅｍ', 'Sort order'],
+  });
+  assert.deepEqual(q.consequentialAllowLabels, ['delete', '削除', 'delete item']);
+  assert.deepEqual(q.consequentialDenyLabels, ['delete item', 'sort order']);
+  // The boundaries are valid: 64 entries, 64 characters.
+  const edge = parsePolicy({
+    consequentialAllowLabels: Array.from({ length: 64 }, (_, i) => `label ${i}`),
+    consequentialDenyLabels: ['x'.repeat(63) + 'y'],
+  });
+  assert.equal(edge.consequentialAllowLabels!.length, 64);
+  assert.equal(edge.consequentialDenyLabels![0]!.length, 64);
+});
+
+test('label lists reject malformed entries', () => {
+  const bad: unknown[] = [
+    Array.from({ length: 65 }, (_, i) => `label ${i}`), // too many
+    ['x'.repeat(65)], // too long
+    [''], // empty
+    ['bad\u0000label'],
+    ['bad\nlabel'],
+    ['bad\u007flabel'],
+    ['a'], // normalizes to 1 character
+    ['！！x！！'],
+    ['×'],
+    ['する'], // only the verb suffix: normalizes to nothing
+    ['ﷺ'.repeat(4)], // 4 characters, but 72 once NFKC-expanded
+    'Delete',
+    [1],
+    [null],
+    { 0: 'Delete' },
+  ];
+  for (const key of LABEL_KEYS)
+    for (const value of bad)
+      assert.throws(
+        () => parsePolicy({ [key]: value }),
+        { code: 'E_INVALID_ARGUMENT' },
+        `${key} ${JSON.stringify(value)}`,
+      );
+});

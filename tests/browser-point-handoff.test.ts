@@ -151,7 +151,7 @@ test(
   'nested text does not bypass consequential button approval; unstructured canvas needs broad permission',
   { timeout: 15000 },
   async () => {
-    const f = await fixture('<button id="target" type="button"><span>Delete account</span></button>');
+    const f = await fixture('<button id="target" type="button"><span>Send payment</span></button>');
     try {
       const frame = await f.engine.capture(f.id);
       await assert.rejects(
@@ -164,6 +164,23 @@ test(
       );
     } finally {
       await f.close();
+    }
+    // A coordinate click on a Delete is contained like any other: the nested label is still what decides.
+    const contained = await fixture(
+      '<button id="target" type="button" onclick="fetch(\'/gone\')"><span>Delete account</span></button>',
+    );
+    try {
+      const frame = await contained.engine.capture(contained.id);
+      await assert.rejects(
+        contained.engine.act(
+          contained.id,
+          { action: 'click', point: { frame_id: frame.metadata.frame_id, x: 31, y: 29 } },
+          frame.metadata.revision,
+        ),
+        { code: 'E_APPROVAL_REQUIRED', reason: 'requires_ask_mode' },
+      );
+    } finally {
+      await contained.close();
     }
     for (const allowAllOperations of [false, true]) {
       const canvas = await fixture(

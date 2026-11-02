@@ -84,6 +84,33 @@ for (const mode of ['legacy', 'modern'] as const)
       assert.equal(new Set(tools.tools.map(t => t.name)).size, 13);
       for (const name of ['adl_prepare_input', 'adl_commit_input', 'adl_applications', 'adl_app'])
         assert.ok(!tools.tools.some(t => t.name === name));
+      // Size guard: tool definitions are re-sent to the model with every session.
+      const definitionBytes = Buffer.byteLength(JSON.stringify(tools.tools));
+      assert.ok(definitionBytes <= 9000, `tool definitions take ${definitionBytes} bytes (limit 9000)`);
+      // The advertised schemas are lean; the server still validates every call against the full schema.
+      for (const tool of tools.tools) {
+        const advertised = JSON.stringify(tool.inputSchema);
+        assert.ok(!advertised.includes('$schema') && !advertised.includes('"additionalProperties":false'), tool.name);
+      }
+      assert.deepEqual((tools.tools.find(t => t.name === 'adl_act')!.inputSchema as { required?: string[] }).required, [
+        'session_id',
+        'expected_revision',
+        'action',
+      ]);
+      for (const bad of [
+        { name: 'adl_close', arguments: { session_id: 's', extra: 1 } },
+        { name: 'adl_close', arguments: { session_id: 'x'.repeat(101) } },
+        { name: 'adl_close', arguments: { session_id: '' } },
+        { name: 'adl_observe', arguments: { session_id: 's', since_revision: 0 } },
+        { name: 'adl_observe', arguments: { session_id: 's', token_budget: 20000 } },
+        { name: 'adl_wait', arguments: { session_id: 's', condition: { role: 'x' }, timeout_ms: 31000 } },
+        { name: 'adl_execute', arguments: { steps: [], expected_revisions: {} } },
+        {
+          name: 'adl_execute',
+          arguments: { steps: [{ session_id: 's', action: 'click', javascript: 'x' }], expected_revisions: {} },
+        },
+      ])
+        assert.ok((await client.callTool(bad)).isError, JSON.stringify(bad));
       const targets = payload(await client.callTool({ name: 'adl_targets', arguments: {} }));
       assert.deepEqual(targets.targets, []);
       assert.deepEqual(payload(await client.callTool({ name: 'adl_sessions', arguments: {} })).sessions, []);
@@ -103,6 +130,40 @@ for (const mode of ['legacy', 'modern'] as const)
       await client.close();
     }
   });
+test('stdio ask mode: adl_approvals accepts wait_ms up to 30000, rejects the rest, and the instructions say what a denial means', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'adl-approvals-'));
+  const config = join(dir, 'policy.json');
+  await writeFile(config, JSON.stringify({ operationMode: 'ask' }));
+  const { client } = await runClient('legacy', config);
+  try {
+    const tool = (await client.listTools()).tools.find(t => t.name === 'adl_approvals');
+    assert.ok(tool, 'adl_approvals is offered in ask mode');
+    // The advertised schema is trimmed (src/lean-schema.ts); the bound is stated in the description and enforced by validation below.
+    const schema = tool.inputSchema as { properties: Record<string, any> };
+    assert.equal(schema.properties.wait_ms.type, 'integer');
+    assert.match(tool.description ?? '', /wait_ms[^.]*30000/);
+    assert.match(tool.description ?? '', /timed_out/);
+    for (const bad of [30001, -1, 1.5, '5'])
+      assert.ok(
+        (await client.callTool({ name: 'adl_approvals', arguments: { wait_ms: bad } })).isError,
+        `wait_ms ${bad}`,
+      );
+    // Nothing is pending, so even the longest wait returns at once.
+    const started = Date.now();
+    const empty = payload(await client.callTool({ name: 'adl_approvals', arguments: { wait_ms: 30000 } }));
+    assert.deepEqual(
+      { ok: empty.ok, requests: empty.requests, waited_ms: empty.waited_ms, timed_out: empty.timed_out },
+      { ok: true, requests: [], waited_ms: 0, timed_out: undefined },
+    );
+    assert.ok(Date.now() - started < 10000);
+    const instructions = client.getInstructions() ?? '';
+    assert.match(instructions, /adl_approvals \(use wait_ms\)/);
+    assert.match(instructions, /approval_denied means a human refused: do not retry it/);
+  } finally {
+    await client.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
 test('stdio browser workflow, deltas, privacy, audit and cross-process ownership', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'adl-mcp-'));
   const audit = join(dir, 'audit.jsonl');
@@ -145,6 +206,12 @@ test('stdio browser workflow, deltas, privacy, audit and cross-process ownership
     const s = await call('adl_open', { target_id: target.target_id });
     assert.equal(s.ok, true, JSON.stringify(s));
     const p = await call('adl_observe', { session_id: s.session_id });
+    // Lean envelope: the caller's own session_id and the empty fields are not echoed.
+    for (const gone of ['session_id', 'elements_truncated', 'next_cursor', 'format', 'defaults'])
+      assert.ok(!(gone in p), gone);
+    assert.equal(p.truncated, false);
+    assert.equal(typeof p.url, 'string', 'a full observation carries the url');
+    assert.ok(p.elements.every((e: any) => e.enabled !== true && e.value !== ''));
     assert.ok(!JSON.stringify(p).includes('CANARY_MCP_PASSWORD'));
     assert.ok(!JSON.stringify(p).includes('alice@example.com'));
     assert.ok(!JSON.stringify(p).includes('sk-CANARY'));
@@ -158,8 +225,11 @@ test('stdio browser workflow, deltas, privacy, audit and cross-process ownership
       expected_revision: p.revision,
     });
     assert.equal(fill.ok, true);
+    assert.ok(!('session_id' in fill));
     const delta = await call('adl_observe', { session_id: s.session_id, since_revision: p.revision });
     assert.ok(delta.changes.length > 0);
+    assert.ok(!('url' in delta) && !('title' in delta), 'an unchanged page location is not repeated in a delta');
+    assert.equal((await call('adl_observe', { session_id: s.session_id })).url, p.url, 'a full response repeats it');
     const wrong = payload(await b.callTool({ name: 'adl_observe', arguments: { session_id: s.session_id } }));
     assert.equal(wrong.error.code, 'E_TARGET_NOT_FOUND');
     const click = await call('adl_act', {
@@ -167,13 +237,21 @@ test('stdio browser workflow, deltas, privacy, audit and cross-process ownership
       action: 'click',
       element_id: p.elements.find((e: any) => e.name === 'Find').id,
       expected_revision: fill.revision,
+      include_diff: true,
     });
     assert.equal(click.ok, true);
+    // The nested observation leaves out what the outer result already carries.
+    assert.ok(click.observation, JSON.stringify(click));
+    for (const gone of ['ok', 'session_id', 'revision', 'warnings'])
+      assert.ok(!(gone in click.observation), `observation.${gone}`);
+    assert.ok(!('session_id' in click));
+    assert.ok((click.observation.changes ?? click.observation.elements).length > 0);
     const waited = await call('adl_wait', {
       session_id: s.session_id,
       condition: { role: 'status', name: 'Done' },
       timeout_ms: 2000,
     });
+    assert.deepEqual(Object.keys(waited), ['ok', 'revision', 'matched']);
     assert.equal(waited.ok, true);
     await call('adl_close', { session_id: s.session_id });
     const log = await readFile(audit, 'utf8');

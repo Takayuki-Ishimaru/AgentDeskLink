@@ -12,14 +12,22 @@ import {
   type Request,
 } from 'playwright';
 import { resolveAllowedAddresses, redactString, redactText, redactUrl } from './policy.js';
-import { pinnedFetch, redirectStylesheet, PinnedConnectionPool, MAX_BODY, HOP_RE } from './browser-network.js';
+import {
+  pinnedFetch,
+  redirectStylesheet,
+  PinnedConnectionPool,
+  MAX_BODY,
+  HOP_RE,
+  type FetchResult,
+} from './browser-network.js';
 import { BrowserResourceCache } from './browser-cache.js';
 import { captureBrowserImage } from './browser-visual.js';
 import { runBrowserGesture, captureGestureGeometry, type GestureGeometry } from './browser-gesture.js';
-import { preflightBrowserInput } from './browser-preflight.js';
+import { preflightBrowserInput, type PreflightResult } from './browser-preflight.js';
 import type { ActionAuthorization } from './types.js';
 import { ensurePointSelector, pointSelector } from './browser-point.js';
-import { inspectBrowserAction, isolatedCollect } from './browser-approval.js';
+import { inspectBrowserAction, isolatedCollect, offsetPointOf } from './browser-approval.js';
+import { LEGACY_CONTROLS_PATTERN, type LabelLists } from './action-classifier.js';
 import {
   nativeClick,
   nativeFill,
@@ -54,6 +62,53 @@ import {
 function deny(): never {
   throw new AdlError('E_POLICY_DENIED');
 }
+
+/** Whether every request of the session passes the network route installed in BrowserAdapter.open. */
+function routesNetwork(policy: PolicyConfig): boolean {
+  return !policy.allowAllOperations || !!policy.restrictTargets || !!policy.browserProxyServer;
+}
+
+/**
+ * Headers for a followed hop of a main-frame redirect chain: the original request's, with the Cookie header the browser
+ * would send to the hop's own URL (cookies scoped to a path differ between hops). A chain that started cross-site keeps
+ * SameSite=Strict cookies out, as the browser does.
+ */
+async function navigationHopHeaders(
+  context: BrowserContext,
+  headers: Record<string, string>,
+  url: URL,
+): Promise<Record<string, string>> {
+  const crossSite = headers['sec-fetch-site'] === 'cross-site';
+  const cookies = (await context.cookies(url.href))
+    .filter(cookie => !(crossSite && cookie.sameSite === 'Strict'))
+    .sort((a, b) => b.path.length - a.path.length);
+  const hop = { ...headers };
+  delete hop.cookie;
+  if (cookies.length) hop.cookie = cookies.map(cookie => `${cookie.name}=${cookie.value}`).join('; ');
+  return hop;
+}
+
+/** The method of the request that follows a redirect, as the Fetch standard has it: a read of the destination, or the same request again. */
+function redirectedMethod(status: number, method: string): string {
+  if (status === 303 && method !== 'GET' && method !== 'HEAD') return 'GET';
+  return (status === 301 || status === 302) && method === 'POST' ? 'GET' : method;
+}
+
+/** The request headers without those that described the body a redirect dropped. */
+function withoutBodyHeaders(headers: Record<string, string>): Record<string, string> {
+  return Object.fromEntries(Object.entries(headers).filter(([name]) => !/^(content-|origin$)/i.test(name)));
+}
+
+// How long a contained action waits for a request that decides its result; a later one is stopped and shows in the next observation.
+const CONTAINMENT_REPORT_MS = 500;
+
+/** A request's identity for telling what a page already asks for: the values that vary between polls (those with digits) do not count. */
+function requestShape(url: string): string {
+  const parsed = new URL(url);
+  const query = [...parsed.searchParams].map(([key, value]) => `${key}=${/\d/.test(value) ? '#' : value}`).sort();
+  return `${parsed.origin}${parsed.pathname}?${query.join('&')}`;
+}
+const MAX_KNOWN_REQUESTS = 2000;
 
 // Playwright's own wording when an element handle's node left the document (dom.ts throwElementIsNotAttached); timeouts and other failures never match.
 function detachedElementError(error: unknown): boolean {
@@ -377,8 +432,6 @@ function snapshotPageFn(
     referencedClipped ||= text.length > cfg.fieldMax;
     return text.slice(0, cfg.fieldMax).trim();
   };
-  const CONSEQUENTIAL_RE =
-    /(delete|remove|upload|send|submit|purchase|checkout|pay|payment|login|log in|sign in|sign up|register|withdraw|transfer)/i;
   const INTERACTIVE = new Set(['a', 'button', 'input', 'select', 'textarea']);
   const elements: ElementInfo[] = [];
   const sigParts: string[] = [];
@@ -469,6 +522,86 @@ function snapshotPageFn(
     formCache.set(form, id);
     return id;
   };
+  // A range bound is a finite number; blank, malformed or oversized attributes count as absent.
+  const rangeNumber = (raw: string | null): number | undefined => {
+    if (raw === null || raw.length > 64 || !raw.trim()) return undefined;
+    const value = Number(raw.trim());
+    return Number.isFinite(value) ? value : undefined;
+  };
+  // An editing host carries its own contenteditable attribute and has no editable parent; the rest of the editable subtree is its content.
+  const isEditingHost = (el: Element): boolean => {
+    if (!has(el, 'contenteditable') || r(el, 'isContentEditable') !== true) return false;
+    const parentEl = r(el, 'parentElement') as Element | null;
+    return !(parentEl && r(parentEl, 'isContentEditable') === true);
+  };
+  // Text of an editing host as one string: line breaks for <br> and block boundaries, whitespace collapsed unless the host preserves it.
+  // Protected regions, nested form controls, scripts and styles, hidden subtrees and display:none text are never read. Tiny, transparent or
+  // off-screen text is read but reported through hidden. At most EDIT_VALUE_CAP characters are kept; total still counts the rest.
+  const EDIT_VALUE_CAP = 4096,
+    EDIT_NODE_CAP = 4000;
+  const readEditable = (host: Element): { text: string; total: number; overflow: boolean; hidden: boolean } => {
+    let preserve = false;
+    try {
+      preserve = /^(pre|break-spaces)/.test(getComputedStyle(host).whiteSpace);
+    } catch {
+      /* collapse whitespace */
+    }
+    const skip = `${cfg.privacyRules.textSkipSelector},${cfg.privacyRules.regionSelector},[hidden],[aria-hidden="true"]`;
+    const walker = m(document, 'createTreeWalker', host, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT, {
+      acceptNode: (node: Node) =>
+        r(node, 'nodeType') === 1 && (m(node, 'matches', skip) || getComputedStyle(node as Element).display === 'none')
+          ? NodeFilter.FILTER_REJECT
+          : NodeFilter.FILTER_ACCEPT,
+    }) as TreeWalker;
+    const looksHidden = new Map<Element, boolean>();
+    let out = '',
+      total = 0,
+      last = '',
+      hidden = false,
+      lastBlock: Element | null = null,
+      count = 0,
+      node: Node | null = walker.nextNode();
+    const append = (piece: string) => {
+      if (!piece) return;
+      total += piece.length;
+      last = piece[piece.length - 1]!;
+      if (out.length < EDIT_VALUE_CAP) out += piece.slice(0, EDIT_VALUE_CAP - out.length);
+    };
+    const blockOf = (text: Node): Element => {
+      let up = r(text, 'parentElement') as Element | null;
+      for (let climbed = 0; up && up !== host && climbed < 64; climbed++, up = r(up, 'parentElement') as Element | null)
+        if (BLOCK_TAGS.has(tagOf(up))) return up;
+      return host;
+    };
+    for (; node && count++ < EDIT_NODE_CAP; node = walker.nextNode()) {
+      if (r(node, 'nodeType') === 1) {
+        if (tagOf(node as Element) === 'BR' && shown(node as Element)) append('\n');
+        continue;
+      }
+      // Text under visibility:hidden or a closed details element is not rendered either.
+      const owner = r(node, 'parentElement') as Element | null;
+      if (!owner || !shown(owner)) continue;
+      let piece = String(r(node, 'nodeValue') ?? '').replace(/\r\n?/g, '\n');
+      piece = preserve ? piece.replace(/\xa0/g, ' ') : piece.replace(/\s+/g, ' ');
+      if (!preserve && (last === '' || last === '\n' || last === ' ')) piece = piece.replace(/^ /, '');
+      if (!piece) continue;
+      const block = blockOf(node);
+      if (total > 0 && block !== lastBlock && last !== '\n') append('\n');
+      lastBlock = block;
+      const exposed = out.length < EDIT_VALUE_CAP;
+      append(piece);
+      if (exposed && !hidden) {
+        let flagged = looksHidden.get(owner);
+        if (flagged === undefined) looksHidden.set(owner, (flagged = textHidden(owner)));
+        if (flagged) hidden = true;
+      }
+    }
+    const text = out
+      .replace(/ +\n/g, '\n')
+      .replace(/^\n+/, '')
+      .replace(/[\n ]+$/, '');
+    return { text, total, overflow: total > EDIT_VALUE_CAP || !!node, hidden };
+  };
   let visited = 0;
   let truncated = false;
   const root = (r(document, 'body') || r(document, 'documentElement')) as HTMLElement;
@@ -497,6 +630,8 @@ function snapshotPageFn(
       /^(div|p|span|legend|h[1-6]|td|th|li|dt|dd|blockquote|code|pre|time|caption|figcaption|summary|strong|em|b|i|small|mark|q|samp|kbd|cite|abbr|address|article|section|main|header|footer|aside|output)$/.test(
         tag,
       ) && !!directText(cur);
+    const editable = isEditingHost(cur);
+    let hideContent = false;
     const structural = ['table', 'tr', 'ul', 'ol', 'li'].includes(tag);
     // Images, canvases and svg graphics are listed only with a text alternative; decorative or aria-hidden ones stay out.
     const imageTag = tag === 'img' || tag === 'canvas' || tag === 'svg';
@@ -517,6 +652,7 @@ function snapshotPageFn(
         isStatus ||
         roleAttr ||
         isText ||
+        editable ||
         structural ||
         tag === 'td' ||
         tag === 'th' ||
@@ -550,7 +686,11 @@ function snapshotPageFn(
                   ? 'button'
                   : type === 'file'
                     ? 'file'
-                    : 'textbox';
+                    : type === 'range'
+                      ? 'slider'
+                      : type === 'number'
+                        ? 'spinbutton'
+                        : 'textbox';
         else
           role = imageTag
             ? 'img'
@@ -571,6 +711,8 @@ function snapshotPageFn(
                           : isText
                             ? 'text'
                             : 'generic';
+        // A bare editing host (rich-text editor) is a text box; an explicit role or a more specific tag role stays.
+        if (editable && (role === 'generic' || role === 'text')) role = 'textbox';
       }
       const bodyText = !isInteractive && !clickable && cfg.privacyRules.textRoles.some(textRole => textRole === role);
       const form = m(cur, 'closest', 'form') as HTMLFormElement | null;
@@ -581,10 +723,11 @@ function snapshotPageFn(
         labelClipped = !!labelEl && descendantClipped;
       const referenceText = referencedName(cur),
         referenceClipped = referencedClipped;
-      const useOwn = isText && !isInteractive && !clickable && !roleAttr;
+      const useOwn = isText && !isInteractive && !clickable && !roleAttr && !editable;
       // Tables and lists name themselves from explicit labels only; their rows and items carry the text. Rows and items may be long without being labels.
+      // An editing host is named by its label, never by the text being edited: that text is its value.
       const aggregate =
-        role === 'table' || role === 'list' || role === 'grid' || role === 'rowgroup' || role === 'tree';
+        role === 'table' || role === 'list' || role === 'grid' || role === 'rowgroup' || role === 'tree' || editable;
       const descendant =
           useOwn || aggregate
             ? ''
@@ -663,10 +806,30 @@ function snapshotPageFn(
         )
           sensitive = true;
       }
+      // Bounds of a slider or spinbutton: native range/number attributes, otherwise aria-valuemin/aria-valuemax; the ARIA current value is aria-valuenow.
+      const nativeRange = tag === 'input' && (type === 'range' || type === 'number');
+      const ariaRange = role === 'slider' || role === 'spinbutton';
+      let min: number | undefined, max: number | undefined, step: number | 'any' | undefined;
+      if (nativeRange || ariaRange) {
+        min = rangeNumber(nativeRange ? attr(cur, 'min') : null) ?? rangeNumber(attr(cur, 'aria-valuemin'));
+        max = rangeNumber(nativeRange ? attr(cur, 'max') : null) ?? rangeNumber(attr(cur, 'aria-valuemax'));
+        const stepAttr = nativeRange ? attr(cur, 'step') : null;
+        step = stepAttr?.trim().toLowerCase() === 'any' ? 'any' : rangeNumber(stepAttr);
+        if (!nativeRange && tag !== 'input') rawVal = (attr(cur, 'aria-valuenow') ?? '').slice(0, 128);
+      }
+      // The text of an editing host is its value. A protected region is never read.
+      let edited: ReturnType<typeof readEditable> | undefined;
+      if (editable && !inRegion) {
+        edited = readEditable(cur);
+        rawVal = edited.text;
+      }
       if (rawVal.length > 4096) throw new Error('Snapshot field limit');
       const value = isPassword ? undefined : clip(rawVal);
-      const valueClipped = !isPassword && rawVal.length > cfg.fieldMax;
-      const hiddenText = fromText && !sensitive && !inRegion && textHidden(cur);
+      const valueClipped = !isPassword && (rawVal.length > cfg.fieldMax || edited?.overflow === true);
+      const hiddenText =
+        (fromText && !sensitive && !inRegion && textHidden(cur)) || (edited?.hidden === true && !sensitive);
+      // The content of a secret-labelled editor is as secret as its value: nothing inside it is listed either.
+      if (editable && sensitive) hideContent = true;
       const enabled =
         !r(cur, 'disabled') && !m(cur, 'closest', 'fieldset:disabled') && attr(cur, 'aria-disabled') !== 'true';
       const checked =
@@ -699,7 +862,6 @@ function snapshotPageFn(
       const isSubmitControl =
         (tag === 'button' && (attr(cur, 'type') || 'submit') === 'submit' && !!form) ||
         (tag === 'input' && type === 'submit');
-      const consequential = CONSEQUENTIAL_RE.test(name) || CONSEQUENTIAL_RE.test(rawNameAttr) || isSubmitControl;
       const href = tag === 'a' ? attr(cur, 'href') || '' : '';
       const actionAttr = form ? attr(form, 'action') || '' : '';
       if (href.length > 2048 || actionAttr.length > 2048) throw new Error('Snapshot field limit');
@@ -724,6 +886,7 @@ function snapshotPageFn(
         !hiddenText &&
         !!r(cur, 'parentElement') &&
         completeRows.has(r(cur, 'parentElement')) &&
+        !editable &&
         !m(cur, 'closest', '[aria-hidden="true"]');
       if (!dropCell) {
         const id = idFor(cur);
@@ -738,7 +901,7 @@ function snapshotPageFn(
           selected,
           expanded,
           type,
-          consequential,
+          isSubmitControl,
           href,
           actionAttr,
           rawVal,
@@ -747,6 +910,10 @@ function snapshotPageFn(
           options,
           optionsTruncated,
           depth,
+          min,
+          max,
+          step,
+          edited?.total,
         ]);
         sigParts.push(signature);
         try {
@@ -786,6 +953,13 @@ function snapshotPageFn(
           ...(valueClipped && !sensitive && !inRegion ? { value_truncated: true as const } : {}),
           ...(options ? { options, ...(optionsTruncated ? { options_truncated: true } : {}) } : {}),
           ...(value !== undefined ? { value } : {}),
+          ...(!sensitive && !inRegion
+            ? {
+                ...(min !== undefined ? { min } : {}),
+                ...(max !== undefined ? { max } : {}),
+                ...(step !== undefined ? { step } : {}),
+              }
+            : {}),
           enabled,
           ...(checked !== undefined ? { checked } : {}),
           ...(selected !== undefined ? { selected } : {}),
@@ -796,7 +970,7 @@ function snapshotPageFn(
         });
       }
     }
-    if (!skipChildren) {
+    if (!skipChildren && !hideContent) {
       const children = Array.from(r(cur, 'children') as HTMLCollection) as HTMLElement[],
         shadow = r(cur, 'shadowRoot') as ShadowRoot | null;
       if (shadow) children.push(...(Array.from(shadow.children) as HTMLElement[]));
@@ -824,6 +998,16 @@ function snapshotPageFn(
     actionStates,
     forms,
   };
+}
+
+// Runs inside the page: scrolls an element (or the document's scrolling element) by 80% of its height.
+function scrollByViewport(node: Element, args: { direction: 'up' | 'down'; key: string }): void {
+  if (!(window as unknown as Record<string, BrowserIntegrity>)[args.key]?.check()) throw new Error('ADL_UNTRUSTED_DOM');
+  const element = node as HTMLElement,
+    height = Reflect.get(Object.getPrototypeOf(element), 'clientHeight', element) as number;
+  Reflect.apply(Reflect.get(Object.getPrototypeOf(element), 'scrollBy', element), element, [
+    { top: (args.direction === 'down' ? 1 : -1) * Math.max(1, height * 0.8), behavior: 'instant' },
+  ]);
 }
 
 const STORE_INIT = (key: string) => {
@@ -866,6 +1050,18 @@ class BrowserSession implements AdapterSession {
     else peers[peers.length - 1]!.count = Math.min(peers[peers.length - 1]!.count + 1, 999999);
   }
   pendingDocumentRedirect: string | undefined;
+  // The answer at the end of a main-frame redirect chain, fetched with the chain so that a chain ending in 204/205 never
+  // replaces the document. The redirect stub's refresh to that URL takes it once instead of fetching the URL again.
+  private redirectedDocument: { url: string; response: FetchResult } | undefined;
+  holdRedirectedDocument(url: string, response: FetchResult): void {
+    this.redirectedDocument = { url, response };
+  }
+  /** Any main-frame navigation clears the held answer; only a GET of its URL receives it. */
+  takeRedirectedDocument(url: string, method: string): FetchResult | undefined {
+    const held = this.redirectedDocument;
+    this.redirectedDocument = undefined;
+    return held && held.url === url && method === 'GET' ? held.response : undefined;
+  }
   private proxyNavigationFailure: { url: string; reason: ErrorReason } | undefined;
   /** A main-frame navigation that died on a proxy_* network failure; surfaced by goto failures. */
   recordProxyNavigationFailure(request: Request, reason: ErrorReason) {
@@ -887,7 +1083,7 @@ class BrowserSession implements AdapterSession {
   documentRedirects = 0;
   stylesheetRedirects = 0;
   approvedRequest?: { url: string; method: string; body: string; expires: number; frame: Frame };
-  // Standard-mode submission guard: armed around the dispatch of a submit that
+  // Standard- and ask-mode submission guard: armed around the dispatch of a submit that
   // is consequential only because it submits. Chromium reports every form
   // submission (including script form.submit()) as a formSubmission navigation
   // before its request; the route then cancels that navigation in place, so no
@@ -900,6 +1096,10 @@ class BrowserSession implements AdapterSession {
     if (request.method().toUpperCase() === 'GET' && guard.requested <= 0) return false;
     guard.blocked++;
     return true;
+  }
+  // The trusted per-workspace label lists; they only ever relax or add label-derived risk.
+  private get labelLists(): LabelLists {
+    return { allow: this.policy.consequentialAllowLabels ?? [], deny: this.policy.consequentialDenyLabels ?? [] };
   }
   private async armSubmissionGuard(): Promise<void> {
     if (!this.navigationProtocol)
@@ -915,7 +1115,32 @@ class BrowserSession implements AdapterSession {
     await this.navigationProtocol;
     this.submissionGuard = { requested: 0, blocked: 0 };
   }
+  // Standard-mode containment: a control consequential only through a verb that may stay in the session ("Delete") is dispatched
+  // with the network closed until the next action. The session's storage ends with it, so what happens in the page stays there.
+  // Requests cannot be told apart by cause, so what passes is what the document was already asking for before the click, such as
+  // its polling. Anything new is cut: a data request or navigation is the sign that the control reaches further and stops the
+  // action, while a new image, style, font or media load is only left out, as a redraw may ask for one.
+  private containment: { blocked: number } | undefined;
+  private readonly knownRequests = new Set<string>();
+  containedRequest(request: Request): boolean {
+    const read = ['GET', 'HEAD'].includes(request.method().toUpperCase());
+    if (request.isNavigationRequest()) {
+      if (!this.containment && request.frame() === this.pageValue?.mainFrame()) this.knownRequests.clear();
+    } else if (read && !this.containment && this.knownRequests.size < MAX_KNOWN_REQUESTS)
+      this.knownRequests.add(requestShape(request.url()));
+    const containment = this.containment;
+    if (!containment) return false;
+    if (read && !request.isNavigationRequest() && this.knownRequests.has(requestShape(request.url()))) return false;
+    const passive =
+      read &&
+      !request.isNavigationRequest() &&
+      ['image', 'stylesheet', 'font', 'media'].includes(request.resourceType());
+    if (!passive) containment.blocked++;
+    return true;
+  }
   private manualNetworkExpires = 0;
+  // The origin the human approved, which a later redirect does not widen.
+  private manualNetworkOrigin: string | undefined;
   private manualNetworkGeneration = 0;
   manualRequestGeneration(request: Request): number | undefined {
     return this.consumeManualRequest(request) ? this.manualNetworkGeneration : undefined;
@@ -927,20 +1152,27 @@ class BrowserSession implements AdapterSession {
     return (
       this.manualNetworkExpires > Date.now() &&
       request.frame() === this.page.mainFrame() &&
-      new URL(request.url()).origin === this.origin
+      new URL(request.url()).origin === this.manualNetworkOrigin
     );
   }
 
+  private endRedirectWait: (() => void) | undefined;
   private async settleRedirect(): Promise<void> {
     const deadline = Date.now() + Math.min(5000, this.policy.actionTimeoutMs);
     while (this.pendingDocumentRedirect) {
       if (Date.now() >= deadline) throw new AdlError('E_POLICY_DENIED');
       const destination = this.pendingDocumentRedirect;
       try {
-        await this.page.waitForURL(destination, {
-          waitUntil: 'domcontentloaded',
-          timeout: Math.max(1, deadline - Date.now()),
-        });
+        // A destination answered with 204/205 never commits: the route ends the wait instead.
+        await Promise.race([
+          this.page.waitForURL(destination, {
+            waitUntil: 'domcontentloaded',
+            timeout: Math.max(1, deadline - Date.now()),
+          }),
+          new Promise<void>(resolve => {
+            this.endRedirectWait = resolve;
+          }),
+        ]);
       } catch {
         throw new AdlError('E_POLICY_DENIED');
       }
@@ -956,6 +1188,26 @@ class BrowserSession implements AdapterSession {
   private store: JSHandle<Store> | null = null;
   private pageValue: Page | null = null;
   private documentGeneration = 0;
+  /** Status of the latest main-frame document response; undefined before the first one. */
+  private documentStatus: number | undefined;
+  private noteDocumentResponse(status: number): void {
+    if (status !== 204 && status !== 205) this.documentStatus = status;
+  }
+  // A 204/205 answer ends a navigation without a document: Chromium aborts it and keeps the current one. When that response
+  // reaches Chromium, Playwright reads the abort as a finished request and keeps waiting for the navigation (click and press, then
+  // every later action) until it times out. So such an answer is aborted before Chromium reads it: by the network route, or
+  // without one by the document interception in attach(). The count covers answers to the latest main-frame navigation.
+  private noContentNavigations = 0;
+  // Those that followed a stub: a hop that set cookies had to replace the document before the chain's end was known.
+  private noContentAfterStub = 0;
+  private latestMainNavigation: Request | undefined;
+  /** Called by the network route when it aborts a navigation answered with 204/205. */
+  noteNoContentNavigation(request: Request, afterStub = false): void {
+    if (afterStub) {
+      this.noContentAfterStub++;
+      this.endRedirectWait?.();
+    } else if (request === this.latestMainNavigation) this.noContentNavigations++;
+  }
   private storeGeneration = 0;
   private readonly visualEpoch = crypto.randomUUID();
   private readonly captureGeometry = new Map<
@@ -981,7 +1233,32 @@ class BrowserSession implements AdapterSession {
   ) {}
 
   get origin(): string {
-    return this.policy.allowAllOperations && this.pageValue ? new URL(this.pageValue.url()).origin : this.initialOrigin;
+    if (!this.pageValue) return this.initialOrigin;
+    const current = new URL(this.pageValue.url()).origin;
+    return this.policy.allowAllOperations || this.redirectOrigins.has(current) ? current : this.initialOrigin;
+  }
+
+  // Granted origins a server redirect took the session to (a sign-in that passes through an identity provider): the session
+  // works there and may return, while links and navigate still cannot open a new origin by themselves.
+  private readonly redirectOrigins = new Set<string>();
+  reachByRedirect(origin: string): void {
+    this.redirectOrigins.add(origin);
+  }
+  reachable(origin: string): boolean {
+    return origin === this.initialOrigin || this.redirectOrigins.has(origin);
+  }
+  // A target's controls, visual masks and gestures describe its own origin, not one a redirect reached.
+  private get onTargetOrigin(): boolean {
+    return this.policy.allowAllOperations || this.origin === this.initialOrigin;
+  }
+  private get grantedControls() {
+    return this.onTargetOrigin ? this.controls : [];
+  }
+  private get grantedVisual() {
+    return this.onTargetOrigin ? this.visual : undefined;
+  }
+  private get grantedGestures() {
+    return this.onTargetOrigin ? this.gestures : undefined;
   }
 
   private get page(): Page {
@@ -994,6 +1271,30 @@ class BrowserSession implements AdapterSession {
     page.on('framenavigated', frame => {
       if (frame === page.mainFrame()) this.documentGeneration++;
     });
+    page.on('request', request => {
+      if (request.isNavigationRequest() && request.frame() === page.mainFrame()) this.latestMainNavigation = request;
+    });
+    // Same-document navigations (hash, pushState) fetch no document and so keep the last status. 204/205 leave the current document in place.
+    page.on('response', response => {
+      const request = response.request();
+      if (!request.isNavigationRequest() || request.frame() !== page.mainFrame()) return;
+      this.noteDocumentResponse(response.status());
+    });
+    if (!routesNetwork(this.policy)) {
+      // Without the network route, document responses pause here so a 204/205 answer is aborted as the route aborts it.
+      const protocol = await this.context.newCDPSession(page);
+      const mainFrameId = (await protocol.send('Page.getFrameTree')).frameTree.frame.id;
+      protocol.on('Fetch.requestPaused', event => {
+        const requestId = event.requestId;
+        if (event.responseStatusCode !== 204 && event.responseStatusCode !== 205) {
+          void protocol.send('Fetch.continueRequest', { requestId }).catch(() => undefined);
+          return;
+        }
+        if (event.frameId === mainFrameId) this.noContentNavigations++;
+        void protocol.send('Fetch.failRequest', { requestId, errorReason: 'Aborted' }).catch(() => undefined);
+      });
+      await protocol.send('Fetch.enable', { patterns: [{ resourceType: 'Document', requestStage: 'Response' }] });
+    }
     this.store = await this.freshStore();
     this.storeGeneration = this.documentGeneration;
   }
@@ -1325,7 +1626,10 @@ class BrowserSession implements AdapterSession {
         ]),
       ),
     };
-    const fingerprint = digest(res.sig + JSON.stringify([url, title, warnings, actionEvidence]));
+    // Only an error status is reported; a change of status (for example a reload) is a new revision.
+    const httpStatus =
+      this.documentStatus !== undefined && this.documentStatus >= 400 ? this.documentStatus : undefined;
+    const fingerprint = digest(res.sig + JSON.stringify([url, title, warnings, actionEvidence, httpStatus ?? null]));
     await this.assertIntegrity(signal);
     return {
       elements: res.elements,
@@ -1335,6 +1639,7 @@ class BrowserSession implements AdapterSession {
       title,
       actionEvidence,
       ...(warnings.length ? { warnings } : {}),
+      ...(httpStatus !== undefined ? { http_status: httpStatus } : {}),
     };
   }
 
@@ -1527,19 +1832,19 @@ class BrowserSession implements AdapterSession {
           const pointReady = (await this.page.locator(pointSelector('capture', pointNonce)).count()) === 1;
           const geometry = await captureGestureGeometry(
             this.page,
-            this.gestures ?? { enabled: false, surfaces: [] },
+            this.grantedGestures ?? { enabled: false, surfaces: [] },
             signal,
           );
           const image = await captureBrowserImage(
             this.page,
             this.origin,
-            this.visual,
+            this.grantedVisual,
             signal,
             this.policy.allowPersonalData,
           );
           const after = await captureGestureGeometry(
             this.page,
-            this.gestures ?? { enabled: false, surfaces: [] },
+            this.grantedGestures ?? { enabled: false, surfaces: [] },
             signal,
           );
           this.checkAlive();
@@ -1573,6 +1878,7 @@ class BrowserSession implements AdapterSession {
   async gesture(plan: GesturePlan, reference: GestureReference, signal: AbortSignal): Promise<GestureExecution> {
     await this.assertIntegrity(signal);
     this.checkAlive();
+    this.containment = undefined;
     const proof = reference.surface_epoch ? this.captureGeometry.get(reference.surface_epoch) : undefined;
     const assertCurrent = () => {
       this.checkAlive();
@@ -1584,7 +1890,7 @@ class BrowserSession implements AdapterSession {
       return await runBrowserGesture(
         this.page,
         plan,
-        this.gestures ?? { enabled: false, surfaces: [] },
+        this.grantedGestures ?? { enabled: false, surfaces: [] },
         reference,
         signal,
         assertCurrent,
@@ -1723,11 +2029,15 @@ class BrowserSession implements AdapterSession {
         element,
         action,
         [...this.frameStores].find(([, store]) => store === target)?.[0] ?? this.page.mainFrame(),
+        this.labelLists,
       );
-      // Standard mode dispatches a submit that is consequential only because it
-      // submits under the submission guard (runAction); ask mode keeps asking so
-      // an approved submission can actually be sent.
-      return proof.submission === 'plain' && this.policy.operationMode === 'standard' && !this.policy.allowAllOperations
+      // Standard and ask modes dispatch a submit that is consequential only
+      // because it submits under the submission guard (runAction). In ask mode
+      // the engine requests approval only once the guard has stopped a real
+      // submission, and an approved retry is sent with the body-bound permit.
+      return proof.submission === 'plain' &&
+        (this.policy.operationMode === 'standard' || this.policy.operationMode === 'ask') &&
+        !this.policy.allowAllOperations
         ? { ...proof, risk: 'ordinary' as const }
         : proof;
     } catch (error) {
@@ -1742,6 +2052,7 @@ class BrowserSession implements AdapterSession {
     this.checkAlive();
     if (this.policy.browserHeadless !== false) throw new AdlError('E_UNSUPPORTED_ACTION');
     if (signal.aborted) throw new AdlError('E_CANCELLED');
+    this.containment = undefined;
     this.manualNetworkGeneration++;
     this.manualNetworkExpires = 0;
     try {
@@ -1749,6 +2060,7 @@ class BrowserSession implements AdapterSession {
         if (!expiresAt || expiresAt <= Date.now() || expiresAt > Date.now() + 120000)
           throw new AdlError('E_POLICY_DENIED');
         this.manualNetworkExpires = expiresAt;
+        this.manualNetworkOrigin = this.origin;
         await this.page.bringToFront();
       }
       if (signal.aborted) throw new AdlError('E_CANCELLED');
@@ -1767,6 +2079,7 @@ class BrowserSession implements AdapterSession {
   ): Promise<void | AdapterActResult> {
     this.checkAlive();
     if (signal.aborted) throw new AdlError('E_CANCELLED');
+    this.containment = undefined;
     let dispatched = false,
       completed = false;
     const local = new AbortController();
@@ -1794,17 +2107,59 @@ class BrowserSession implements AdapterSession {
     const complete = () => {
       completed = true;
     };
+    const noContent = this.noContentNavigations,
+      noContentAfterStub = this.noContentAfterStub,
+      generation = this.documentGeneration;
     try {
       const notices = await Promise.race([
         (async () => {
           const found = await this.runAction(action, combined, mark, authorization, complete);
           await this.settleRedirect();
+          const containment = this.containment;
+          if (containment) {
+            // A handler may start its request after the click returns. The network stays closed until the next action.
+            await new Promise(resolve => setTimeout(resolve, CONTAINMENT_REPORT_MS));
+            if (containment.blocked) {
+              complete();
+              throw new AdlError('E_APPROVAL_REQUIRED', 'requires_ask_mode', { page_script_ran: true });
+            }
+          }
           const guard = this.submissionGuard;
           this.submissionGuard = undefined;
           if (guard?.blocked) {
             complete();
             throw new AdlError('E_APPROVAL_REQUIRED', 'form_submission_requires_approval');
           }
+          if (this.noContentAfterStub > noContentAfterStub)
+            return [
+              ...(found ?? []),
+              {
+                code: 'no_content',
+                count: 1,
+                message:
+                  'A redirect stored its cookies and then ended with no content (HTTP 204/205): the page before it is gone and an empty one stays. Navigate to continue.',
+              },
+            ];
+          if (containment)
+            return [
+              ...(found ?? []),
+              {
+                code: 'contained_action',
+                count: 1,
+                message:
+                  'This control is classified as consequential, so it ran with the network closed until the next action: only requests this page was already making go on, and anything new is left out. Nothing it asked for has left so far; a later attempt shows in the next observation.',
+              },
+            ];
+          // Nothing on screen tells that the action's navigation was answered without content: say so.
+          if (this.noContentNavigations > noContent && this.documentGeneration === generation)
+            return [
+              ...(found ?? []),
+              {
+                code: 'no_content',
+                count: 1,
+                message: 'The navigation was answered with no content (HTTP 204/205): the current page stays.',
+              },
+            ];
           return found;
         })(),
         stopped,
@@ -1826,6 +2181,7 @@ class BrowserSession implements AdapterSession {
     } finally {
       this.approvedRequest = undefined;
       this.submissionGuard = undefined;
+      if (!dispatched) this.containment = undefined;
       if (timer) clearTimeout(timer);
       combined.removeEventListener('abort', onAbort);
     }
@@ -1877,7 +2233,7 @@ class BrowserSession implements AdapterSession {
         const history = await protocol.send('Page.getNavigationHistory');
         const previous = history.entries[history.currentIndex - 1];
         if (!previous) throw new AdlError('E_TARGET_NOT_FOUND');
-        if (!this.policy.allowAllOperations && new URL(previous.url).origin !== this.origin)
+        if (!this.policy.allowAllOperations && !this.reachable(new URL(previous.url).origin))
           throw new AdlError('E_POLICY_DENIED', 'origin_not_allowed');
         await this.owner.callGuard(previous.url);
         await resolveAllowedAddresses(previous.url, this.policy);
@@ -1900,7 +2256,7 @@ class BrowserSession implements AdapterSession {
       } catch {
         deny();
       }
-      if (!this.policy.allowAllOperations && u.origin !== this.origin)
+      if (!this.policy.allowAllOperations && !this.reachable(u.origin))
         throw new AdlError('E_POLICY_DENIED', 'origin_not_allowed');
       try {
         await this.owner.callGuard(u.href);
@@ -1911,11 +2267,18 @@ class BrowserSession implements AdapterSession {
       }
       await assertEvidence();
       await assertIntegrityOrLeaving();
+      const noContent = this.noContentNavigations,
+        generation = this.documentGeneration;
       try {
         onDispatch();
         await this.page.goto(u.href, { waitUntil: 'domcontentloaded' });
       } catch {
         this.checkAlive();
+        // A 204/205 answer aborts the navigation (goto reports net::ERR_ABORTED) and keeps the document, whose store and ids stay valid.
+        if (this.noContentNavigations > noContent && this.documentGeneration === generation) {
+          complete();
+          return;
+        }
         const proxyFailure = this.takeProxyNavigationFailure(u.href);
         if (proxyFailure) throw new AdlError('E_POLICY_DENIED', proxyFailure);
         deny();
@@ -1926,6 +2289,33 @@ class BrowserSession implements AdapterSession {
       return;
     }
     if (action.action === 'read_state' || action.action === 'wait_for') throw new AdlError('E_UNSUPPORTED_ACTION');
+    if (action.action === 'scroll' && action.element_id === undefined) {
+      // Page scroll: the main frame's scrolling element moves by the same amount an element scroll uses. No element data is read.
+      if (action.direction !== 'up' && action.direction !== 'down')
+        throw new AdlError('E_INVALID_ARGUMENT', 'invalid_argument', { argument: 'direction' });
+      await assertEvidence();
+      await this.assertIntegrity(signal);
+      const scroller = await this.page.mainFrame().evaluateHandle(key => {
+        if (!(window as unknown as Record<string, BrowserIntegrity>)[key]?.check())
+          throw new Error('ADL_UNTRUSTED_DOM');
+        const r = (o: object, k: string): any => Reflect.get(Object.getPrototypeOf(o), k, o);
+        const scrolling = r(document, 'scrollingElement') as Element | null;
+        return scrolling &&
+          r(scrolling, 'clientHeight') > 0 &&
+          r(scrolling, 'scrollHeight') > r(scrolling, 'clientHeight')
+          ? scrolling
+          : null;
+      }, this.integrityKey);
+      try {
+        const element = scroller.asElement();
+        if (!element) throw new AdlError('E_UNSUPPORTED_ACTION');
+        onDispatch();
+        await element.evaluate(scrollByViewport, { direction: action.direction, key: this.integrityKey });
+      } finally {
+        await scroller.dispose();
+      }
+      return;
+    }
     const id = action.element_id;
     if (!id || !(id.startsWith(this.prefix + '-') || id.startsWith(this.prefix + '_f')))
       throw new AdlError('E_TARGET_NOT_FOUND');
@@ -2006,7 +2396,7 @@ class BrowserSession implements AdapterSession {
       };
       await assertFramePublic();
       if (authorization?.normalOperations) {
-        const fresh = await inspectBrowserAction(el, action, proofFrame);
+        const fresh = await inspectBrowserAction(el, action, proofFrame, this.labelLists);
         if (!authorization.approvalProof || fresh.proof !== authorization.approvalProof)
           throw new AdlError('E_STALE_STATE');
       }
@@ -2015,9 +2405,15 @@ class BrowserSession implements AdapterSession {
           node,
           {
             secretLabelPattern,
+            legacyPattern,
             privacyRules,
             integrityKey,
-          }: { secretLabelPattern: string; privacyRules: typeof BROWSER_PRIVACY_RULES; integrityKey: string },
+          }: {
+            secretLabelPattern: string;
+            legacyPattern: string;
+            privacyRules: typeof BROWSER_PRIVACY_RULES;
+            integrityKey: string;
+          },
         ) => {
           if (!(window as unknown as Record<string, BrowserIntegrity>)[integrityKey]?.check())
             throw new Error('ADL_UNTRUSTED_DOM');
@@ -2038,8 +2434,7 @@ class BrowserSession implements AdapterSession {
             text.length >= 512 || new RegExp(secretLabelPattern, 'iu').test(words(text));
           // Legacy allowlist classifier: whole keywords only ("Payload viewer" and
           // "Remove filter" are ordinary), matched on identifier words as well.
-          const CONSEQUENTIAL_RE =
-            /\b(?:delete|remove(?!\s+filter\b)|upload|send|submit|purchase|checkout|pay|payment|login|log\s*in|sign\s*in|sign\s*up|register|withdraw|transfer)\b/i;
+          const CONSEQUENTIAL_RE = new RegExp(legacyPattern, 'i');
           const keyword = (text: string) => CONSEQUENTIAL_RE.test(words(text).replace(/[_-]+/g, ' '));
           const form = m(e, 'closest', 'form') as HTMLFormElement | null;
           const name = attr(e, 'aria-label') || attr(e, 'id') || '';
@@ -2112,6 +2507,7 @@ class BrowserSession implements AdapterSession {
         },
         {
           secretLabelPattern: SECRET_LABEL_PATTERN,
+          legacyPattern: LEGACY_CONTROLS_PATTERN,
           privacyRules: BROWSER_PRIVACY_RULES,
           integrityKey: this.integrityKey,
         },
@@ -2180,13 +2576,13 @@ class BrowserSession implements AdapterSession {
                 }
                 return '';
               },
-              { rules: this.controls, action: action.action, integrityKey: this.integrityKey },
+              { rules: this.grantedControls, action: action.action, integrityKey: this.integrityKey },
             );
       if (!authorized) throw new AdlError('E_APPROVAL_REQUIRED', 'operation_not_granted');
       // The page side already required the rule to allow this action; select the
       // matching rule (not merely the first rule with that selector) so duplicate
       // selectors with different action lists resolve per action.
-      const rule = this.controls.find(c => c.selector === authorized && c.actions.includes(action.action));
+      const rule = this.grantedControls.find(c => c.selector === authorized && c.actions.includes(action.action));
       if (!permitted && action.action !== 'scroll' && !rule)
         throw new AdlError('E_APPROVAL_REQUIRED', 'operation_not_granted');
       if (info.protected) throw new AdlError('E_PRIVACY_BLOCKED');
@@ -2200,6 +2596,8 @@ class BrowserSession implements AdapterSession {
         ['click', 'fill', 'press', 'hover', 'check', 'select'].includes(action.action) &&
         !(action.action === 'click' && action.point) &&
         (await shadowsDomApi(el, this.integrityKey));
+      // The click point the preflight verified; a pointer click below is dispatched at exactly this point.
+      let verified: PreflightResult | undefined;
       if (['click', 'fill', 'press', 'hover'].includes(action.action)) {
         const generation = this.documentGeneration;
         const assertCurrent = () => {
@@ -2207,7 +2605,7 @@ class BrowserSession implements AdapterSession {
           if (generation !== this.documentGeneration) throw new AdlError('E_STALE_STATE');
           if (new URL(this.page.url()).origin !== this.origin) throw new AdlError('E_POLICY_DENIED');
         };
-        await preflightBrowserInput(
+        verified = await preflightBrowserInput(
           this.page,
           el,
           action,
@@ -2224,7 +2622,14 @@ class BrowserSession implements AdapterSession {
       }
       await assertFramePublic();
       if (authorization?.normalOperations) {
-        const fresh = await inspectBrowserAction(el, action, proofFrame);
+        // A pointer click goes to the point the preflight verified: the CDP identity proof is made at that same viewport point.
+        let clickAt: { x: number; y: number } | undefined;
+        if (action.action === 'click' && !action.point && verified) {
+          const box = await el.boundingBox();
+          clickAt = box ? offsetPointOf(box, verified.click.offset, this.page.viewportSize()) : undefined;
+          if (!clickAt) throw new AdlError('E_STALE_STATE', 'not_visible');
+        }
+        const fresh = await inspectBrowserAction(el, action, proofFrame, this.labelLists, clickAt);
         if (fresh.proof !== authorization.approvalProof) throw new AdlError('E_STALE_STATE');
         if (authorization.approved && fresh.network)
           this.approvedRequest = {
@@ -2233,9 +2638,17 @@ class BrowserSession implements AdapterSession {
             expires: Math.min(Date.now() + 5000, authorization.expires_at ?? 0),
           };
         if (fresh.submission === 'plain' && !authorization.approved) {
-          if (this.policy.operationMode !== 'standard' || this.policy.allowAllOperations)
+          if (
+            (this.policy.operationMode !== 'standard' && this.policy.operationMode !== 'ask') ||
+            this.policy.allowAllOperations
+          )
             throw new AdlError('E_APPROVAL_REQUIRED', 'requires_ask_mode');
           await this.armSubmissionGuard();
+        }
+        if (fresh.contained && !authorization.approved) {
+          if (this.policy.operationMode !== 'standard' || this.policy.allowAllOperations)
+            throw new AdlError('E_APPROVAL_REQUIRED', 'requires_ask_mode');
+          this.containment = { blocked: 0 };
         }
       }
       if (targetFrame) {
@@ -2322,16 +2735,21 @@ class BrowserSession implements AdapterSession {
           }
           if (
             authorization.normalOperations &&
-            (await inspectBrowserAction(el, action, proofFrame)).proof !== authorization.approvalProof
+            (await inspectBrowserAction(el, action, proofFrame, this.labelLists)).proof !== authorization.approvalProof
           )
             throw new AdlError('E_STALE_STATE');
           await this.assertIntegrity(signal);
           onDispatch();
           await this.page.mouse.click(action.point.x, action.point.y);
-        } else if (clobbered) await nativeClick(nativeInput());
-        else {
-          onDispatch();
-          await el.click(opts);
+        } else {
+          // Dispatch at the verified fragment point, not at Playwright's own choice (the first fragment): that point may be covered
+          // while another fragment is not, and the point the preflight proved unobstructed is the only one that may receive the click.
+          if (!verified) throw new AdlError('E_INTERNAL');
+          if (clobbered) await nativeClick(nativeInput(), verified.click.offset);
+          else {
+            onDispatch();
+            await el.click({ ...opts, position: verified.click.position });
+          }
         }
       } else if (action.action === 'check') {
         const wanted = !!action.checked;
@@ -2400,18 +2818,7 @@ class BrowserSession implements AdapterSession {
             const element = scrollTarget.asElement();
             if (!element) throw new AdlError('E_UNSUPPORTED_ACTION');
             onDispatch();
-            await element.evaluate(
-              (node, args) => {
-                if (!(window as unknown as Record<string, BrowserIntegrity>)[args.key]?.check())
-                  throw new Error('ADL_UNTRUSTED_DOM');
-                const element = node as HTMLElement,
-                  height = Reflect.get(Object.getPrototypeOf(element), 'clientHeight', element) as number;
-                Reflect.apply(Reflect.get(Object.getPrototypeOf(element), 'scrollBy', element), element, [
-                  { top: (args.direction === 'down' ? 1 : -1) * Math.max(1, height * 0.8), behavior: 'instant' },
-                ]);
-              },
-              { direction: action.direction, key: this.integrityKey },
-            );
+            await element.evaluate(scrollByViewport, { direction: action.direction, key: this.integrityKey });
           } finally {
             await scrollTarget.dispose();
           }
@@ -2459,6 +2866,29 @@ class BrowserSession implements AdapterSession {
   }
 }
 
+/** Maps a failed Chromium launch to an ErrorReason and one bounded stderr line; stdout is the MCP protocol and stays untouched. */
+export function browserLaunchFailure(error: unknown): { reason?: 'browser_sandbox_unavailable'; log: string } {
+  const message = error instanceof Error ? error.message : String(error ?? '');
+  const head = message
+    .split('\n')
+    .slice(0, 8)
+    .map(line => line.trim())
+    .filter(Boolean)
+    .join(' | ')
+    .slice(0, 1024);
+  const sandbox =
+    message.includes('No usable sandbox') ||
+    message.includes('Running as root without --no-sandbox') ||
+    message.includes('namespace') ||
+    message.includes('setuid sandbox');
+  return sandbox
+    ? {
+        reason: 'browser_sandbox_unavailable',
+        log: `adl: Chromium launch failed: ${head} | The Chromium sandbox could not start: run the MCP server as a non-root user, or on Ubuntu 24.04 allow unprivileged user namespaces for the AppArmor profile (sysctl kernel.apparmor_restrict_unprivileged_userns=0).`,
+      }
+    : { log: `adl: Chromium launch failed: ${head}` };
+}
+
 export class BrowserAdapter implements Adapter {
   private browser: Browser | null = null;
   private launching: Promise<Browser> | null = null;
@@ -2469,6 +2899,19 @@ export class BrowserAdapter implements Adapter {
     private readonly policy: PolicyConfig,
     private readonly guard: (url: string, purpose?: 'navigation' | 'resource') => Promise<void>,
   ) {}
+
+  /** Whether a redirect may take a document to another origin: one the workspace granted, and the guard accepts. */
+  private async redirectMayLeave(next: URL): Promise<boolean> {
+    if (
+      !this.policy.allowAllOperations &&
+      (!this.policy.allowedOrigins.includes(next.origin) || this.policy.hiddenTargetOrigins?.includes(next.origin))
+    )
+      return false;
+    return this.callGuard(next.href).then(
+      () => true,
+      () => false,
+    );
+  }
 
   async callGuard(url: string, purpose: 'navigation' | 'resource' = 'navigation'): Promise<void> {
     try {
@@ -2509,7 +2952,10 @@ export class BrowserAdapter implements Adapter {
         })
         .catch((e: unknown) => {
           this.launching = null;
-          throw e instanceof AdlError ? e : new AdlError('E_BACKEND_UNAVAILABLE');
+          if (e instanceof AdlError) throw e;
+          const failure = browserLaunchFailure(e);
+          process.stderr.write(failure.log + '\n');
+          throw new AdlError('E_BACKEND_UNAVAILABLE', failure.reason);
         });
     }
     return this.launching;
@@ -2573,7 +3019,7 @@ export class BrowserAdapter implements Adapter {
       signal.addEventListener('abort', onAbort, { once: true });
       active.openAbortCleanup = () => signal.removeEventListener('abort', onAbort);
       // Hard network boundary, installed before the first page exists.
-      if (!this.policy.allowAllOperations || this.policy.restrictTargets || this.policy.browserProxyServer) {
+      if (routesNetwork(this.policy)) {
         await context.route('**/*', async (route: Route) => {
           const block = async (code: string, origin?: string) => {
             let kind = 'other',
@@ -2597,6 +3043,8 @@ export class BrowserAdapter implements Adapter {
               return block('request_denied');
             }
             if (u.protocol !== 'http:' && u.protocol !== 'https:') return block('request_denied');
+            const mainNavigation = req.isNavigationRequest() && req.frame() === page.mainFrame();
+            const held = mainNavigation ? active.takeRedirectedDocument(u.href, req.method().toUpperCase()) : undefined;
             // net::ERR_ABORTED cancels the navigation without an error page, so the
             // current document (and the session) survive the blocked submission.
             if (active.guardedSubmission(req)) {
@@ -2608,13 +3056,23 @@ export class BrowserAdapter implements Adapter {
               );
               return route.abort('aborted').catch(() => undefined);
             }
+            if (active.containedRequest(req)) {
+              active.recordNetworkBlock(
+                'requires_ask_mode',
+                undefined,
+                networkResourceType(req),
+                networkMethod(req.method()),
+              );
+              return route.abort('aborted').catch(() => undefined);
+            }
             const method = req.method().toUpperCase();
             const resource = !req.isNavigationRequest() && req.resourceType() !== 'document';
             if (!this.policy.allowAllOperations && u.origin !== active.origin) {
               const permitted =
-                resource &&
-                ['GET', 'HEAD'].includes(method) &&
-                [...this.policy.allowedOrigins, ...(this.policy.resourceOrigins ?? [])].includes(u.origin);
+                (mainNavigation && active.reachable(u.origin)) ||
+                (resource &&
+                  ['GET', 'HEAD'].includes(method) &&
+                  [...this.policy.allowedOrigins, ...(this.policy.resourceOrigins ?? [])].includes(u.origin));
               if (!permitted) return block('origin_not_allowed', u.origin);
             }
             const body = req.postDataBuffer() ?? undefined;
@@ -2649,51 +3107,73 @@ export class BrowserAdapter implements Adapter {
             // fulfilled redirect. Follow read-only redirects here so each hop is
             // vetted and DNS-pinned, instead of letting Chromium bypass the route.
             let current = u;
-            let res: Awaited<ReturnType<typeof pinnedFetch>>;
+            let res: FetchResult;
+            let hopMethod = method;
+            let hopBody = body;
+            let hopBase = headers;
+            let hopHeaders = headers;
+            // Cookies of the hops followed here: only a response to Chromium stores them, under Chromium's own rules.
+            const hopCookies: string[] = [];
+            let stubRedirect: URL | undefined;
             for (let hops = 0; ; hops++) {
-              await this.callGuard(current.href, resource ? 'resource' : 'navigation');
-              const ips = await resolveAllowedAddresses(
-                current.href,
-                this.policy,
-                undefined,
-                resource ? 'resource' : 'navigation',
-              );
-              // A grant checked before headers, guard or DNS may be revoked while
-              // those awaits run. Recheck the exact generation at network dispatch.
-              if (
-                active.controller.signal.aborted ||
-                (manualGeneration !== undefined && !active.manualRequestCurrent(req, manualGeneration)) ||
-                (approvedExpires !== undefined && approvedExpires <= Date.now())
-              )
-                return block('request_denied');
-              const cacheKey = active.resourceCache.key(current, ips[0]!, method, req.resourceType(), headers);
-              const cached = active.resourceCache.get(cacheKey);
-              res =
-                cached ??
-                (await pinnedFetch(
-                  current,
-                  ips[0]!,
-                  method,
-                  headers,
-                  active.controller.signal,
-                  body,
-                  this.policy.browserProxyServer,
-                  {
-                    resourceType: req.resourceType(),
-                    pool: active.transportPool,
-                    proxyConnectByHostname: this.policy.browserProxyConnectByHostname === true,
-                  },
-                ));
-              if (!cached) active.resourceCache.put(cacheKey, res);
+              if (held && hops === 0) res = held;
+              else {
+                await this.callGuard(current.href, resource ? 'resource' : 'navigation');
+                const ips = await resolveAllowedAddresses(
+                  current.href,
+                  this.policy,
+                  undefined,
+                  resource ? 'resource' : 'navigation',
+                );
+                // A grant checked before headers, guard or DNS may be revoked while
+                // those awaits run. Recheck the exact generation at network dispatch.
+                if (
+                  active.controller.signal.aborted ||
+                  (manualGeneration !== undefined && !active.manualRequestCurrent(req, manualGeneration)) ||
+                  (approvedExpires !== undefined && approvedExpires <= Date.now())
+                )
+                  return block('request_denied');
+                const cacheKey = active.resourceCache.key(current, ips[0]!, hopMethod, req.resourceType(), hopHeaders);
+                const cached = active.resourceCache.get(cacheKey);
+                res =
+                  cached ??
+                  (await pinnedFetch(
+                    current,
+                    ips[0]!,
+                    hopMethod,
+                    hopHeaders,
+                    active.controller.signal,
+                    hopBody,
+                    this.policy.browserProxyServer,
+                    {
+                      resourceType: req.resourceType(),
+                      pool: active.transportPool,
+                      proxyConnectByHostname: this.policy.browserProxyConnectByHostname === true,
+                    },
+                  ));
+                if (!cached) active.resourceCache.put(cacheKey, res);
+              }
               if (res.status < 300 || res.status >= 400 || !res.headers.location) break;
-              if (hops >= 9 || !['GET', 'HEAD'].includes(method)) return block('response_blocked');
+              const nextMethod = redirectedMethod(res.status, hopMethod);
+              // A grant covers one write to one URL: repeating the write elsewhere takes the permission for every operation.
+              if (hops >= 9 || (!['GET', 'HEAD'].includes(nextMethod) && !this.policy.allowAllOperations))
+                return block('response_blocked');
               let next: URL;
               try {
                 next = new URL(res.headers.location, current);
               } catch {
                 return block('response_blocked');
               }
-              if (next.origin !== current.origin || next.username || next.password)
+              if (next.username || next.password) return block('redirect_origin_not_allowed', next.origin);
+              // Only a document may leave the origin, and only by reading a granted destination: Chromium requests it from a
+              // stub, with its own cookies and headers for that origin.
+              const leaving = next.origin !== current.origin;
+              if (
+                leaving &&
+                (!mainNavigation ||
+                  !['GET', 'HEAD'].includes(nextMethod) ||
+                  (!active.reachable(next.origin) && !(await this.redirectMayLeave(next))))
+              )
                 return block('redirect_origin_not_allowed', next.origin);
               if (req.resourceType() === 'stylesheet' && method === 'GET') {
                 if (++active.stylesheetRedirects > 64) return block('response_blocked');
@@ -2704,29 +3184,59 @@ export class BrowserAdapter implements Adapter {
                   body: redirectStylesheet(next),
                 });
               }
-              if (req.isNavigationRequest() && req.frame() === page.mainFrame()) {
-                if (++active.documentRedirects > 10) return block('response_blocked');
-                active.pendingDocumentRedirect = next.href;
-                const escaped = next.href.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
-                return route.fulfill({
-                  status: 200,
-                  contentType: 'text/html',
-                  body: `<!doctype html><meta http-equiv="refresh" content="0;url=${escaped}">`,
-                });
+              // A stub document carries a hop's cookies to Chromium at that hop's URL, before the next hop is requested.
+              const setCookie = res.headers['set-cookie'] ?? [];
+              if (leaving || (mainNavigation && setCookie.length && ['GET', 'HEAD'].includes(nextMethod))) {
+                stubRedirect = next;
+                break;
+              }
+              hopCookies.push(...setCookie);
+              if (nextMethod !== hopMethod) {
+                hopMethod = nextMethod;
+                hopBody = undefined;
+                hopBase = withoutBodyHeaders(headers);
+                // The granted write has left; what follows only reads its destination.
+                manualGeneration = approvedExpires = undefined;
               }
               current = next;
+              hopHeaders = mainNavigation ? await navigationHopHeaders(context, hopBase, current) : hopBase;
             }
-            if (req.isNavigationRequest() && req.frame() === page.mainFrame()) {
+            const afterStub = mainNavigation && active.pendingDocumentRedirect === u.href;
+            if (mainNavigation && current === u && !stubRedirect) {
               active.pendingDocumentRedirect = undefined;
               active.documentRedirects = 0;
+            }
+            // Chromium aborts a navigation answered with 204/205 and keeps the document. Abort it here, after the vetted request
+            // was sent, so Playwright sees the navigation end instead of waiting for a document that never comes.
+            if (req.isNavigationRequest() && (res.status === 204 || res.status === 205)) {
+              active.noteNoContentNavigation(req, afterStub);
+              return route.abort('aborted').catch(() => undefined);
+            }
+            // A redirected main-frame document has to commit at its final URL: a stub moves there, and its refresh is answered
+            // with the response held here, so no hop is requested twice. A hop that sets cookies gets a stub at its own URL,
+            // so that Chromium stores them under that URL's rules and sends them with the next hop.
+            if (mainNavigation && (stubRedirect || current !== u)) {
+              if (++active.documentRedirects > 10) return block('response_blocked');
+              const destination = current === u ? stubRedirect! : current;
+              if (destination.origin !== u.origin) active.reachByRedirect(destination.origin);
+              active.pendingDocumentRedirect = destination.href;
+              if (current === u) hopCookies.push(...(res.headers['set-cookie'] ?? []));
+              else active.holdRedirectedDocument(current.href, res);
+              const escaped = destination.href.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
+              return route.fulfill({
+                status: 200,
+                contentType: 'text/html',
+                headers: hopCookies.length ? { 'set-cookie': hopCookies.join('\n') } : {},
+                body: `<!doctype html><meta http-equiv="refresh" content="0;url=${escaped}">`,
+              });
             }
             const outHeaders: Record<string, string> = {};
             for (const [k, v] of Object.entries(res.headers)) {
               if (HOP_RE.test(k) || v === undefined) continue;
               outHeaders[k] = Array.isArray(v) ? v.join(', ') : String(v);
             }
-            const setCookie = res.headers['set-cookie'];
-            if (Array.isArray(setCookie)) outHeaders['set-cookie'] = setCookie.join('\n');
+            const setCookie = [...hopCookies, ...(res.headers['set-cookie'] ?? [])];
+            if (setCookie.length) outHeaders['set-cookie'] = setCookie.join('\n');
             return route.fulfill({ status: res.status || 599, headers: outHeaders, body: res.body });
           } catch (error) {
             if (error instanceof AdlError && error.reason?.startsWith('proxy_'))

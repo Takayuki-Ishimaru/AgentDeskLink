@@ -1,9 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import * as bundled from '../src/bundled-policy.js';
-import { assertUrlAllowed } from '../src/policy.js';
+import { createServer } from 'node:http';
+import { assertUrlAllowed, parsePolicy } from '../src/policy.js';
 import { Engine } from '../src/core.js';
-import type { Adapter, PolicyConfig } from '../src/types.js';
+import { BrowserAdapter } from '../src/browser.js';
+import { AdlError, safeError, type Adapter, type PolicyConfig } from '../src/types.js';
 const profile = bundled.extensionPolicy as (...args: any[]) => PolicyConfig;
 
 test('enabling MCP alone grants no targets or elevated permissions on any platform', () => {
@@ -126,6 +128,93 @@ test('all 64 configured origins can open their root without allocating another t
     assert.equal(policy.browserTargets.length, 64);
   } finally {
     await engine.shutdown();
+  }
+});
+
+test('read_only refuses every browser mutation as read_only_mode (the setting to change, no policy-file hint), but not navigation or scroll', async () => {
+  let acts = 0;
+  const adapter: Adapter = {
+    open: async () => ({
+      snapshot: async () => ({
+        elements: [{ id: 'b', role: 'button', name: 'Add', enabled: true }],
+        fingerprint: 'same',
+        truncated: false,
+      }),
+      act: async () => {
+        acts++;
+      },
+      close: async () => {},
+    }),
+    close: async () => {},
+  };
+  const policy = profile(undefined, 'linux', { browserOrigins: ['http://127.0.0.1:8123'], allowLoopback: true });
+  assert.equal(policy.operationMode, 'read_only');
+  const engine = new Engine(policy, { browser: adapter });
+  try {
+    const s = await engine.openUrl('http://127.0.0.1:8123/');
+    const observed = await engine.observe(s.session_id);
+    const id = observed.elements!.find(e => e.name === 'Add')!.id;
+    for (const action of [
+      { action: 'click' as const, element_id: id },
+      { action: 'fill' as const, element_id: id, value: 'x' },
+      { action: 'press' as const, element_id: id, value: 'Enter' },
+      { action: 'hover' as const, element_id: id },
+    ])
+      await assert.rejects(engine.act(s.session_id, action, observed.revision), (error: unknown) => {
+        assert.ok(error instanceof AdlError, action.action);
+        assert.equal(error.code, 'E_POLICY_DENIED');
+        assert.equal(error.reason, 'read_only_mode');
+        const safe = safeError(error);
+        assert.equal(safe.workspace_setting, 'agentdesklink.operationMode');
+        assert.equal(safe.policy_setting, undefined);
+        assert.match(safe.safe_message, /read_only/);
+        assert.doesNotMatch(safe.safe_message, /controls/);
+        return true;
+      });
+    assert.equal(acts, 0);
+    await engine.act(s.session_id, { action: 'scroll', element_id: id, direction: 'down' }, observed.revision);
+    await engine.act(s.session_id, { action: 'navigate', url: 'http://127.0.0.1:8123/next' }, observed.revision);
+    assert.equal(acts, 2);
+  } finally {
+    await engine.shutdown();
+  }
+});
+
+test('legacy CLI controls keep operation_not_granted with the controls hint', { timeout: 30000 }, async () => {
+  const app = createServer((_req, res) => {
+    res.setHeader('content-type', 'text/html');
+    res.end('<button type="button">Add</button>');
+  });
+  await new Promise<void>(resolve => app.listen(0, '127.0.0.1', resolve));
+  const origin = `http://127.0.0.1:${(app.address() as { port: number }).port}`;
+  const policy = parsePolicy({
+    allowedOrigins: [origin],
+    allowLoopback: true,
+    actionTimeoutMs: 5000,
+    browserTargets: [{ id: 'cli', label: 'CLI', url: origin, classification: 'PUBLIC', controls: [] }],
+  });
+  assert.equal(policy.operationMode, undefined);
+  const engine = new Engine(policy, { browser: new BrowserAdapter(policy, url => assertUrlAllowed(url, policy)) });
+  try {
+    const s = await engine.open((await engine.listTargets()).targets[0]!.target_id);
+    const observed = await engine.observe(s.session_id);
+    await assert.rejects(
+      engine.act(
+        s.session_id,
+        { action: 'click', element_id: observed.elements!.find(e => e.name === 'Add')!.id },
+        observed.revision,
+      ),
+      (error: unknown) => {
+        assert.ok(error instanceof AdlError);
+        assert.equal(error.reason, 'operation_not_granted');
+        assert.equal(safeError(error).policy_setting, 'browserTargets[].controls');
+        return true;
+      },
+    );
+  } finally {
+    await engine.shutdown();
+    app.closeAllConnections();
+    await new Promise<void>(resolve => app.close(() => resolve()));
   }
 });
 

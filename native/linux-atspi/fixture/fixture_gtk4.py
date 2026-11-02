@@ -43,6 +43,26 @@ def build():
 
     run.connect('clicked', on_run)
     box.append(run)
+    async_status = Gtk.Label(label='Async: idle')
+    box.append(async_status)
+    pending = [0]
+    async_run = Gtk.Button(label='Async')
+
+    def on_async(_button):
+        pending[0] += 1
+
+        def reveal():
+            async_status.set_text('Async: done %d' % pending[0])
+            return False
+
+        GLib.timeout_add(80, reveal)
+
+    async_run.connect('clicked', on_async)
+    box.append(async_run)
+    row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+    row.append(Gtk.Button(label='Pair'))
+    row.append(Gtk.Label(label='Pair note'))
+    box.append(row)
     disabled = Gtk.Button(label='Disabled')
     disabled.set_sensitive(False)
     box.append(disabled)

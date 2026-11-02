@@ -34,6 +34,10 @@ export interface Element {
   protected?: boolean;
   /** Internal DOM depth, projected out of public responses. */
   depth?: number;
+  /**
+   * Internal full shape, used by adapters, the snapshot store and delta comparison. Responses carry the lean public
+   * shape `{ label, value?, disabled?: true, selected?: true }`: value only when it differs from label, flags only when true.
+   */
   options?: { label: string; value: string; disabled: boolean; selected: boolean }[];
   /** Candidates were omitted by the source or response budget; reobserve this id with a larger budget. */
   options_truncated?: boolean;
@@ -46,6 +50,11 @@ export interface Element {
   value_truncated?: true;
   /** Text that a human cannot see (tiny, transparent, clipped or off-screen); treat it with extra suspicion. */
   hidden_text?: true;
+  /** Range bounds of a slider or spinbutton (input min/max/step, or aria-valuemin/aria-valuemax); each is omitted when the page declares none. */
+  min?: number;
+  max?: number;
+  /** Step of a native range/number input; the keyword "any" is kept as is. */
+  step?: number | 'any';
 }
 /** Blocked-request summary. code follows ErrorReason (origin_not_allowed, redirect_origin_not_allowed, method_requires_approval, request_denied, response_blocked, network_error); resource_type and method are bounded enums and origin is origin-only. */
 export interface NetworkWarning {
@@ -75,6 +84,8 @@ export interface RawSnapshot {
   title?: string;
   warnings?: NetworkWarning[];
   actionEvidence?: ActionEvidence;
+  /** Main-frame document response status of the latest navigation; set only when it is 400 or higher. */
+  http_status?: number;
 }
 export interface TargetWindow {
   bounds: {
@@ -129,6 +140,12 @@ export interface PolicyConfig {
   resourceOrigins?: string[];
   allowPersonalData?: boolean;
   operationMode?: 'read_only' | 'standard' | 'ask';
+  /** Normalized labels (see normalizeLabel) the trusted workspace declares harmless: they clear label-derived risk only. */
+  /** Origins of targets that may not be opened (SECRET, UNKNOWN): a redirect never reaches them. */
+  hiddenTargetOrigins?: string[];
+  consequentialAllowLabels?: string[];
+  /** Normalized labels the trusted workspace always treats as consequential. Deny beats allow. */
+  consequentialDenyLabels?: string[];
   allowedOrigins: string[];
   browserTargets: BrowserTargetConfig[];
   allowLoopback: boolean;
@@ -209,6 +226,9 @@ export interface AdapterSession {
     name: string;
     origin: string;
     details?: string[];
+    /** Consequential only because it submits a form; ask mode dispatches it under the adapter's submission guard (risk is then 'ordinary'). */
+    submission?: 'plain';
+    network?: { url: string; method: string; body: string };
   }>;
   act(
     action: Action,
@@ -281,6 +301,9 @@ export type ErrorReason =
   | 'approval_pending_other_action'
   | 'approval_target_changed'
   | 'approval_expired'
+  | 'approval_denied'
+  | 'approval_invalidated'
+  | 'read_only_mode'
   | 'proxy_connect_refused'
   | 'proxy_unreachable'
   | 'invalid_scope'
@@ -288,7 +311,9 @@ export type ErrorReason =
   | 'form_submission_requires_approval'
   | 'desktop_operation_not_granted'
   | 'linux_accessibility_unavailable'
-  | 'platform_unsupported';
+  | 'platform_unsupported'
+  | 'capture_not_enabled'
+  | 'browser_sandbox_unavailable';
 const ERROR_REASON_MESSAGES: Record<ErrorReason, string> = {
   occluded: 'The target is covered by another element. Remove the obstruction and observe again.',
   not_visible: 'The target is not visible at the intended input point. Observe again before acting.',
@@ -304,9 +329,9 @@ const ERROR_REASON_MESSAGES: Record<ErrorReason, string> = {
   origin_not_allowed:
     'This origin is not granted. Add its exact origin to agentdesklink.browserOrigins for navigation, or browserResourceOrigins for read-only assets.',
   redirect_origin_not_allowed:
-    'A redirect tried to leave the permitted origin. Inspect the destination origin and grant/open it separately.',
+    'A redirect tried to leave for an origin that is not granted, or as something other than a document read. Inspect the destination origin; a page redirected to a granted origin follows it.',
   requires_ask_mode:
-    'This action needs individual human approval. Select agentdesklink.operationMode = ask in the trusted host settings.',
+    'This action is classified as consequential (its label, link destination or dialog). It needs individual human approval: select agentdesklink.operationMode = ask, or list a label that is known to be harmless in this workspace in agentdesklink.consequentialAllowLabels.',
   approval_unavailable:
     'Individual approval is unavailable. Start this MCP server through the trusted VS Code host with operationMode = ask.',
   emergency_stop:
@@ -343,6 +368,12 @@ const ERROR_REASON_MESSAGES: Record<ErrorReason, string> = {
   approval_target_changed:
     'The page or target changed while approval was pending, so the request was withdrawn. Observe again and repeat the action.',
   approval_expired: 'The approval request expired before it was used. Observe again and repeat the action.',
+  approval_denied:
+    'A human rejected this approval request. Do not retry the same action; ask the user how to proceed or choose a different action.',
+  approval_invalidated:
+    'The approval request was withdrawn by the host (settings or trust changed, operations stopped, or the approval was already used). Observe again; a new request needs a new action.',
+  read_only_mode:
+    'This target is in the read_only permission tier: only observe, navigate, back and scroll are allowed. Select agentdesklink.operationMode = standard for ordinary actions or ask for consequential actions with approval.',
   proxy_connect_refused:
     'The configured proxy refused the tunnel. If it authorizes by hostname, enable agentdesklink.browserProxyConnectByHostname; otherwise check the proxy allow list.',
   proxy_unreachable:
@@ -352,22 +383,26 @@ const ERROR_REASON_MESSAGES: Record<ErrorReason, string> = {
   revision_expired:
     'The since_revision baseline is no longer retained (only recent revisions are kept). Omit since_revision for a full observation.',
   form_submission_requires_approval:
-    'The page tried to submit a form. The submission was blocked before any request left the browser; page scripts may have run. Observe again. Form submissions need agentdesklink.operationMode = ask with human approval.',
+    'The page tried to submit a form; the submission was cancelled inside the browser before any request left (page scripts may have run). In ask mode an approval request was created: wait for the decision with adl_approvals (wait_ms) and retry the identical action with the returned revision. In standard mode form submissions need agentdesklink.operationMode = ask.',
   desktop_operation_not_granted:
     'Native desktop mutations are not granted for this application. Select agentdesklink.operationMode = standard for ordinary controls, grant allowAllOperations, or configure a trusted control allowlist (controlsPath) in the policy.',
   linux_accessibility_unavailable:
     'The Linux accessibility stack is unavailable. Install python3-gi, gir1.2-atspi-2.0 and at-spi2-core, enable toolkit accessibility (gsettings set org.gnome.desktop.interface toolkit-accessibility true), then restart the MCP server.',
   platform_unsupported:
     'This feature is not supported on this platform. Check adl_capabilities.platform_unsupported for the unavailable features.',
+  capture_not_enabled:
+    'Image capture is not enabled for this target. Desktop apps: enable agentdesklink.allowUnredactedImages in the trusted workspace settings. Policy-file browser targets: set browserTargets[].visual.enabled.',
+  browser_sandbox_unavailable:
+    'Chromium could not start its sandbox. The MCP server log names the launch error and the remedy.',
 };
 export class AdlError extends Error {
   mayHaveExecuted = false;
   requestId?: string;
-  /** detail.argument names a request argument (never page data); detail.limit is a configured numeric limit. */
+  /** detail.argument names a request argument (never page data); detail.limit is a configured numeric limit; detail.revision is the session revision the identical retry must use; detail.page_script_ran says a stopped action's page handler has run. */
   constructor(
     public readonly code: ErrorCode,
     public readonly reason?: ErrorReason,
-    public readonly detail: { argument?: string; limit?: number } = {},
+    public readonly detail: { argument?: string; limit?: number; revision?: number; page_script_ran?: boolean } = {},
   ) {
     super(ERROR_MESSAGES[code]);
     this.name = 'AdlError';
@@ -392,7 +427,8 @@ const REASON_HINTS: Partial<Record<ErrorReason, { workspace_setting?: string; po
   },
   loopback_not_allowed: { workspace_setting: 'agentdesklink.allowLoopback' },
   private_network_not_allowed: { workspace_setting: 'agentdesklink.allowPrivateNetwork' },
-  requires_ask_mode: { workspace_setting: 'agentdesklink.operationMode' },
+  requires_ask_mode: { workspace_setting: 'agentdesklink.operationMode', policy_setting: 'consequentialAllowLabels' },
+  read_only_mode: { workspace_setting: 'agentdesklink.operationMode' },
   approval_unavailable: { workspace_setting: 'agentdesklink.operationMode' },
   consequential_operation: { workspace_setting: 'agentdesklink.operationMode' },
   method_requires_approval: { workspace_setting: 'agentdesklink.operationMode' },
@@ -422,6 +458,8 @@ export function safeError(error: unknown) {
     ...(reason ? { reason } : {}),
     ...(detail?.argument ? { argument: detail.argument } : {}),
     ...(detail?.limit !== undefined ? { limit: detail.limit } : {}),
+    ...(detail?.revision !== undefined ? { revision: detail.revision } : {}),
+    ...(detail?.page_script_ran ? { page_script_ran: true } : {}),
     ...(error instanceof AdlError && error.requestId ? { request_id: error.requestId } : {}),
     ...(hints?.policy_setting ? { policy_setting: hints.policy_setting } : {}),
     ...(hints?.workspace_setting ? { workspace_setting: hints.workspace_setting } : {}),

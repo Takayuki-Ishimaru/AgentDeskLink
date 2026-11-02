@@ -57,7 +57,7 @@ test(
       );
       const after = await f.engine.observe(f.session.session_id, { token_budget: 8000 });
       assert.equal(after.elements!.find(e => e.name === 'Quick search')!.value, 'dictionary');
-      assert.equal(after.elements!.find(e => e.name === 'Other search')!.value, '');
+      assert.equal(after.elements!.find(e => e.name === 'Other search')!.value, undefined, 'an empty value is omitted');
     } finally {
       await f.close();
     }
@@ -213,7 +213,7 @@ test(
       );
       const after = await f.engine.observe(f.session.session_id);
       assert.equal(after.elements!.find(e => e.id === fields[0]!.id)!.value, 'dictionary');
-      assert.equal(after.elements!.find(e => e.id === fields[1]!.id)!.value, '');
+      assert.equal(after.elements!.find(e => e.id === fields[1]!.id)!.value, undefined, 'an empty value is omitted');
     } finally {
       await f.close();
     }

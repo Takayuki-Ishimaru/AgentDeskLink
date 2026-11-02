@@ -49,13 +49,16 @@ test(
         '\u652f\u6255',
         '\u9001\u4fe1',
         '\u767b\u9332',
-        '\u30ad\u30e3\u30f3\u30bb\u30eb',
         '\u9001\u91d1',
-        '\u78ba\u5b9a',
         '\u30ed\u30b0\u30a4\u30f3',
       ]) {
         await page.locator('#jp').evaluate((e, label) => (e.textContent = label), label);
         assert.equal((await proof('#jp')).risk, 'consequential', label);
+      }
+      // A bare dismiss or commit word is not an effect on its own (shared classifier, design V0.1.7 Part A).
+      for (const label of ['\u30ad\u30e3\u30f3\u30bb\u30eb', '\u78ba\u5b9a', 'Cancel', 'OK']) {
+        await page.locator('#jp').evaluate((e, label) => (e.textContent = label), label);
+        assert.equal((await proof('#jp')).risk, 'ordinary', label);
       }
       const a = await proof('#search');
       await page.locator('input[name=q]').fill('dogs');

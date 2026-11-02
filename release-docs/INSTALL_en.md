@@ -2,12 +2,12 @@
 
 [日本語](INSTALL.md) | **English**
 
-Target version: `0.1.7` (beta)
+Target version: `0.1.8` (beta)
 
 ## Requirements
 
 - VS Code 1.101 or newer.
-- The common `agentdesklink-0.1.7.vsix` package. Check the [supported environments and known limitations](KNOWN_ISSUES_en.md).
+- The common `agentdesklink-0.1.8.vsix` package. Check the [supported environments and known limitations](KNOWN_ISSUES_en.md).
 - A network connection for the first Chromium download if Chrome is not installed.
 
 One VSIX bundles Node.js and image-processing libraries for macOS / Apple silicon, Windows x64 and Linux x64. It also includes the macOS, Windows and Linux desktop helpers (the Linux helper is a Python 3 script that needs the OS python3-gi packages). It selects the matching runtime at startup, so no separate build is needed.
@@ -16,7 +16,7 @@ The distribution file is shared across these operating systems. This common VSIX
 
 ## Installation
 
-1. Download `agentdesklink-0.1.7.vsix` and `SHA256SUMS` from the release page.
+1. Download `agentdesklink-0.1.8.vsix` and `SHA256SUMS` from the release page.
 2. Compute the SHA-256 using the [update guide](UPDATES_en.md) and confirm it matches the list.
 3. In the VS Code Command Palette, choose “Extensions: Install from VSIX...” and select the VSIX.
 4. Open the folder you want to use, review its contents and trust the workspace.
@@ -46,6 +46,7 @@ MCP is disabled by default for every workspace. Enabling it grants no target acc
 | `agentdesklink.allowPersonalData` | Reveals personal data such as email and phone numbers. Defaults to off; credentials and protected regions remain protected |
 | `agentdesklink.desktopAppId` / `agentdesklink.desktopAppPath` | The ID and absolute executable path of one allowed app |
 | `agentdesklink.operationMode` | `read_only` (default), `standard` or `ask`, matching Read only, Standard and Ask each time in the panel |
+| `agentdesklink.consequentialAllowLabels` / `agentdesklink.consequentialDenyLabels` | Button and link labels never / always treated as consequential (up to 64 entries of 1–64 characters each). Entries match the whole label or a whole word; Japanese entries match as substrings. The deny list wins. Credential, real form-submission, file, download and protected-region checks are unaffected. Set them in settings.json |
 | `agentdesklink.allowAllOperations` | Legacy all-operations grant. Defaults to off and takes precedence over the tier when enabled. Selecting Allow all in the panel requires confirmation |
 | `agentdesklink.browserHeadless` | Defaults to `true`. Set false for a visible browser and manual login |
 | `agentdesklink.sessionIdleMinutes` | Idle session timeout, 1–60 minutes; defaults to 15 |
@@ -59,9 +60,9 @@ Check “Current permissions” in the panel to see the effective grants. Observ
 
 ### Permission tiers and one-shot approvals
 
-- **Read only**: observe, navigate and scroll. Allowed desktop apps are observe-only; operations are refused with `desktop_operation_not_granted`.
-- **Standard**: ordinary browser inputs, clicks and forms handled within JavaScript, plus ordinary actions on the allowed desktop app on macOS, Windows and Linux (click, fill, check, select, scroll); consequential actions such as purchase, deletion or credential entry are denied.
-- **Ask each time**: standard actions plus inspected consequential actions approved once in a VS Code dialog. For a desktop app the dialog shows the app ID, window title, role and control name. Review the target and contents, then approve or deny. The AI cannot decide the approval. After approval, it retries the same operation.
+- **Read only**: observe, navigate and scroll. Browser operations are refused with `read_only_mode`. Allowed desktop apps are observe-only; operations are refused with `desktop_operation_not_granted`.
+- **Standard**: ordinary browser inputs, clicks and forms handled within JavaScript, plus ordinary actions on the allowed desktop app on macOS, Windows and Linux (click, fill, check, select, scroll); consequential actions such as purchase, deletion or credential entry are denied. Browser actions are classified by the control's verb (delete, send, pay, unsubscribe, log out…) and by real form submissions; links that only navigate within the same origin, a dialog's Cancel, and nouns such as Order history are ordinary.
+- **Ask each time**: standard actions plus inspected consequential actions approved once in a VS Code dialog. Submit buttons and Enter run as in Standard; only when a form is really submitted is the submission cancelled and approval requested. For a desktop app the dialog shows the app ID, window title, role and control name. Review the target and contents, then approve or deny. The AI cannot decide the approval. After approval, it retries the same operation.
 
 Browser approvals cover inspected controls in the main document, open Shadow DOM and same-origin iframes. A desktop approval covers a single action on a consequential control (delete, send and similar) at the observed revision only. Sensitive controls such as password fields are always refused, even with approval. Closed shadow roots, out-of-process iframe proofs, generic AJAX/DELETE and file uploads remain unsupported. Changed contents, expiry and emergency stop invalidate approvals. Unavailable approval dialogs do not authorize consequential operations. Secret values are not sent to the dialog.
 

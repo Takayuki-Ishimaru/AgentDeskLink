@@ -17,6 +17,10 @@ export interface ObserveOptions {
   format?: ObservationFormat;
   text?: { element_id: string; offset?: number; length?: number };
 }
+/**
+ * Change record. Elements are held in their full internal shape; every response omits enabled:true and value:""
+ * and carries lean options ({ label, value? (only when different), disabled?: true, selected?: true }) — see leanElement.
+ */
 export interface SnapshotChange {
   op: 'added' | 'removed' | 'changed';
   id: string;
@@ -29,27 +33,27 @@ export interface ObserveResult {
     content: string;
     total_length: number;
     next_offset: number | null;
-    truncated: boolean;
   };
-  format?: 'compact' | 'lines';
-  defaults?: { enabled: true; value: '' };
   lines?: string[];
+  /** Present on full observations without a cursor and on deltas only when it differs from the base revision. */
   url?: string;
+  /** Same rule as url. */
   title?: string;
   warnings?: NetworkWarning[];
+  /** Status of the main-frame document response; present on every response, and only when it is 400 or higher. */
+  http_status?: number;
   ok: true;
-  session_id: string;
   revision: number;
   elements?: Element[];
   changes?: SnapshotChange[];
-  redactions: number;
+  /** Only when greater than zero. */
+  redactions?: number;
   /** Elements were omitted (more pages, element limit or source limit). Clipped text alone never sets it. */
   truncated: boolean;
-  /** Same value as truncated, named for clarity. */
-  elements_truncated?: boolean;
   /** At least one returned name or value is clipped; read the full text with text:{element_id}. */
   text_clipped?: true;
-  next_cursor: string | null;
+  /** Only when more elements follow. */
+  next_cursor?: string;
   representation?: 'full' | 'delta';
   reset?: boolean;
 }
@@ -79,6 +83,9 @@ const FIELDS = [
   'text_length',
   'href',
   'value_truncated',
+  'min',
+  'max',
+  'step',
 ] as const;
 type Field = (typeof FIELDS)[number];
 const INCLUDE_KEYS = new Map(FIELDS.map(f => [f.toLowerCase(), f]));
@@ -97,7 +104,7 @@ interface Stored {
   elements: Element[];
   truncated: boolean;
   redactions: number;
-  metadata: Pick<ObserveResult, 'url' | 'title' | 'warnings'>;
+  metadata: Pick<ObserveResult, 'url' | 'title' | 'warnings' | 'http_status'>;
   clipped: Set<string>;
 }
 interface Cursor {
@@ -249,22 +256,77 @@ function project(element: Element, include: Field[] | null): Element {
   return out as unknown as Element;
 }
 
-function compactElement(element: Element): Element {
-  const out = { ...element } as Partial<Element>;
+/**
+ * Public wire shape of an element, applied at emit time for every format (the stored and compared
+ * elements keep their full shape): enabled:true and value:"" are omitted, and options are lean
+ * (value only when it differs from label, disabled/selected only when true).
+ */
+function leanElement(element: Element): Element {
+  const out = { ...element } as Record<string, unknown>;
   if (out.enabled === true) delete out.enabled;
   if (out.value === '') delete out.value;
-  return out as Element;
+  if (Array.isArray(element.options))
+    out.options = element.options.map((option): Record<string, unknown> => ({
+      label: option.label,
+      ...(option.value !== option.label ? { value: option.value } : {}),
+      ...(option.disabled ? { disabled: true as const } : {}),
+      ...(option.selected ? { selected: true as const } : {}),
+    }));
+  return out as unknown as Element;
+}
+function leanChange(change: SnapshotChange): SnapshotChange {
+  return change.element ? { ...change, element: leanElement(change.element) } : change;
 }
 
-// All page-controlled strings are JSON-escaped; a newline cannot forge a row.
-function row(change: SnapshotChange, delta: boolean): string {
+// A bare token must be unambiguous in a space-separated row: it never contains a quote, space, "=", newline or tab.
+const BARE_ID = /^[A-Za-z0-9_-]{1,64}$/;
+const BARE_ROLE = /^[a-z]+$/;
+const token = (value: string, bare: RegExp): string => (bare.test(value) ? value : JSON.stringify(value));
+
+// Only ids, roles and parent_id that match the safe patterns are bare; every other page-controlled string
+// (name, value, href, ...) is JSON-escaped, so a newline, quote or "=" cannot forge a row or a key.
+export function row(change: SnapshotChange, delta: boolean): string {
   const prefix = delta ? ({ added: '+', removed: '-', changed: '~' } as const)[change.op] + ' ' : '';
-  if (!change.element) return prefix + JSON.stringify(change.id);
-  const e = compactElement(change.element),
-    parts = [JSON.stringify(e.id ?? change.id), JSON.stringify(e.role ?? ''), JSON.stringify(e.name ?? '')];
+  if (!change.element) return prefix + token(change.id, BARE_ID);
+  const e = leanElement(change.element),
+    parts = [token(e.id ?? change.id, BARE_ID), token(e.role ?? '', BARE_ROLE), JSON.stringify(e.name ?? '')];
   for (const [key, value] of Object.entries(e))
-    if (!['id', 'role', 'name'].includes(key)) parts.push(key + '=' + JSON.stringify(value));
+    if (!['id', 'role', 'name'].includes(key))
+      parts.push(
+        key + '=' + (key === 'parent_id' && typeof value === 'string' ? token(value, BARE_ID) : JSON.stringify(value)),
+      );
   return prefix + parts.join(' ');
+}
+
+interface Envelope {
+  metadata: Stored['metadata'];
+  revision: number;
+  mode: 'full' | 'delta' | null;
+  reset: boolean;
+  delta: boolean;
+  format: ObservationFormat;
+  redactions: number;
+  truncated: boolean;
+  cursor: string | null;
+  clipped: boolean;
+}
+// One place defines the response keys and their omission rules; the size estimates use the same code.
+function envelope(e: Envelope, items: SnapshotChange[]): ObserveResult {
+  return {
+    ...e.metadata,
+    ok: true,
+    revision: e.revision,
+    ...(e.mode ? { representation: e.mode, ...(e.reset ? { reset: true } : {}) } : {}),
+    ...(e.format === 'lines'
+      ? { lines: items.map(c => row(c, e.delta)) }
+      : e.delta
+        ? { changes: items.map(leanChange) }
+        : { elements: items.map(c => leanElement(c.element!)) }),
+    ...(e.redactions > 0 ? { redactions: e.redactions } : {}),
+    truncated: e.truncated,
+    ...(e.clipped ? { text_clipped: true as const } : {}),
+    ...(e.cursor ? { next_cursor: e.cursor } : {}),
+  } as ObserveResult;
 }
 
 function cap(element: Element, nameCap: number, valueCap: number): Element {
@@ -320,6 +382,9 @@ export class SnapshotStore {
         ...(snapshot.url ? { url: redactString(snapshot.url, this.allowPersonalData).slice(0, 512) } : {}),
         ...(snapshot.title ? { title: redactString(snapshot.title, this.allowPersonalData).slice(0, 512) } : {}),
         ...(snapshot.warnings ? { warnings: snapshot.warnings.slice(0, 8) } : {}),
+        ...(Number.isInteger(snapshot.http_status) && snapshot.http_status! >= 400 && snapshot.http_status! <= 999
+          ? { http_status: snapshot.http_status! }
+          : {}),
       },
       clipped,
     };
@@ -383,6 +448,18 @@ export class SnapshotStore {
       carried = this.takeCursor(options.cursor, sessionId, revision, budget, since ?? null, key);
       offset = carried.offset;
     }
+    // url and title are sent with a full observation (not on cursor pages) and, in a delta, only when they
+    // differ from the base revision. warnings and http_status are security/usability signals and always stay.
+    const locate = (as: 'full' | 'delta'): Stored['metadata'] => {
+      const { url, title, ...always } = current.metadata;
+      if (carried) return always;
+      if (as === 'full' || base === null) return current.metadata;
+      return {
+        ...(url !== undefined && url !== base.metadata.url ? { url } : {}),
+        ...(title !== undefined && title !== base.metadata.title ? { title } : {}),
+        ...always,
+      };
+    };
     let items: SnapshotChange[] | null = null;
     let mode: 'full' | 'delta';
     let reset: boolean;
@@ -408,7 +485,7 @@ export class SnapshotStore {
       const deltaItems = items;
       const fullItems = this.items(current, null, include, matches, depth);
       const deltaBytes = this.payloadBytes(
-        sessionId,
+        locate('delta'),
         revision,
         deltaItems,
         false,
@@ -418,7 +495,7 @@ export class SnapshotStore {
         format,
       );
       const fullBytes = this.payloadBytes(
-        sessionId,
+        locate('full'),
         revision,
         fullItems,
         true,
@@ -447,7 +524,7 @@ export class SnapshotStore {
       advertised,
       reset,
       options.element_limit,
-      current.metadata,
+      locate(mode),
       format,
       current.clipped,
     );
@@ -510,8 +587,9 @@ export class SnapshotStore {
       .sort((a, b) => (changeKey(a) < changeKey(b) ? -1 : 1));
   }
 
+  /** Size of the complete response, used to choose between full and delta; mirrors pack's envelope. */
   private payloadBytes(
-    sessionId: string,
+    metadata: Stored['metadata'],
     revision: number,
     items: SnapshotChange[],
     full: boolean,
@@ -520,28 +598,22 @@ export class SnapshotStore {
     reset: boolean,
     format: ObservationFormat = 'json',
   ): number {
-    const envelope: Record<string, unknown> = {
-      ok: true,
-      session_id: sessionId,
-      revision,
-      representation: mode,
-      redactions,
-      truncated: false,
-      elements_truncated: false,
-      next_cursor: null,
-    };
-    if (reset) envelope.reset = true;
-    if (format !== 'json') {
-      envelope.format = format;
-      envelope.defaults = { enabled: true, value: '' };
-    }
-    const transformed =
-      format === 'compact'
-        ? items.map(c => ({ ...c, ...(c.element ? { element: compactElement(c.element) } : {}) }))
-        : items;
-    envelope[format === 'lines' ? 'lines' : full ? 'elements' : 'changes'] =
-      format === 'lines' ? items.map(c => row(c, !full)) : full ? transformed.map(c => c.element) : transformed;
-    return Buffer.byteLength(JSON.stringify(envelope) ?? '', 'utf8');
+    const result = envelope(
+      {
+        metadata,
+        revision,
+        mode,
+        reset,
+        delta: !full,
+        format,
+        redactions,
+        truncated: false,
+        cursor: null,
+        clipped: false,
+      },
+      items,
+    );
+    return Buffer.byteLength(JSON.stringify(result) ?? '', 'utf8');
   }
 
   private pack(
@@ -571,55 +643,25 @@ export class SnapshotStore {
         ...(metadata.url ? { url: metadata.url.slice(0, 128) } : {}),
         ...(metadata.title ? { title: metadata.title.slice(0, 64) } : {}),
       };
-    const head = (redactions: number, truncated: boolean, cursor: string | null, clipped = false): ObserveResult =>
-      ({
-        ...metadata,
-        ok: true,
-        session_id: sessionId,
-        revision,
-        ...(format !== 'json' ? { format, defaults: { enabled: true, value: '' } } : {}),
-        ...(mode ? { representation: mode, ...(reset ? { reset: true } : {}) } : {}),
-        ...(format === 'lines'
-          ? { lines: [] }
-          : delta
-            ? { changes: [] as SnapshotChange[] }
-            : { elements: [] as Element[] }),
-        redactions,
-        truncated,
-        elements_truncated: truncated,
-        ...(clipped ? { text_clipped: true } : {}),
-        next_cursor: cursor,
-      }) as unknown as ObserveResult;
-    const size = (list: SnapshotChange[], redactions: number, cursor: string | null): number => {
-      const base = head(redactions, false, cursor, textClipped(list));
-      const transformed =
-        format === 'compact'
-          ? list.map(c => ({ ...c, ...(c.element ? { element: compactElement(c.element) } : {}) }))
-          : list;
-      const payload =
-        format === 'lines' ? list.map(c => row(c, delta)) : delta ? transformed : transformed.map(c => c.element);
-      return Buffer.byteLength(
-        JSON.stringify({ ...base, [format === 'lines' ? 'lines' : delta ? 'changes' : 'elements']: payload }) ?? '',
-        'utf8',
+    const render = (list: SnapshotChange[], redactions: number, truncated: boolean, cursor: string | null) =>
+      envelope(
+        {
+          metadata,
+          revision,
+          mode,
+          reset,
+          delta,
+          format,
+          redactions,
+          truncated,
+          cursor,
+          clipped: textClipped(list),
+        },
+        list,
       );
-    };
-    const emit = (
-      list: SnapshotChange[],
-      redactions: number,
-      truncated: boolean,
-      cursor: string | null,
-    ): ObserveResult => {
-      const transformed =
-        format === 'compact'
-          ? list.map(c => ({ ...c, ...(c.element ? { element: compactElement(c.element) } : {}) }))
-          : list;
-      const payload =
-        format === 'lines' ? list.map(c => row(c, delta)) : delta ? transformed : transformed.map(c => c.element);
-      return {
-        ...head(redactions, truncated, cursor, textClipped(list)),
-        [format === 'lines' ? 'lines' : delta ? 'changes' : 'elements']: payload,
-      } as ObserveResult;
-    };
+    const size = (list: SnapshotChange[], redactions: number, cursor: string | null): number =>
+      Buffer.byteLength(JSON.stringify(render(list, redactions, false, cursor)) ?? '', 'utf8');
+    const emit = render;
     // Leave room for an actual item and its continuation, rather than returning
     // an empty terminal page when multi-byte metadata fills a small budget.
     const first = items[Math.min(Math.max(offset, 0), items.length)];
