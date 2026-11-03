@@ -68,7 +68,7 @@ test(
   'a search field after an over-deep unrelated subtree remains observable and editable',
   { timeout: 15000 },
   async () => {
-    const deep = '<div>'.repeat(20) + '<span>Deep unrelated content</span>' + '</div>'.repeat(20);
+    const deep = '<div>'.repeat(65) + '<span>Deep unrelated content</span>' + '</div>'.repeat(65);
     const f = await setup(`${deep}<input id="query" type="search" aria-label="Quick search">`, [
       { selector: '#query', actions: ['fill'] },
     ]);

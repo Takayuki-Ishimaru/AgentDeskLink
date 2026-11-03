@@ -9,6 +9,9 @@ import type {
 } from './physical-input-types.js';
 export type Mode = 'strict_isolated' | 'background_semantic' | 'interactive_desktop';
 export type Classification = 'PUBLIC' | 'INTERNAL' | 'SECRET' | 'UNKNOWN';
+/** DOM acquisition stays below the privacy ancestor bound (128). */
+export const MAX_DOM_DEPTH = 64;
+export type SnapshotSourceLimit = 'depth_limit' | 'visit_limit' | 'element_limit' | 'frame_limit' | 'frame_unavailable';
 export type ActionName =
   | 'click'
   | 'fill'
@@ -31,6 +34,8 @@ export interface Element {
   selected?: boolean;
   expanded?: boolean;
   sensitive?: boolean;
+  /** Internal context-based personal-data label, independently controlled by allowPersonalData. */
+  personal?: boolean;
   protected?: boolean;
   /** Internal DOM depth, projected out of public responses. */
   depth?: number;
@@ -48,7 +53,7 @@ export interface Element {
   href?: string;
   /** The value was clipped by the response field limit. */
   value_truncated?: true;
-  /** Text that a human cannot see (tiny, transparent, clipped or off-screen); treat it with extra suspicion. */
+  /** Concealed prose was omitted. Accessible control names remain untrusted UI data. */
   hidden_text?: true;
   /** Range bounds of a slider or spinbutton (input min/max/step, or aria-valuemin/aria-valuemax); each is omitted when the page declares none. */
   min?: number;
@@ -82,6 +87,10 @@ export interface RawSnapshot {
   elements: Element[];
   fingerprint: string;
   truncated: boolean;
+  /** The browser session can only read and navigate through an isolated realm. */
+  read_only?: true;
+  /** Source data omitted before response pagination; a cursor cannot recover it. */
+  source_limits?: SnapshotSourceLimit[];
   url?: string;
   title?: string;
   warnings?: NetworkWarning[];
@@ -109,6 +118,8 @@ export interface Target {
   label: string;
   capabilities: string[];
   policy_class: Classification;
+  /** Permitted gesture surface ids and their kinds when gestures are allowed for this target; selectors are never reported. */
+  gesture_surfaces?: { id: string; kinds: string[] }[];
   window?: TargetWindow;
   capture_only?: boolean;
 }
@@ -256,6 +267,8 @@ export interface AdapterSession {
     name: string;
     origin: string;
     details?: string[];
+    /** Supplemental visible page context captured before dispatch, not request identity. */
+    context?: { kind: 'row' | 'listitem' | 'dialog' | 'form'; text: string };
     /** Consequential only because it submits a form; ask mode dispatches it under the adapter's submission guard (risk is then 'ordinary'). */
     submission?: 'plain';
     network?: { url: string; method: string; body: string };
@@ -369,7 +382,13 @@ export type ErrorReason =
   | 'request_requires_approval'
   | 'request_not_approvable'
   | 'background_write_blocked'
-  | 'contained_request_blocked';
+  | 'contained_request_blocked'
+  | 'tls_handshake_failed'
+  | 'transport_failure'
+  | 'gesture_surface_not_found'
+  | 'gesture_kind_not_allowed'
+  | 'gesture_disabled'
+  | 'isolated_read_only';
 const ERROR_REASON_MESSAGES: Record<ErrorReason, string> = {
   occluded: 'The target is covered by another element. Remove the obstruction and observe again.',
   not_visible: 'The target is not visible at the intended input point. Observe again before acting.',
@@ -383,9 +402,9 @@ const ERROR_REASON_MESSAGES: Record<ErrorReason, string> = {
   private_network_not_allowed:
     'Private network access is disabled. Enable agentdesklink.allowPrivateNetwork in trusted workspace settings and retain the exact origin grant.',
   origin_not_allowed:
-    'This origin is not granted. Add its exact origin to agentdesklink.browserOrigins for navigation, or browserResourceOrigins for read-only assets.',
+    'This origin is not granted. Add its exact origin to agentdesklink.browserOrigins for navigation, or browserResourceOrigins for read-only assets. CLI policy file: add the exact origin to allowedOrigins and configure browserTargets to list a target in adl_targets; a browserTargets entry alone does not grant the origin.',
   redirect_origin_not_allowed:
-    'A redirect tried to leave for an origin that is not granted, or as something other than a document read. Inspect the destination origin; a page redirected to a granted origin follows it.',
+    'A redirect tried to leave for an origin that is not granted, or as something other than a document read. Inspect the destination origin; a page redirected to a granted origin follows it. CLI policy file: grant the destination origin in allowedOrigins; a browserTargets entry alone does not grant it.',
   requires_ask_mode:
     'This action is classified as consequential (its label, link destination or dialog), or it sent a write request. It needs individual human approval: select agentdesklink.operationMode = ask (the control is then dispatched and the human approves the click or the exact request), or list a label that is known to be harmless in this workspace in agentdesklink.consequentialAllowLabels.',
   approval_unavailable:
@@ -457,7 +476,7 @@ const ERROR_REASON_MESSAGES: Record<ErrorReason, string> = {
   browser_sandbox_unavailable:
     'Chromium could not start its sandbox. The MCP server log names the launch error and the remedy.',
   desktop_focus_changed:
-    'Another window or application became active during the action, so the desktop session was closed. Check the screen, then open a new session with adl_open and observe.',
+    'The desktop target lost focus or its window may have closed, so the session was closed. Check the screen, rediscover the target with adl_targets, then open a new session with adl_open and observe.',
   request_requires_approval:
     "The page sent a write request (POST, PUT, PATCH or DELETE by fetch/XHR) during this action. It is held unsent inside the browser and a human was asked to approve its exact content. Wait with adl_approvals (request_id, wait_ms): status consumed with sent:true means every request was released and dispatched; sent:false (or any other status) means nothing, or not the whole set, was sent. Then observe again. Do not repeat the action: the page's handler has already run. When a standing site grant covers the request, the action instead returns ok with approval.granted = site_writes and the request already sent.",
   request_not_approvable:
@@ -466,6 +485,18 @@ const ERROR_REASON_MESSAGES: Record<ErrorReason, string> = {
     'A write request that started outside any action (a timer, autosave or beacon) was blocked before it left; only writes the page sends while an action runs can be held for approval. Trigger the save with an explicit control (for example its Save button) so that it belongs to an action.',
   contained_request_blocked:
     'This control ran with the network closed to new requests (Delete/Remove containment) and started a new read request or navigation that cannot be attributed to it, so it was stopped; its handler has run. Writes it sends are held for approval in ask mode. If the control is known to be harmless in this workspace, list its label in agentdesklink.consequentialAllowLabels.',
+  tls_handshake_failed:
+    'The TLS handshake failed. Verify the destination certificate and proxy configuration (agentdesklink.browserProxyServer or browserProxyServer in the CLI policy). For a trusted corporate CA, configure Node with --use-system-ca or NODE_EXTRA_CA_CERTS, then restart the server.',
+  transport_failure:
+    'The connection to the destination failed at the transport level (refused, reset or interrupted) before a usable response was returned. Verify the destination is reachable, then retry.',
+  gesture_surface_not_found:
+    'No gesture surface with this surface_id is configured for this target. List the permitted surface ids and their gesture kinds in the gesture_surfaces field of the target entry from adl_targets, then retry with one of them.',
+  gesture_kind_not_allowed:
+    'This gesture kind is not allowed on the named surface. Check gesture_surfaces in the target entry from adl_targets for the kinds each surface id supports, and use a supported kind.',
+  isolated_read_only:
+    'This session uses isolated read-only compatibility mode. Observe, read text, navigate or go back; input, scrolling, capture and handoff are unavailable.',
+  gesture_disabled:
+    'Gestures are not enabled for this target. Policy-file browser targets: set browserTargets[].gestures.enabled with visual surfaces (visual capture must be enabled); a non-read-only operation mode is also required.',
 };
 export class AdlError extends Error {
   mayHaveExecuted = false;
@@ -532,8 +563,15 @@ const REASON_HINTS: Partial<Record<ErrorReason, { workspace_setting?: string; po
   method_requires_approval: { workspace_setting: 'agentdesklink.operationMode' },
   form_submission_requires_approval: { workspace_setting: 'agentdesklink.operationMode' },
   desktop_operation_not_granted: { workspace_setting: 'agentdesklink.operationMode' },
-  origin_not_allowed: { workspace_setting: 'agentdesklink.browserOrigins' },
-  redirect_origin_not_allowed: { workspace_setting: 'agentdesklink.browserOrigins' },
+  origin_not_allowed: {
+    workspace_setting: 'agentdesklink.browserOrigins',
+    policy_setting: 'allowedOrigins (browserTargets alone does not grant)',
+  },
+  redirect_origin_not_allowed: {
+    workspace_setting: 'agentdesklink.browserOrigins',
+    policy_setting: 'allowedOrigins (browserTargets alone does not grant)',
+  },
+  gesture_disabled: { policy_setting: 'browserTargets[].gestures' },
   proxy_connect_refused: { workspace_setting: 'agentdesklink.browserProxyServer' },
   proxy_unreachable: { workspace_setting: 'agentdesklink.browserProxyServer' },
 };

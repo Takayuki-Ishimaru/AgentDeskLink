@@ -370,3 +370,25 @@ test('lines: only safe ids, roles and parent_id are bare; everything else is JSO
     removed.lines!.join('\n'),
   );
 });
+
+test('isolated read-only marker survives full, delta, and cursor pages', () => {
+  const store = new SnapshotStore();
+  const many = Array.from({ length: 60 }, (_, i) => ({
+    id: `e${i}`,
+    role: 'button',
+    name: `Button ${i} ${'x'.repeat(60)}`,
+    enabled: true,
+  }));
+  store.record('s', 1, { elements: many, fingerprint: 'a', truncated: false, read_only: true });
+  let result = store.observe('s', 1, { token_budget: 256 });
+  assert.equal(result.read_only, true);
+  assert.ok(result.next_cursor);
+  while (result.next_cursor) {
+    result = store.observe('s', 1, { token_budget: 256, cursor: result.next_cursor });
+    assert.equal(result.read_only, true);
+  }
+  store.record('s', 2, { elements: many, fingerprint: 'b', truncated: false, read_only: true });
+  assert.equal(store.observe('s', 2, { since_revision: 1, token_budget: 256 }).read_only, true);
+  store.record('normal', 1, { elements: [], fingerprint: 'n', truncated: false });
+  assert.equal(store.observe('normal', 1, { token_budget: 256 }).read_only, undefined);
+});

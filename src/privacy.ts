@@ -24,6 +24,10 @@ export const BROWSER_PRIVACY_RULES = {
 export const SECRET_LABEL_PATTERN =
   '(?:^|[^a-z0-9])(?:password|passwd|pwd|passcode|secret|token|api[ _-]*key|access[ _-]*(?:key|token)|refresh[ _-]*token|private[ _-]*key|credentials?|authorization|auth|bearer|otp|cvv|cvc|session[ _-]*(?:id|token|key|cookie)|ssn|one[ _-]*time(?:[ _-]*(?:password|code))?|credit[ _-]*card|card[ _-]*number|cc[ _-]*(?:number|csc))(?=$|[^a-z0-9])|^(?:key|cookie|session|pin)(?:[ _-]*(?:id|value))?$|パスワード|暗証番号|認証(?:コード|情報|トークン|キー)|ワンタイム(?:パスワード|コード)|秘密鍵|秘密キー|シークレット|アクセストークン|APIキー';
 
+/** Context labels and autocomplete tokens; arbitrary names in prose cannot be inferred reliably. */
+export const PERSONAL_LABEL_PATTERN =
+  '氏名|お名前|姓名|住所|郵便番号|(?:^|[^a-z])(?:full[ _-]?name|given[ _-]?name|family[ _-]?name|postal[ _-]?code|zip[ _-]?code|street[ _-]?address|address[ _-]?line[ _-]?[12])(?:$|[^a-z])|^(?:姓|名)$';
+
 export function isSensitiveLabel(...labels: (string | undefined)[]): boolean {
   const pattern = new RegExp(SECRET_LABEL_PATTERN, 'iu');
   return labels.some(
@@ -68,6 +72,14 @@ export const TEXT_REDACTION_RULES: ReadonlyArray<readonly [string, string]> = [
 
 /** Personal data is independent from credentials and may be revealed by a trusted opt-in. */
 export const PERSONAL_DATA_REDACTION_RULES: ReadonlyArray<readonly [string, string]> = [
+  ['(?:氏名|お名前|姓名)([ \\t]*[:：=][ \\t]*)[^\\n\\r,，;；<>]{1,80}', '[redacted]'],
+  ['(?:住所|所在地)([ \\t]*[:：=][ \\t]*)[^\\n\\r,，;；<>]{1,160}', '[redacted]'],
+  ['(?<![0-9０-９])〒?[ \\t]*[0-9０-９]{3}[-－][0-9０-９]{4}(?![0-9０-９])', '[redacted]'],
+  // Require a prefecture and a numbered street/block; a prefecture mentioned in ordinary prose remains readable.
+  [
+    '(?:東京都|北海道|(?:京都|大阪)府|[一-龯]{2,3}県)[^\\s,，;；<>]{1,80}?[0-9０-９]+(?:丁目|番地?|号|[-－])[0-9０-９一-龯ァ-ヶーA-Za-z－-]{0,40}',
+    '[redacted]',
+  ],
   ['[a-z0-9._%+-]+@[a-z0-9.-]+\\.[a-z]{2,}', '[redacted]'],
   ['\\b(?:employee|emp|staff|user|member)[ _-]?(?:id|no|number)\\s*[:=]\\s*[^\\s,;&]+', '[redacted]'],
   ['(?<![a-z0-9])(?:\\+\\d{1,3}[ -]?)?(?:\\(\\d{2,4}\\)|\\d{2,4})[ -]\\d{2,4}[ -]\\d{3,4}(?!\\d)', '[redacted]'],

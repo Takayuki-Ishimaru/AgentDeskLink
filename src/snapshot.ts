@@ -1,5 +1,12 @@
 import { randomUUID } from 'node:crypto';
-import { AdlError, type Element, type ErrorReason, type NetworkWarning, type RawSnapshot } from './types.js';
+import {
+  AdlError,
+  MAX_DOM_DEPTH,
+  type Element,
+  type ErrorReason,
+  type NetworkWarning,
+  type RawSnapshot,
+} from './types.js';
 import { redactElement, redactString } from './policy.js';
 
 export type Representation = 'auto' | 'full' | 'delta';
@@ -27,13 +34,15 @@ export interface SnapshotChange {
   element?: Element;
 }
 export interface ObserveResult {
+  /** This session supports isolated reading and navigation only. */
+  read_only?: true;
   text?: {
     element_id: string;
     offset: number;
     content: string;
     total_length: number;
     next_offset: number | null;
-    /** Text a human cannot see was left out of the content: treat the page as hostile. */
+    /** Concealed prose was left out of the content; this alone does not establish malicious intent. */
     hidden_text?: true;
   };
   lines?: string[];
@@ -44,6 +53,10 @@ export interface ObserveResult {
   warnings?: NetworkWarning[];
   /** Status of the main-frame document response; present on every response, and only when it is 400 or higher. */
   http_status?: number;
+  /** Entry points for reading/scoping the body when navigation fills the first page. */
+  landmarks?: (Pick<Element, 'id' | 'role'> & { name?: string })[];
+  /** Acquisition limits; omitted source data is unavailable through next_cursor. */
+  source_limits?: RawSnapshot['source_limits'];
   ok: true;
   revision: number;
   elements?: Element[];
@@ -106,7 +119,10 @@ interface Stored {
   elements: Element[];
   truncated: boolean;
   redactions: number;
-  metadata: Pick<ObserveResult, 'url' | 'title' | 'warnings' | 'http_status'>;
+  metadata: Pick<
+    ObserveResult,
+    'url' | 'title' | 'warnings' | 'http_status' | 'source_limits' | 'landmarks' | 'read_only'
+  >;
   clipped: Set<string>;
 }
 interface Cursor {
@@ -331,6 +347,15 @@ function leanElement(element: Element): Element {
   const out = { ...element } as Record<string, unknown>;
   if (out.enabled === true) delete out.enabled;
   if (out.value === '') delete out.value;
+  if ((out.role === 'checkbox' || out.role === 'radio') && out.value === 'on') delete out.value;
+  if (out.role === 'option' && out.selected === false) delete out.selected;
+  if (
+    typeof out.text_length === 'number' &&
+    typeof out.name === 'string' &&
+    out.text_length <= out.name.length &&
+    !out.name_truncated
+  )
+    delete out.text_length;
   if (Array.isArray(element.options))
     out.options = element.options.map((option): Record<string, unknown> => ({
       label: option.label,
@@ -445,9 +470,20 @@ export class SnapshotStore {
       truncated: snapshot.truncated === true || snapshot.elements.length > MAX_ELEMENTS,
       redactions,
       metadata: {
+        ...(snapshot.read_only ? { read_only: true as const } : {}),
         ...(snapshot.url ? { url: redactString(snapshot.url, this.allowPersonalData).slice(0, 512) } : {}),
         ...(snapshot.title ? { title: redactString(snapshot.title, this.allowPersonalData).slice(0, 512) } : {}),
         ...(snapshot.warnings ? { warnings: snapshot.warnings.slice(0, 8) } : {}),
+        ...(snapshot.source_limits?.length || snapshot.elements.length > MAX_ELEMENTS
+          ? {
+              source_limits: [
+                ...new Set([
+                  ...(snapshot.source_limits ?? []),
+                  ...(snapshot.elements.length > MAX_ELEMENTS ? ['element_limit' as const] : []),
+                ]),
+              ],
+            }
+          : {}),
         ...(Number.isInteger(snapshot.http_status) && snapshot.http_status! >= 400 && snapshot.http_status! <= 999
           ? { http_status: snapshot.http_status! }
           : {}),
@@ -498,7 +534,10 @@ export class SnapshotStore {
     }
     const include = normalizeInclude(options.include);
     if (options.scope !== undefined && typeof options.scope !== 'string') invalidArgument('scope');
-    if (options.depth !== undefined && (!Number.isInteger(options.depth) || options.depth < 1 || options.depth > 12))
+    if (
+      options.depth !== undefined &&
+      (!Number.isInteger(options.depth) || options.depth < 1 || options.depth > MAX_DOM_DEPTH)
+    )
       invalidArgument('depth');
     const representation = options.representation;
     if (
@@ -528,7 +567,28 @@ export class SnapshotStore {
     const locate = (as: 'full' | 'delta'): Stored['metadata'] => {
       const { url, title, ...always } = current.metadata;
       if (carried) return always;
-      if (as === 'full' || base === null) return current.metadata;
+      if (as === 'full' || base === null) {
+        const landmarks =
+          options.scope === undefined && options.depth === undefined && options.include === undefined
+            ? current.elements
+                .filter(e =>
+                  [
+                    'main',
+                    'article',
+                    'region',
+                    'navigation',
+                    'banner',
+                    'contentinfo',
+                    'complementary',
+                    'search',
+                  ].includes(e.role),
+                )
+                .sort((a, b) => Number(b.role === 'main') - Number(a.role === 'main'))
+                .slice(0, 4)
+                .map(({ id, role, name }) => ({ id, role, name: name.slice(0, 48) }))
+            : [];
+        return { ...current.metadata, ...(landmarks.length ? { landmarks } : {}) };
+      }
       return {
         ...(url !== undefined && url !== base.metadata.url ? { url } : {}),
         ...(title !== undefined && title !== base.metadata.title ? { title } : {}),
@@ -747,7 +807,12 @@ export class SnapshotStore {
         metadata = { ...metadata, title: metadata.title.slice(0, Math.floor(metadata.title.length / 2)) };
       else if (metadata.url && metadata.url.length > 16)
         metadata = { ...metadata, url: metadata.url.slice(0, Math.floor(metadata.url.length / 2)) };
+      else if (metadata.landmarks && metadata.landmarks.length > 1)
+        metadata = { ...metadata, landmarks: metadata.landmarks.slice(0, -1) };
+      else if (metadata.landmarks?.some(e => e.name !== undefined))
+        metadata = { ...metadata, landmarks: metadata.landmarks.map(({ id, role }) => ({ id, role })) };
       else if (metadata.warnings?.length) metadata = { ...metadata, warnings: metadata.warnings.slice(0, -1) };
+      else if (metadata.landmarks?.length) metadata = { ...metadata, landmarks: [] };
       else deny('E_RESOURCE_LIMIT');
     }
     const chosen: SnapshotChange[] = [];

@@ -12,10 +12,10 @@ AgentDeskLink は、AI エージェントとローカルのブラウザ・デス
 
 [はじめる](release-docs/INSTALL.md) · [できること](#できること) · [対応環境](#対応環境) · [リリースガイド](release-docs/README.md) · [MIT License](LICENSE)
 
-> **0.1.9 / ベータ版**\
+> **0.1.10 / ベータ版**\
 > 利用範囲を限定して提供しています。導入前に[対応環境と既知の制限](release-docs/KNOWN_ISSUES.md)を確認してください。
 
-このバージョンでは、Web アプリの保存通信を送信前に保留して個別に承認できるようになりました。信頼するサイトへの書き込みを最長 30 分間継続して許可する機能も追加しました。操作後の差分と警告、範囲を絞った読み取り、Linux のタブ切替と選択も改善しています。[変更点](release-docs/RELEASE_NOTES_ja.md)と[操作設定・承認のガイド](release-docs/OPERATIONS.md)を確認してください。
+このバージョンでは、GitHub などのページを読むための読み取り専用の互換経路を追加しました。深いページ構造と本文への移動、隠し本文の除外、日本語の個人情報マスク、終了・破棄の承認、確認画面とエラーの案内も改善しています。[変更点](release-docs/RELEASE_NOTES_ja.md)と[操作設定・承認のガイド](release-docs/OPERATIONS.md)を確認してください。
 
 ## できること
 
@@ -30,7 +30,7 @@ AgentDeskLink は、AI エージェントとローカルのブラウザ・デス
 
 ## VS Code ではじめる
 
-1. 共通パッケージ `agentdesklink-0.1.9.vsix` を取得し、「拡張機能: VSIXからのインストール」で導入します。
+1. 共通パッケージ `agentdesklink-0.1.10.vsix` を取得し、「拡張機能: VSIXからのインストール」で導入します。
 2. フォルダーを開き、ワークスペースを信頼します。
 3. アクティビティバーの **AgentDeskLink** を開きます。
 4. **設定を開く**から、許可するブラウザの origin または対象アプリと必要な操作権限を指定します。
@@ -79,9 +79,9 @@ OS・アプリ・表示構成によって利用できる操作は異なります
 
 パネルで可視ブラウザ、アイドル期限、認証なしの HTTP(S) プロキシを設定できます。可視ブラウザのログイン引き継ぎには `adl_handoff` を使います。個別承認モードでは、同じ origin のサイト処理・フォーム通信を最大 120 秒許す専用の承認を受け、自動操作を停止します。この間は人間のクリック前にもサイトが送信・変更・削除を行えます。手動操作後に再開して観測し直してください。再開や期限終了でも送信済みの処理は取り消せません。
 
-同梱 Node は `--use-system-ca` で起動します。プロキシ利用時も接続先の DNS/IP 検査を維持するため、プロキシ側でしか名前解決できない社内ホストは利用できません。DOM API を安全に検証できないページでは `untrusted_dom_api` で停止します。詳しくは[対応環境と既知の制限](release-docs/KNOWN_ISSUES.md)を確認してください。
+同梱 Node は `--use-system-ca` で起動します。プロキシ利用時も接続先の DNS/IP 検査を維持するため、プロキシ側でしか名前解決できない社内ホストは利用できません。初回の DOM API 検証に通らない文書は、分離した読み取り専用の互換経路で取得します。既に観測した同じ文書の後発改変は `untrusted_dom_api` で停止します。詳しくは[対応環境と既知の制限](release-docs/KNOWN_ISSUES.md)を確認してください。
 
-`adl_observe` は既定値（`enabled: true` や空の値など）を省いた JSON を返し、`format: "lines"` で行形式も返せます。既定の JSON・差分・scope・cursor も利用できます。`scope` はページ内検索で、`text:"v1.0: fixed"` のような引用、`role:` / `name:` / `id:` の指定ができます（詳しくは [操作設定](release-docs/OPERATIONS.md)）。リンクは `href` を、代替テキスト付きの画像・canvas は `img` として返し、人に見えにくい文字を含む要素には `hidden_text: true` が付きます。`adl_act` の座標クリックは、最新の保持画像から `point: {frame_id,x,y}` を指定します。画像取得元の CSS ピクセルを使い、位置や対象が変わった場合は再取得が必要です。
+`adl_observe` は既定値（`enabled: true` や空の値など）を省いた JSON を返し、`format: "lines"` で行形式も返せます。既定の JSON・差分・scope・cursor も利用できます。`scope` はページ内検索で、`text:"v1.0: fixed"` のような引用、`role:` / `name:` / `id:` の指定ができます（詳しくは [操作設定](release-docs/OPERATIONS.md)）。リンクは `href` を、代替テキスト付きの画像・canvas は `img` として返し、隠し本文は除外し、除外があった要素に `hidden_text: true` を付けます。既定の観測は本文へ進む `landmarks` を返し、DOM は最大 64 階層まで取得します。`adl_act` の座標クリックは、最新の保持画像から `point: {frame_id,x,y}` を指定します。画像取得元の CSS ピクセルを使い、位置や対象が変わった場合は再取得が必要です。
 
 ブラウザの `data-adl-sensitive`、`data-adl-classification="SECRET"` / `"UNKNOWN"` は子孫にも適用されます。子の `PUBLIC` 指定や `allowAllOperations` でも解除できません。観測では保護対象の内容をマスクし、領域内の操作を拒否します。画像と保持フレームのcropにもマスクを適用します。これらの明示マーカーは自動検出を補うものです。
 

@@ -54,11 +54,14 @@ export interface SiteGrantView {
 }
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const BINDING = /^[0-9a-f]{64}$/i;
-const APPROVE_LABEL = 'Approve once / 今回のみ許可';
-const ALLOW_SITE_LABEL = 'Allow further writes to this site / このサイトへの書き込みを続けて許可';
-const DENY_LABEL = 'Deny (same as Cancel/Esc) / 拒否（キャンセル・Escも同じ）';
-const DIALOG_NOTE =
-  "Approve once allows only this single action. Deny, Cancel, closing this dialog and Esc all deny it, and nothing is sent. The third choice, when offered, covers this site's writes for up to 30 minutes. / 「今回のみ許可」はこの1回の操作だけを許可します。「拒否」・キャンセル・ダイアログを閉じる・Escはすべて拒否となり、何も送信されません。3 つ目の選択肢（表示される場合）は、このサイトへの書き込みを最長 30 分間許可します。";
+const dialogLabels = (japanese: boolean) =>
+  japanese
+    ? { approve: '今回のみ許可', allowSite: 'サイト書き込みを30分許可', deny: '拒否（Esc・閉じるも拒否）' }
+    : { approve: 'Approve once', allowSite: 'Allow site writes for 30 minutes', deny: 'Deny (Esc/close also deny)' };
+const dialogNote = (japanese: boolean) =>
+  japanese
+    ? '今回のみ、この操作を許可します。拒否・Esc・ダイアログを閉じる操作はすべて拒否です。'
+    : 'This authorizes one action. Deny, Esc, or closing the dialog denies it.';
 // A standing grant lasts at most 30 minutes from the human's choice and ends earlier with the permission generation (settings, trust, emergency stop, deactivation) or an explicit revoke.
 const SITE_GRANT_MS = 30 * 60_000;
 const MAX_SITE_GRANTS = 16;
@@ -497,65 +500,80 @@ export class ApprovalBroker implements vscode.Disposable {
       this.useGrant(entry, standing);
       return;
     }
-    const approve: vscode.MessageItem = { title: APPROVE_LABEL };
-    // The third item is offered only for a browser summary that carries a validated grant scope.
-    const scope = !desktop && entry.summary.risk === 'consequential' ? entry.summary.grant : undefined;
-    const allowSite: vscode.MessageItem = { title: ALLOW_SITE_LABEL };
-    // VS Code adds its own Cancel to a modal unless an item is the close affordance; making Deny that item keeps one denying button and makes Esc/close explicit.
-    const deny: vscode.MessageItem = { title: DENY_LABEL, isCloseAffordance: true };
     const summary = entry.summary;
+    const japanese = /^ja(?:-|$)/i.test(vscode.env.language);
+    const labels = dialogLabels(japanese);
+    const approve: vscode.MessageItem = { title: labels.approve };
+    // The third item is offered only for a browser summary that carries a validated grant scope.
+    const scope = !desktop && summary.risk === 'consequential' ? summary.grant : undefined;
+    const allowSite: vscode.MessageItem = { title: labels.allowSite };
+    // VS Code adds its own Cancel to a modal unless an item is the close affordance; Deny keeps Esc/close denying.
+    const deny: vscode.MessageItem = { title: labels.deny, isCloseAffordance: true };
     const data = desktop
-        ? 'untrusted app data / 信頼できないアプリ由来データ'
-        : 'untrusted page data / 信頼できないページ由来データ',
-      short = desktop ? 'untrusted app data' : 'untrusted page data';
-    // A held write: the control already ran in the page, and approving sends only the request listed below.
+      ? japanese
+        ? '信頼できないアプリのデータ'
+        : 'untrusted app data'
+      : japanese
+        ? '信頼できないページのデータ'
+        : 'untrusted page data';
     const heldRequest = summary.action === 'send_request' && !desktop;
     const lines = [
       heldRequest
-        ? 'Action: send the request below (the control was already used) / 操作: 下の通信を送信（ボタンなどの操作は実行済み）'
-        : `Action: ${visibleText(summary.action)}`,
-      desktop
-        ? `Desktop application (configured grant / 許可したデスクトップアプリ): ${visibleText(summary.application ?? '')}`
+        ? japanese
+          ? '操作: 下のリクエストを送信（画面操作は実行済み）'
+          : 'Action: send the request below (control already used)'
+        : `${japanese ? '操作' : 'Action'}: ${visibleText(summary.action)}`,
+      desktop ? `${japanese ? 'アプリ' : 'Application'}: ${visibleText(summary.application ?? '')}` : '',
+      `${desktop ? (japanese ? 'ウィンドウ' : 'Window') : japanese ? '対象' : 'Target'} (${data}): ${visibleText(summary.target)}`,
+      summary.name || summary.role
+        ? `${japanese ? 'コントロール' : 'Control'} (${data}): ${summary.name ? visibleText(summary.name) : ''}${summary.role ? `${summary.name ? ' ' : ''}(${visibleText(summary.role)})` : ''}`
         : '',
-      `${desktop ? 'Window' : 'Target'} (${data}): ${visibleText(summary.target)}`,
-      summary.origin ? `Origin: ${visibleText(summary.origin)}` : '',
-      summary.role ? `Role (${short}): ${visibleText(summary.role)}` : '',
-      summary.name ? `Name (${short}): ${visibleText(summary.name)}` : '',
-      summary.risk === 'credential' ? 'Credential data is involved. / 認証情報を含む操作です。' : '',
       summary.value
         ? summary.value.kind === 'secret'
-          ? `Value: secret (${summary.value.length} characters) / 秘密値（${summary.value.length}文字）`
-          : `Public value (${short}): ${visibleText(JSON.stringify(summary.value.preview ?? ''))} (${summary.value.length} characters)`
+          ? `${japanese ? '値' : 'Value'}: ${japanese ? '秘密' : 'secret'} (${summary.value.length} ${japanese ? '文字' : 'characters'})`
+          : `${japanese ? '入力値' : 'Value'} (${data}): ${visibleText(JSON.stringify(summary.value.preview ?? ''))} (${summary.value.length} ${japanese ? '文字' : 'characters'})`
         : '',
-      desktop
-        ? 'The native control is operated through the accessibility API in the background; the application may act immediately and nothing is rolled back. / ネイティブコントロールはアクセシビリティAPIで背面操作されます。アプリは直ちに処理する場合があり、取り消しはできません。'
-        : '',
-      scope
-        ? `Standing option / 継続許可: "Allow further writes to this site" also approves, without asking, every later write request this AI server sends to ${visibleText(scope.origin)} for 30 minutes (or until settings change, emergency stop or revoke). Requests with credentials and purchase/payment-like operations still ask every time. Revoke it any time in the AgentDeskLink panel. / 「このサイトへの書き込みを続けて許可」を選ぶと、この AI サーバーが ${visibleText(scope.origin)} へ送る書き込み通信を 30 分間（設定変更・緊急停止・取り消しまで）確認なしに許可します。認証情報を含む通信と購入・支払いに関わる操作は毎回確認します。AgentDeskLink パネルからいつでも取り消せます。`
-        : '',
+      summary.origin ? `Origin: ${visibleText(summary.origin)}` : '',
+      summary.risk === 'credential' ? (japanese ? '認証情報を含みます。' : 'Credential data is involved.') : '',
       ...(summary.details?.length
         ? [
-            desktop
-              ? 'Details (untrusted app data / 信頼できないアプリ由来の詳細):'
-              : 'Page details (untrusted page data / 信頼できないページ由来の詳細):',
+            `${japanese ? (desktop ? '詳細' : 'ページの詳細') : desktop ? 'Details' : 'Page details'} (${data}):`,
             ...summary.details.map(line => `• ${visibleText(line)}`),
           ]
         : []),
+      desktop
+        ? japanese
+          ? 'アプリはすぐに処理する場合があります。この操作は取り消せません。'
+          : 'The app may act immediately; this action cannot be undone.'
+        : '',
+      scope
+        ? japanese
+          ? `${visibleText(scope.origin)}への書き込みを30分、確認なしで許可します。認証情報や購入・支払いは毎回確認します。許可はパネルから取り消せます。`
+          : `Grant: this server may send writes to ${visibleText(scope.origin)} without asking for 30 minutes. Credentials and purchases/payments still require approval; revoke in the AgentDeskLink panel.`
+        : '',
     ].filter(Boolean);
     try {
       const title =
         summary.action === 'handoff'
-          ? 'Allow manual browsing for up to 120 seconds? Website scripts and forms at this origin can send requests while AI automation is paused. / 最大120秒、手動操作へ引き継ぎますか？ AIの自動操作は停止し、このoriginのサイト処理・フォーム送信を一時的に許可します。'
+          ? japanese
+            ? '最大120秒、手動操作に切り替えますか？この間、サイトが通信できます。'
+            : 'Allow manual browsing for up to 120 seconds? The site may send requests during this time.'
           : desktop
-            ? 'AgentDeskLink asks to approve this native desktop action once. / このデスクトップアプリの操作を今回のみ許可しますか？'
+            ? japanese
+              ? 'このデスクトップ操作を1回許可しますか？'
+              : 'Approve this desktop action once?'
             : heldRequest
-              ? 'The page is waiting to send the request below. Send it once? / ページが下の通信を送ろうとしています。今回のみ送信しますか？'
-              : 'AgentDeskLink asks to approve this browser action once. / このブラウザー操作を今回のみ許可しますか？';
+              ? japanese
+                ? '下のリクエストを1回送信しますか？'
+                : 'Send the request below once?'
+              : japanese
+                ? 'このブラウザー操作を1回許可しますか？'
+                : 'Approve this browser action once?';
       const result = await vscode.window.showWarningMessage(
         `${title}\n\n${lines.join('\n')}`,
         {
           modal: true,
-          detail: `Workspace: ${visibleText(this.ownerLabel())}\n${DIALOG_NOTE}\nAsk covers browser actions and consequential native actions in the granted desktop app. Sensitive native controls are never approved. / 都度承認はブラウザー操作と、許可したデスクトップアプリの重要なネイティブ操作に適用されます。機密コントロールは承認できません。`,
+          detail: `${japanese ? 'ワークスペース' : 'Workspace'}: ${visibleText(this.ownerLabel())}\n${dialogNote(japanese)}${desktop ? (japanese ? '\n機密コントロールは承認できません。' : '\nSensitive native controls are never approved.') : ''}`,
         },
         ...(scope ? [approve, allowSite, deny] : [approve, deny]),
       );
@@ -568,8 +586,8 @@ export class ApprovalBroker implements vscode.Disposable {
         entry.epoch === this.epoch &&
         entry.generation === this.generation &&
         this.contextCurrent();
-      if (current && picked === APPROVE_LABEL) entry.status = 'approved';
-      else if (current && scope && picked === ALLOW_SITE_LABEL && this.allowedOrigins().includes(scope.origin)) {
+      if (current && picked === labels.approve) entry.status = 'approved';
+      else if (current && scope && picked === labels.allowSite && this.allowedOrigins().includes(scope.origin)) {
         // The human approves this request and creates the standing grant in one choice; this request counts as the grant's first use.
         entry.status = 'approved';
         entry.grantedBy = this.createGrant(entry, scope.origin).id;

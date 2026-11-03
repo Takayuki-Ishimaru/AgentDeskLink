@@ -457,7 +457,7 @@ test('enabled MCP uses bundled Node with default-deny permissions and no legacy 
 test('approval broker requires a host modal and consumes a one-shot decision atomically', async () => {
   const h = harness(
     { enabled: true, operationMode: 'ask', browserOrigins: ['https://example.com'] },
-    { confirmWarning: 'Approve once / 今回のみ許可' },
+    { confirmWarning: '今回のみ許可' },
   );
   await h.ready;
   const [definition] = await h.providers.get('agentdesklink.mcp').provideMcpServerDefinitions();
@@ -511,12 +511,12 @@ test('approval broker requires a host modal and consumes a one-shot decision ato
     headers: { authorization: `Bearer ${definition.env.ADL_APPROVAL_TOKEN}` },
   });
   assert.equal((await replay.json()).consumed_now, false);
-  assert.ok(h.notifications.some(message => String(message).includes('asks to approve this browser action once')));
+  assert.ok(h.notifications.some(message => String(message).includes('このブラウザー操作を1回許可しますか')));
 });
 test('a held page request is asked as the request to send, not as the control that already ran', async () => {
   const h = harness(
     { enabled: true, operationMode: 'ask', browserOrigins: ['https://example.com'] },
-    { confirmWarning: 'Deny (same as Cancel/Esc) / 拒否（キャンセル・Escも同じ）' },
+    { confirmWarning: '拒否（Esc・閉じるも拒否）' },
   );
   await h.ready;
   const [definition] = await h.providers.get('agentdesklink.mcp').provideMcpServerDefinitions();
@@ -546,8 +546,8 @@ test('a held page request is asked as the request to send, not as the control th
   assert.equal(post.status, 201);
   for (let i = 0; i < 20 && !h.notifications.length; i++) await new Promise(resolve => setTimeout(resolve, 5));
   const shown = h.notifications.map(String).join('\n');
-  assert.match(shown, /The page is waiting to send the request below\. Send it once\?/);
-  assert.match(shown, /Action: send the request below \(the control was already used\)/);
+  assert.match(shown, /下のリクエストを1回送信しますか/);
+  assert.match(shown, /操作: 下のリクエストを送信（画面操作は実行済み）/);
   assert.match(shown, /• Request POST https:\/\/example\.com\/api\/tasks/);
   assert.doesNotMatch(shown, /asks to approve this browser action once/);
 });
@@ -1297,7 +1297,7 @@ test('the browserHeadless setting selects the browser cache published to the MCP
 });
 
 // ---- Approval dialog (requirement 5) ----
-const APPROVE = 'Approve once / 今回のみ許可';
+const APPROVE = '今回のみ許可';
 async function askApproval(h, details, extra = {}) {
   const [definition] = await h.providers.get('agentdesklink.mcp').provideMcpServerDefinitions();
   const headers = { authorization: `Bearer ${definition.env.ADL_APPROVAL_TOKEN}`, 'content-type': 'application/json' };
@@ -1332,8 +1332,11 @@ async function askApproval(h, details, extra = {}) {
   }
   return reply.status;
 }
-const askHarness = confirmWarning =>
-  harness({ enabled: true, operationMode: 'ask', browserOrigins: ['https://example.com'] }, { confirmWarning });
+const askHarness = (confirmWarning, language = 'ja') =>
+  harness(
+    { enabled: true, operationMode: 'ask', browserOrigins: ['https://example.com'] },
+    { confirmWarning, language },
+  );
 test('approval details are shown once-escaped and untrusted characters cannot fake dialog structure', async () => {
   const h = askHarness(APPROVE);
   await h.ready;
@@ -1377,7 +1380,7 @@ test('approval details are shown once-escaped and untrusted characters cannot fa
     'line\\nbreak\\rx\\ty',
   ])
     assert.ok(message.includes(visible), `${visible} is shown as a visible escape`);
-  assert.match(options.detail, /^Workspace: /);
+  assert.match(options.detail, /^\u30ef\u30fc\u30af\u30b9\u30da\u30fc\u30b9: /);
 });
 test('the approval dialog says Cancel, Esc and closing deny, and only the Approve item approves', async () => {
   const cancelled = askHarness(undefined);
@@ -1385,15 +1388,13 @@ test('the approval dialog says Cancel, Esc and closing deny, and only the Approv
   assert.equal(await askApproval(cancelled), 'denied', 'Cancel / Esc resolve to undefined');
   const [, options, ...items] = cancelled.warnings.at(-1);
   assert.equal(options.modal, true);
-  for (const word of [/Cancel/, /Esc/, /closing this dialog/, /キャンセル/, /Esc/, /拒否/, /1回の操作/])
-    assert.match(options.detail, word);
+  for (const word of [/Esc/, /閉じる/, /拒否/, /今回のみ/]) assert.match(options.detail, word);
   assert.equal(items.length, 2);
   assert.equal(items[0].title, APPROVE);
   assert.ok(!items[0].isCloseAffordance, 'Approve is never the close action');
   assert.equal(items[1].isCloseAffordance, true, 'Deny is the close action, so VS Code adds no second Cancel button');
-  assert.match(items[1].title, /Deny/);
-  assert.match(items[1].title, /Cancel\/Esc/);
-  assert.match(items[1].title, /キャンセル・Esc/);
+  assert.match(items[1].title, /拒否/);
+  assert.match(items[1].title, /Esc/);
   const asDeny = askHarness(args => args.at(-1));
   await asDeny.ready;
   assert.equal(await askApproval(asDeny), 'denied', 'the Deny item denies');
@@ -1403,7 +1404,7 @@ test('the approval dialog says Cancel, Esc and closing deny, and only the Approv
   const asItem = askHarness(args => args[2]);
   await asItem.ready;
   assert.equal(await askApproval(asItem), 'approved', 'VS Code returns the original Approve item');
-  const wrong = askHarness({ title: 'Approve once / 今回のみ許可 (copy)' });
+  const wrong = askHarness({ title: '今回のみ許可 (copy)' });
   await wrong.ready;
   assert.equal(await askApproval(wrong), 'denied', 'only the exact Approve title approves');
 });
@@ -1444,7 +1445,7 @@ async function postSummary(h, summary) {
   }
   return { status: post.status, decision: reply.status };
 }
-const desktopAskHarness = (confirmWarning, extra = {}) =>
+const desktopAskHarness = (confirmWarning, language = 'ja') =>
   harness(
     {
       enabled: true,
@@ -1453,9 +1454,8 @@ const desktopAskHarness = (confirmWarning, extra = {}) =>
       desktopAppId: 'fixture-app',
       desktopAppPath:
         process.platform === 'win32' ? 'C:\\Apps\\fixture\\fixture-app.exe' : '/Applications/fixture-app.app',
-      ...extra,
     },
-    { confirmWarning },
+    { confirmWarning, language },
   );
 test('a desktop approval summary for the configured application is shown as a native action with app data and can be approved once', async () => {
   const h = desktopAskHarness(APPROVE);
@@ -1469,19 +1469,15 @@ test('a desktop approval summary for the configured application is shown as a na
   const result = await postSummary(h, { ...DESKTOP_SUMMARY, value: { kind: 'public', length: 4, preview: 'Taro' } });
   assert.deepEqual(result, { status: 201, decision: 'approved' });
   const [message, options] = h.warnings.at(-1);
-  assert.match(message, /asks to approve this native desktop action once/);
-  assert.match(message, /デスクトップアプリの操作を今回のみ許可しますか/);
-  assert.ok(message.includes('Desktop application (configured grant / 許可したデスクトップアプリ): fixture-app'));
-  assert.ok(message.includes('Window (untrusted app data / 信頼できないアプリ由来データ): Notes window'));
-  assert.ok(
-    message.includes('Role (untrusted app data): button') && message.includes('Name (untrusted app data): Delete all'),
-  );
-  assert.ok(message.includes('Public value (untrusted app data): "Taro" (4 characters)'));
-  assert.match(message, /nothing is rolled back/);
+  assert.match(message, /^このデスクトップ操作を1回許可しますか？/);
+  assert.ok(message.includes('アプリ: fixture-app'));
+  assert.ok(message.includes('ウィンドウ (信頼できないアプリのデータ): Notes window'));
+  assert.ok(message.includes('コントロール (信頼できないアプリのデータ): Delete all (button)'));
+  assert.ok(message.includes('入力値 (信頼できないアプリのデータ): \"Taro\" (4 文字)'));
+  assert.ok(message.indexOf('ウィンドウ') < message.indexOf('入力値'), 'target appears before the decision payload');
+  assert.match(message, /取り消せません/);
   assert.doesNotMatch(message, /Origin:/);
-  assert.match(options.detail, /consequential native actions in the granted desktop app/);
   assert.match(options.detail, /機密コントロールは承認できません/);
-  assert.doesNotMatch(options.detail, /Native actions are not covered|ネイティブ操作は対象外/);
   const denied = desktopAskHarness(undefined);
   await denied.ready;
   assert.deepEqual(
@@ -1490,6 +1486,24 @@ test('a desktop approval summary for the configured application is shown as a na
     'Cancel / Esc deny a native action too',
   );
 });
+test('English host language shows a concise action, target, control, and payload in order', async () => {
+  const h = desktopAskHarness('Approve once', 'en');
+  await h.ready;
+  const result = await postSummary(h, { ...DESKTOP_SUMMARY, value: { kind: 'public', length: 4, preview: 'Taro' } });
+  assert.deepEqual(result, { status: 201, decision: 'approved' });
+  const [message, options, approve, deny] = h.warnings.at(-1);
+  assert.match(message, /^Approve this desktop action once\?/);
+  const action = message.indexOf('Action: click');
+  const target = message.indexOf('Window (untrusted app data): Notes window');
+  const control = message.indexOf('Control (untrusted app data): Delete all (button)');
+  const payload = message.indexOf('Value (untrusted app data): \"Taro\" (4 characters)');
+  assert.ok(action >= 0 && action < target && target < control && control < payload);
+  assert.equal(approve.title, 'Approve once');
+  assert.equal(deny.title, 'Deny (Esc/close also deny)');
+  assert.match(options.detail, /^Workspace: /);
+  assert.doesNotMatch(message, /デスクトップ操作|信頼できないアプリ/);
+});
+
 test('desktop approval summaries are validated as strictly as browser ones', async () => {
   const h = desktopAskHarness(APPROVE);
   await h.ready;
@@ -1547,7 +1561,7 @@ test('Ask broker is withheld when a semantic-only native target is the VS Code h
 });
 
 // ---- Standing site-write grants: the third dialog item, auto-approval at POST time, and the end of a grant ----
-const ALLOW_SITE = 'Allow further writes to this site / このサイトへの書き込みを続けて許可';
+const ALLOW_SITE = 'サイト書き込みを30分許可';
 const SITE = 'https://example.com';
 const OTHER_SITE = 'https://other.example';
 const SERVER_A = '11111111-1111-4111-8111-111111111111';
@@ -1686,14 +1700,12 @@ test('the approval dialog offers the standing-grant item only for grant-eligible
   assert.equal(items[1].title, ALLOW_SITE);
   assert.ok(!items[0].isCloseAffordance && !items[1].isCloseAffordance, 'only Deny is the close action');
   assert.equal(items[2].isCloseAffordance, true);
-  assert.match(items[2].title, /Deny/);
-  const line = message.split('\n').find(x => x.startsWith('Standing option'));
+  assert.match(items[2].title, /拒否/);
+  const line = message.split('\n').find(x => x.includes(SITE) && x.includes('30分'));
   assert.ok(line, 'the dialog explains the extra item');
-  for (const needle of [SITE, '30 minutes', '30 分間', /credentials/, /payment/, /panel/, /パネル/, /毎回確認/])
+  for (const needle of [SITE, '30分', /認証情報/, /購入・支払い/, /パネル/, /毎回確認/])
     assert.ok(typeof needle === 'string' ? line.includes(needle) : needle.test(line), String(needle));
-  assert.match(options.detail, /third choice, when offered/);
-  assert.match(options.detail, /3 つ目の選択肢/);
-  assert.match(options.detail, /1回の操作/, 'the one-shot sentence is unchanged');
+  assert.match(options.detail, /今回のみ/);
   // Approving once again asks again, so the first approval created nothing.
   assert.equal((await dialogsFor(h)).dialogs, 1);
   // Without the Engine's grant field, for credentials, and for a native action, the dialog keeps its two items.

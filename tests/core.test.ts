@@ -487,3 +487,79 @@ test('using a session renews its idle TTL and session listings omit expired hand
     await e.shutdown();
   }
 });
+test('gesture surfaces are discoverable per target without selectors and only when gestures are allowed', async () => {
+  const gestureTarget = {
+    id: 'demo',
+    label: 'Demo',
+    url: 'https://example.com',
+    classification: 'PUBLIC',
+    visual: { enabled: true, maskSelectors: [] },
+    gestures: { enabled: true, surfaces: [{ id: 'board', selector: '#secret-selector', kinds: ['drag', 'swipe'] }] },
+  };
+  const { e, id } = await setup({ operationMode: 'standard', browserTargets: [gestureTarget] });
+  try {
+    const listed = await e.listTargets();
+    const target = listed.targets.find(t => t.target_id === id)!;
+    assert.deepEqual(target.gesture_surfaces, [{ id: 'board', kinds: ['drag', 'swipe'] }]);
+    assert.ok(target.capabilities.includes('gesture'));
+    assert.ok(!JSON.stringify(listed).includes('#secret-selector'));
+  } finally {
+    await e.shutdown();
+  }
+  const ro = await setup({ operationMode: 'read_only', browserTargets: [gestureTarget] });
+  try {
+    const listed = await ro.e.listTargets();
+    const target = listed.targets.find(t => t.target_id === ro.id)!;
+    assert.equal(target.gesture_surfaces, undefined);
+    assert.ok(!target.capabilities.includes('gesture'));
+  } finally {
+    await ro.e.shutdown();
+  }
+});
+test('stale and ahead revisions return the current session revision in the safe error', async () => {
+  const { e, id } = await setup();
+  try {
+    const s = await e.open(id);
+    await e.observe(s.session_id);
+    await e.act(s.session_id, { action: 'click', element_id: 'e1' }, 1);
+    const stale = await e.act(s.session_id, { action: 'click', element_id: 'e1' }, 1).then(
+      () => undefined,
+      (error: unknown) => error as AdlError,
+    );
+    assert.ok(stale instanceof AdlError);
+    assert.equal(stale.code, 'E_STALE_STATE');
+    assert.equal(stale.reason, undefined);
+    const staleSafe = safeError(stale);
+    assert.equal(staleSafe.revision, 2);
+    assert.equal(staleSafe.retryable, true);
+    const ahead = await e.act(s.session_id, { action: 'click', element_id: 'e1' }, 99).then(
+      () => undefined,
+      (error: unknown) => error as AdlError,
+    );
+    assert.ok(ahead instanceof AdlError);
+    assert.equal(ahead.reason, 'revision_ahead');
+    assert.equal(safeError(ahead).revision, 2);
+    assert.equal(safeError(ahead).reason, 'revision_ahead');
+    let batch: unknown;
+    try {
+      e.execute([{ session_id: s.session_id, action: 'click', element_id: 'e1' }], { [s.session_id]: 99 });
+    } catch (error) {
+      batch = error;
+    }
+    assert.ok(batch instanceof AdlError);
+    assert.equal((batch as AdlError).reason, 'revision_ahead');
+    assert.equal(safeError(batch).revision, 2);
+    await e.close(s.session_id);
+  } finally {
+    await e.shutdown();
+  }
+});
+test('origin grant errors name both the workspace setting and the CLI policy file settings', () => {
+  const safe = safeError(new AdlError('E_POLICY_DENIED', 'origin_not_allowed'));
+  assert.equal(safe.workspace_setting, 'agentdesklink.browserOrigins');
+  assert.ok(String(safe.policy_setting).includes('allowedOrigins'));
+  assert.ok(String(safe.safe_message).includes('browserTargets'));
+  const redirect = safeError(new AdlError('E_POLICY_DENIED', 'redirect_origin_not_allowed'));
+  assert.ok(String(redirect.policy_setting).includes('allowedOrigins'));
+  assert.ok(String(redirect.safe_message).includes('allowedOrigins'));
+});

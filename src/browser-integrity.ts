@@ -10,7 +10,7 @@ export interface BrowserIntegrity {
 
 // Installed before website scripts. Every reference used by the checker is
 // captured here; checking never calls a page's accessor, iterator or toString.
-function installIntegrity({ key, registrationSecret }: { key: string; registrationSecret: string }) {
+export function installIntegrity({ key, registrationSecret }: { key: string; registrationSecret: string }) {
   const apply = Reflect.apply,
     keys = Reflect.ownKeys,
     descriptor = Object.getOwnPropertyDescriptor,

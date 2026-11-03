@@ -165,7 +165,7 @@ test(
       const byName = (name: string) => o.elements!.find(e => e.name === name)!;
       const guide = o.elements!.find(e => e.role === 'text' && e.name.startsWith('See'))!;
       assert.equal(guide.name, 'See the guide for details.', 'the link text stays in the sentence');
-      assert.equal(guide.text_length, guide.name.length);
+      assert.equal(guide.text_length, undefined, 'short uncut text needs no redundant length');
       assert.ok(!guide.hidden_text);
       assert.equal(byName('the guide').role, 'link', 'the link is still listed on its own');
       assert.equal(byName('Nested link deep done.').role, 'text');
@@ -178,8 +178,9 @@ test(
       const json = JSON.stringify(o);
       assert.ok(!json.includes('DISPLAY_NONE_CANARY'), 'text that is not rendered is not listed at all');
       assert.ok(!json.includes('PROTECTED_CANARY'));
-      // The invisible span keeps its own flagged element, as before; it is not in the paragraph's name.
-      assert.equal(byName('OPACITY_CANARY').hidden_text, true);
+      // Concealed prose carries an omission marker without exporting its content.
+      assert.ok(o.elements!.some(e => e.name === '' && e.hidden_text));
+      assert.ok(!json.includes('OPACITY_CANARY'));
       assert.ok(!plain.name.includes('OPACITY_CANARY'));
 
       // A long sentence is clipped in the name and reported in full by text_length; the read returns all of it.
@@ -282,10 +283,10 @@ test(
       assert.equal(joined, expected);
       assert.ok(reads > 5);
 
-      // The invisible span is still readable on its own id, which was reported as hidden_text; protected regions are not readable.
-      const hidden = o.elements!.find(e => e.name === 'HIDDEN_CANARY')!;
+      // Directly reading a concealed node cannot recover its omitted prose.
+      const hidden = o.elements!.find(e => e.name === '' && e.hidden_text)!;
       assert.equal(hidden.hidden_text, true);
-      assert.equal((await f.read(hidden.id)).text!.content, 'HIDDEN_CANARY');
+      assert.equal((await f.read(hidden.id)).text!.content, '');
       await assert.rejects(f.read(secret.id), { code: 'E_PRIVACY_BLOCKED' });
     } finally {
       await f.close();

@@ -36,8 +36,15 @@ import {
   shadowsDomApi,
   type NativeInput,
 } from './browser-native-input.js';
-import { installBrowserIntegrity, registerBrowserPrototypes, type BrowserIntegrity } from './browser-integrity.js';
-import { SECRET_LABEL_PATTERN, BROWSER_PRIVACY_RULES } from './privacy.js';
+import {
+  installIntegrity,
+  installBrowserIntegrity,
+  registerBrowserPrototypes,
+  type BrowserIntegrity,
+} from './browser-integrity.js';
+import { IsolatedReadStore, MainDocumentIdentity } from './browser-reading.js';
+import { SECRET_LABEL_PATTERN, PERSONAL_LABEL_PATTERN, BROWSER_PRIVACY_RULES } from './privacy.js';
+import { readTextPageFn, type PageTextResult } from './browser-text.js';
 import { ensureBrowserPrivacySelectors } from './browser-privacy.js';
 import type { GesturePolicy, GesturePlan, GestureReference, GestureExecution } from './gesture-types.js';
 import type { CapturedImage, VisualPolicy } from './visual-types.js';
@@ -46,6 +53,8 @@ import { describeHeldRequest, HELD_METHODS } from './approval-summary.js';
 import {
   AdlError,
   HeldWritesError,
+  MAX_DOM_DEPTH,
+  type SnapshotSourceLimit,
   type HeldWriteAbortOutcome,
   type Action,
   type Adapter,
@@ -217,6 +226,7 @@ type PageSnapshot = {
   elements: ElementInfo[];
   sig: string;
   truncated: boolean;
+  source_limits: SnapshotSourceLimit[];
   navigation: string;
   actionStates: Record<string, { target: string; form?: string }>;
   forms: Record<string, string>;
@@ -233,7 +243,9 @@ function snapshotPageFn(
     visitCap: number;
     maxDepth: number;
     fieldMax: number;
+    isolatedReadOnly?: boolean;
     secretLabelPattern: string;
+    personalLabelPattern: string;
     privacyRules: typeof BROWSER_PRIVACY_RULES;
   },
 ): PageSnapshot {
@@ -328,7 +340,40 @@ function snapshotPageFn(
       if (r(child, 'localName') === 'title') return (child.textContent ?? '').trim();
     return '';
   };
-  let descendantClipped = false;
+  // Assistive text is exposed only in a control's accessible name. Class names
+  // cannot establish intent, and opacity/tiny-font prose is never exempted.
+  const assistiveBox = (el: Element): boolean => {
+    try {
+      const style = getComputedStyle(el);
+      if (parseFloat(style.fontSize) <= 2 || parseFloat(style.opacity) < 0.05 || alphaOf(style.color) <= 0.05)
+        return false;
+      const box = m(el, 'getBoundingClientRect') as DOMRect;
+      return (
+        /^rect\(\s*0(?:px)?[\s,]+0(?:px)?[\s,]+0(?:px)?[\s,]+0(?:px)?\s*\)$/.test(style.clip) ||
+        /^inset\(\s*(?:50|100)%/.test(style.clipPath) ||
+        ((style.position === 'absolute' || style.position === 'fixed') &&
+          ((box.width <= 1 && box.height <= 1 && (style.overflowX !== 'visible' || style.overflowY !== 'visible')) ||
+            box.right + scrollX < -20))
+      );
+    } catch {
+      return false;
+    }
+  };
+  const hiddenCaches = [new Map<Element, boolean>(), new Map<Element, boolean>()];
+  const concealed = (el: Element, allowAssistive = false, depth = 0): boolean => {
+    if (depth >= cfg.privacyRules.ancestorCap) return true;
+    const cache = hiddenCaches[allowAssistive ? 1 : 0]!;
+    const cached = cache.get(el);
+    if (cached !== undefined) return cached;
+    const parent = (r(el, 'parentElement') as Element | null) ?? (m(el, 'getRootNode') as ShadowRoot).host;
+    const hidden =
+      (textHidden(el) && !(allowAssistive && assistiveBox(el))) ||
+      !!(parent && concealed(parent, allowAssistive, depth + 1));
+    cache.set(el, hidden);
+    return hidden;
+  };
+  let descendantClipped = false,
+    descendantHidden = false;
   // Cells, items and blocks inside a composed name stay separable: cells and items are joined with " | ", blocks with a space.
   const CELL_TAGS = new Set(['TD', 'TH', 'LI', 'DT', 'DD']),
     CELL_ROLES = new Set(['cell', 'gridcell', 'columnheader', 'rowheader', 'listitem', 'treeitem', 'tab', 'option']);
@@ -393,8 +438,9 @@ function snapshotPageFn(
     }
     return value;
   };
-  const descendantText = (el: Element, includeHidden = false, failClosed = true): string => {
+  const descendantText = (el: Element, includeHidden = false, failClosed = true, allowAssistive = false): string => {
     descendantClipped = false;
+    descendantHidden = false;
     if (inSensitiveRegion(el)) return 'x'.repeat(cfg.fieldMax);
     let scanned = 0,
       exhausted = false;
@@ -448,7 +494,13 @@ function snapshotPageFn(
           !m(parent, 'closest', 'script,style') &&
           (includeHidden || (!m(parent, 'closest', '[hidden],[aria-hidden="true"]') && shown(parent)))
         )
-          add(node.textContent ?? '');
+          if (
+            !includeHidden &&
+            concealed(parent, allowAssistive) &&
+            !(['title', 'desc'].includes(String(r(parent, 'localName'))) && m(parent, 'closest', 'svg'))
+          )
+            descendantHidden = true;
+          else add(node.textContent ?? '');
       } else {
         const child = node as Element,
           tag = tagOf(child);
@@ -564,7 +616,7 @@ function snapshotPageFn(
         }
         const before = out.length;
         walk(child, level + 1);
-        if (!truncated && out.length > before && out.slice(before).trim() && textHidden(child)) {
+        if (!truncated && out.length > before && out.slice(before).trim() && concealed(child)) {
           out = out.slice(0, before);
           hidden = true;
         }
@@ -686,7 +738,7 @@ function snapshotPageFn(
   };
   // Text of an editing host as one string: line breaks for <br> and block boundaries, whitespace collapsed unless the host preserves it.
   // Protected regions, nested form controls, scripts and styles, hidden subtrees and display:none text are never read. Tiny, transparent or
-  // off-screen text is read but reported through hidden. At most EDIT_VALUE_CAP characters are kept; total still counts the rest.
+  // off-screen text is omitted and reported through hidden. At most EDIT_VALUE_CAP characters are kept; total still counts the rest.
   const EDIT_VALUE_CAP = 4096,
     EDIT_NODE_CAP = 4000;
   const readEditable = (host: Element): { text: string; total: number; overflow: boolean; hidden: boolean } => {
@@ -731,6 +783,10 @@ function snapshotPageFn(
       // Text under visibility:hidden or a closed details element is not rendered either.
       const owner = r(node, 'parentElement') as Element | null;
       if (!owner || !shown(owner)) continue;
+      if (concealed(owner)) {
+        hidden = true;
+        continue;
+      }
       let piece = String(r(node, 'nodeValue') ?? '').replace(/\r\n?/g, '\n');
       piece = preserve ? piece.replace(/\xa0/g, ' ') : piece.replace(/\s+/g, ' ');
       if (!preserve && (last === '' || last === '\n' || last === ' ')) piece = piece.replace(/^ /, '');
@@ -754,20 +810,33 @@ function snapshotPageFn(
   };
   let visited = 0;
   let truncated = false;
+  const sourceLimits = new Set<SnapshotSourceLimit>();
   const root = (r(document, 'body') || r(document, 'documentElement')) as HTMLElement;
-  const pending: { node: HTMLElement; depth: number; group?: string }[] = [{ node: root, depth: 0 }];
+  // One sibling cursor per active branch keeps memory bounded even for very wide pages.
+  const pending: { node: HTMLElement; depth: number; group?: string; siblings?: boolean }[] = [
+    { node: root, depth: 0 },
+  ];
   let cur: HTMLElement;
   let depth = 0;
   while (pending.length) {
     if (visited++ >= cfg.visitCap) {
       truncated = true;
+      sourceLimits.add('visit_limit');
       break;
     }
     const item = pending.pop()!;
     cur = item.node;
     depth = item.depth;
+    if (item.siblings) {
+      const next = r(cur, 'nextElementSibling') as HTMLElement | null;
+      if (next) pending.push({ ...item, node: next });
+    }
     const skipChildren = depth >= cfg.maxDepth;
-    if (skipChildren && r(cur, 'firstElementChild')) truncated = true;
+    const atDepthShadow = skipChildren ? (r(cur, 'shadowRoot') as ShadowRoot | null) : null;
+    if (skipChildren && (r(cur, 'firstElementChild') || (atDepthShadow && r(atDepthShadow, 'firstElementChild')))) {
+      truncated = true;
+      sourceLimits.add('depth_limit');
+    }
     const tag = tagOf(cur).toLowerCase();
     const type = tag === 'input' ? ((cur as HTMLInputElement).type || 'text').toLowerCase() : '';
     const roleAttr = attr(cur, 'role'),
@@ -797,9 +866,11 @@ function snapshotPageFn(
         (tag === 'svg' && svgTitle(cur))
       );
     // A page's main region, an article and a labelled section are listed so that their whole text can be read by id.
+    const landmarkTag = !roleAttr && /^(nav|header|footer|aside|search)$/.test(tag);
     const containerTag =
       !roleAttr &&
-      (tag === 'main' ||
+      (landmarkTag ||
+        tag === 'main' ||
         tag === 'article' ||
         (tag === 'section' && !!(attr(cur, 'aria-label')?.trim() || attr(cur, 'aria-labelledby')?.trim())));
     const interesting =
@@ -820,11 +891,24 @@ function snapshotPageFn(
     if (interesting) {
       if (elements.length >= cfg.maxOut) {
         truncated = true;
+        sourceLimits.add('element_limit');
         break;
       }
       let role = roleAttr || '';
       if (!role) {
-        if (containerTag) role = tag === 'section' ? 'region' : tag;
+        if (containerTag)
+          role =
+            tag === 'section'
+              ? 'region'
+              : tag === 'nav'
+                ? 'navigation'
+                : tag === 'header'
+                  ? 'banner'
+                  : tag === 'footer'
+                    ? 'contentinfo'
+                    : tag === 'aside'
+                      ? 'complementary'
+                      : tag;
         else if (tag === 'table') role = 'table';
         else if (tag === 'tr') role = 'row';
         else if (tag === 'ul' || tag === 'ol') role = 'list';
@@ -909,10 +993,14 @@ function snapshotPageFn(
                 !bodyText &&
                   !LANDMARK_ROLES.has(role) &&
                   !((role === 'row' || role === 'listitem') && !isInteractive && !clickable),
+                isInteractive ||
+                  clickable ||
+                  ['button', 'link', 'checkbox', 'radio', 'switch', 'tab', 'menuitem'].includes(role),
               ),
-        descendantWasClipped = useOwn || aggregate ? false : descendantClipped;
+        descendantWasClipped = useOwn || aggregate ? false : descendantClipped,
+        descendantOmittedHidden = !useOwn && !aggregate && descendantHidden;
       // A live region that is still empty must not be named after its id attribute.
-      const rawName =
+      let rawName =
         referenceText ||
         attr(cur, 'aria-label') ||
         labelText ||
@@ -924,6 +1012,8 @@ function snapshotPageFn(
         attr(cur, 'title') ||
         (isStatus ? '' : curId) ||
         '';
+      const concealedProse = (bodyText || (isText && !isInteractive && !clickable)) && concealed(cur);
+      if (concealedProse) rawName = '';
       const fromText = !(referenceText || attr(cur, 'aria-label') || labelText) && !!(useOwn ? ownText : descendant);
       const derived = !(referenceText || attr(cur, 'aria-label') || labelText);
       const nameTruncated =
@@ -943,7 +1033,7 @@ function snapshotPageFn(
       const inRegion = inSensitiveRegion(cur);
       const rawNameAttr = attr(cur, 'name') || '';
       if (rawNameAttr.length > 512) throw new Error('Snapshot field limit');
-      const hints = [
+      const rawHints = [
         ...(bodyText ? [] : [rawName]),
         labelText,
         ...(labelEl ? [descendantText(labelEl, true)] : []),
@@ -955,7 +1045,14 @@ function snapshotPageFn(
         curId,
         rawNameAttr,
       ];
-      if (hints.some(hint => hint.length > 4096)) throw new Error('Snapshot field limit');
+      // An oversized classification hint cannot establish that an element is
+      // public. In isolated read-only sessions, bound it to a sentinel that
+      // forces conservative masking without evaluating the unbounded text.
+      // Normal interactive sessions keep their existing fail-closed limit.
+      const oversizedHint = rawHints.some(hint => hint.length > 4096);
+      if (oversizedHint && !cfg.isolatedReadOnly) throw new Error('Snapshot field limit');
+      const boundHint = (hint: string) => (hint.length > 4096 ? 'x'.repeat(cfg.fieldMax) : hint);
+      const hints = rawHints.map(boundHint);
       const credentialField =
         ['input', 'textarea', 'select'].includes(tag) || role === 'textbox' || role === 'searchbox';
       const semanticHints = [
@@ -964,11 +1061,16 @@ function snapshotPageFn(
         attr(cur, 'title') || '',
         attr(cur, 'autocomplete') || '',
         ...[curId, rawNameAttr].filter(hint => !/^(?:cookie|key|pin|session)$/i.test(hint)),
-      ];
+      ].map(boundHint);
       let sensitive =
+        oversizedHint ||
         isPassword ||
         inRegion ||
         (credentialField ? hints : semanticHints).some(hint => hint.length >= cfg.fieldMax || sensitiveLabel(hint));
+      const personal =
+        credentialField &&
+        (hints.some(hint => new RegExp(cfg.personalLabelPattern, 'iu').test(hint.normalize('NFKC'))) ||
+          /(?:^|\s)name(?:$|\s)/i.test(attr(cur, 'autocomplete') ?? ''));
       let rawVal = '';
       if (tag === 'input' || tag === 'textarea') rawVal = store.integrity.value(cur);
       else if (tag === 'select') {
@@ -1002,7 +1104,9 @@ function snapshotPageFn(
       const value = isPassword ? undefined : clip(rawVal);
       const valueClipped = !isPassword && (rawVal.length > cfg.fieldMax || edited?.overflow === true);
       const hiddenText =
-        (fromText && !sensitive && !inRegion && (textHidden(cur) || inline?.hidden === true)) ||
+        (!sensitive &&
+          !inRegion &&
+          (descendantOmittedHidden || (fromText && (concealedProse || inline?.hidden === true)))) ||
         (edited?.hidden === true && !sensitive);
       // The content of a secret-labelled editor is as secret as its value: nothing inside it is listed either.
       if (editable && sensitive) hideContent = true;
@@ -1064,7 +1168,15 @@ function snapshotPageFn(
         completeRows.has(r(cur, 'parentElement')) &&
         !editable &&
         !m(cur, 'closest', '[aria-hidden="true"]');
-      if (!dropCell) {
+      const assistiveProse =
+        concealedProse &&
+        assistiveBox(cur) &&
+        !!m(
+          cur,
+          'closest',
+          'button,a[href],[role="button"],[role="link"],[role="checkbox"],[role="switch"],[role="tab"]',
+        );
+      if (!dropCell && !assistiveProse) {
         const id = idFor(cur);
         store.seen.add(id);
         if (structural) childGroup = id;
@@ -1124,7 +1236,7 @@ function snapshotPageFn(
           depth,
           ...(item.group ? { parent_id: item.group } : {}),
           ...(nameTruncated && !inRegion ? { name_truncated: true } : {}),
-          ...(textLength !== undefined && !inRegion ? { text_length: textLength } : {}),
+          ...(textLength !== undefined && !inRegion && !concealedProse ? { text_length: textLength } : {}),
           ...(linkHref && !sensitive && !inRegion ? { href: linkHref } : {}),
           ...(valueClipped && !sensitive && !inRegion ? { value_truncated: true as const } : {}),
           ...(options ? { options, ...(optionsTruncated ? { options_truncated: true } : {}) } : {}),
@@ -1142,16 +1254,17 @@ function snapshotPageFn(
           ...(expanded !== undefined ? { expanded } : {}),
           ...(inRegion ? { protected: true } : {}),
           ...(sensitive ? { sensitive: true } : {}),
+          ...(personal ? { personal: true } : {}),
           ...(hiddenText ? { hidden_text: true as const } : {}),
         });
       }
     }
     if (!skipChildren && !hideContent) {
-      const children = Array.from(r(cur, 'children') as HTMLCollection) as HTMLElement[],
-        shadow = r(cur, 'shadowRoot') as ShadowRoot | null;
-      if (shadow) children.push(...(Array.from(shadow.children) as HTMLElement[]));
-      for (let i = children.length - 1; i >= 0; i--)
-        pending.push({ node: children[i]!, depth: depth + 1, group: childGroup });
+      const shadow = r(cur, 'shadowRoot') as ShadowRoot | null;
+      const shadowChild = shadow ? (r(shadow, 'firstElementChild') as HTMLElement | null) : null;
+      const child = r(cur, 'firstElementChild') as HTMLElement | null;
+      if (shadowChild) pending.push({ node: shadowChild, depth: depth + 1, group: childGroup, siblings: true });
+      if (child) pending.push({ node: child, depth: depth + 1, group: childGroup, siblings: true });
     }
   }
   for (const node of hiddenNodes) {
@@ -1170,6 +1283,7 @@ function snapshotPageFn(
     elements,
     sig: JSON.stringify(sigParts),
     truncated,
+    source_limits: [...sourceLimits],
     navigation: JSON.stringify([store.prefix, location.href, r(document, 'baseURI')]),
     actionStates,
     forms,
@@ -1298,20 +1412,20 @@ class BrowserSession implements AdapterSession {
     this.redirectedDocument = undefined;
     return held && held.url === url && method === 'GET' ? held.response : undefined;
   }
-  private proxyNavigationFailure: { url: string; reason: ErrorReason } | undefined;
-  /** A main-frame navigation that died on a proxy_* network failure; surfaced by goto failures. */
-  recordProxyNavigationFailure(request: Request, reason: ErrorReason) {
+  private navigationFailure: { url: string; reason: ErrorReason } | undefined;
+  /** A main-frame transport or proxy failure, surfaced without raw socket/certificate details. */
+  recordNavigationFailure(request: Request, reason: ErrorReason) {
     if (request.isNavigationRequest() && request.frame() === this.page.mainFrame())
-      this.proxyNavigationFailure = { url: request.url(), reason };
+      this.navigationFailure = { url: request.url(), reason };
   }
-  takeProxyNavigationFailure(url: string): ErrorReason | undefined {
-    const failure = this.proxyNavigationFailure;
+  takeNavigationFailure(url: string): ErrorReason | undefined {
+    const failure = this.navigationFailure;
     let href = url;
     try {
       href = new URL(url).href;
     } catch {}
     if (failure && failure.url === href) {
-      this.proxyNavigationFailure = undefined;
+      this.navigationFailure = undefined;
       return failure.reason;
     }
     return undefined;
@@ -1786,6 +1900,16 @@ class BrowserSession implements AdapterSession {
     }
   }
 
+  capabilities?: string[];
+  private isolatedReadOnly = false;
+  private isolatedReader: IsolatedReadStore | null = null;
+  private isolatedGeneration = -1;
+  private documentIdentity: MainDocumentIdentity | undefined;
+  private storeDocumentIdentity: string | undefined;
+  // Remember documents that can return through BFCache. Once the bounded
+  // history fills, disable compatibility fallback instead of forgetting trust.
+  private readonly publishedDocuments = new Set<string>();
+  private publicationTrackingFull = false;
   private closed = false;
   private closing: Promise<void> | undefined;
   private store: JSHandle<Store> | null = null;
@@ -1865,7 +1989,7 @@ class BrowserSession implements AdapterSession {
   }
 
   private get page(): Page {
-    if (!this.pageValue || !this.store) throw new AdlError('E_TARGET_NOT_FOUND');
+    if (!this.pageValue || (!this.store && !this.isolatedReadOnly)) throw new AdlError('E_TARGET_NOT_FOUND');
     return this.pageValue;
   }
 
@@ -2008,14 +2132,120 @@ class BrowserSession implements AdapterSession {
     }
   }
 
-  private async freshStoreAssign(): Promise<void> {
+  private requireInteractivePage(): void {
+    if (this.isolatedReadOnly) throw new AdlError('E_UNSUPPORTED_ACTION', 'isolated_read_only');
+  }
+
+  private async currentDocumentIdentity(signal?: AbortSignal): Promise<string> {
     this.checkAlive();
+    if (!this.pageValue) throw new AdlError('E_TARGET_NOT_FOUND');
+    this.documentIdentity ??= new MainDocumentIdentity(this.pageValue);
+    const combined = AbortSignal.any([this.controller.signal, ...(signal ? [signal] : [])]);
+    const identity = await this.documentIdentity.read(combined);
+    this.checkAlive();
+    if (combined.aborted) throw new AdlError('E_CANCELLED');
+    return identity;
+  }
+
+  private canPublishIsolated(identity: string): boolean {
+    return !this.publicationTrackingFull && !this.publishedDocuments.has(identity);
+  }
+
+  private notePublishedDocument(identity: string): void {
+    if (this.publishedDocuments.has(identity)) return;
+    if (this.publishedDocuments.size >= 4096) this.publicationTrackingFull = true;
+    else this.publishedDocuments.add(identity);
+  }
+
+  private async isolatedStore(signal?: AbortSignal): Promise<IsolatedReadStore> {
+    this.checkAlive();
+    if (this.isolatedReader && this.isolatedGeneration === this.documentReplacements) return this.isolatedReader;
+    const old = this.isolatedReader;
+    this.isolatedReader = null;
+    await old?.dispose();
+    const page = this.page;
+    const generation = this.documentGeneration,
+      replacement = this.documentReplacements,
+      url = page.url();
+    if (new URL(url).origin !== this.origin) throw new AdlError('E_POLICY_DENIED');
+    await this.owner.callGuard(url);
+    const combined = AbortSignal.any([this.controller.signal, ...(signal ? [signal] : [])]);
+    if (combined.aborted) throw new AdlError('E_CANCELLED');
+    this.prefix = crypto.randomBytes(9).toString('base64url');
+    const reader = await IsolatedReadStore.create(
+      page,
+      undefined,
+      {
+        installIntegrityFn: installIntegrity,
+        storeInitFn: STORE_INIT,
+        prefix: this.prefix,
+      },
+      combined,
+    );
+    if (
+      combined.aborted ||
+      this.closed ||
+      generation !== this.documentGeneration ||
+      replacement !== this.documentReplacements ||
+      page.url() !== url
+    ) {
+      await reader.dispose();
+      throw new AdlError(combined.aborted ? 'E_CANCELLED' : 'E_STALE_STATE');
+    }
+    this.isolatedReader = reader;
+    this.isolatedGeneration = replacement;
+    return reader;
+  }
+
+  private async activateIsolatedRead(expectedDocument: string, signal?: AbortSignal): Promise<void> {
+    // Build the isolated store before committing the sticky downgrade. A
+    // navigation may occur during setup, including return to a published page.
+    await this.isolatedStore(signal);
+    const currentDocument = await this.currentDocumentIdentity(signal);
+    if (currentDocument !== expectedDocument || !this.canPublishIsolated(currentDocument)) {
+      await this.isolatedReader?.dispose();
+      this.isolatedReader = null;
+      throw new AdlError('E_STALE_STATE');
+    }
+    this.isolatedReadOnly = true;
+    this.capabilities = ['observe', 'read_state', 'wait_for', 'navigate', 'back'];
+    const old = this.store;
+    this.store = null;
+    await old?.dispose().catch(() => undefined);
+    for (const child of this.frameStores.values()) await child.dispose().catch(() => undefined);
+    this.frameStores.clear();
+  }
+
+  private async freshStoreAssign(signal?: AbortSignal): Promise<void> {
+    this.checkAlive();
+    if (this.isolatedReadOnly) {
+      await this.isolatedStore(signal);
+      return;
+    }
     const gen = this.documentGeneration;
-    const candidate = await this.freshStore();
+    const expectedDocument = await this.currentDocumentIdentity(signal);
+    let candidate: JSHandle<Store>;
+    try {
+      candidate = await this.freshStore();
+    } catch (error) {
+      if (
+        error instanceof AdlError &&
+        error.code === 'E_PRIVACY_BLOCKED' &&
+        error.reason === 'untrusted_dom_api' &&
+        this.canPublishIsolated(expectedDocument) &&
+        gen === this.documentGeneration &&
+        (await this.currentDocumentIdentity(signal)) === expectedDocument
+      ) {
+        await this.activateIsolatedRead(expectedDocument, signal);
+        return;
+      }
+      throw error;
+    }
     // Recheck lifetime and origin before publishing; never leave a handle
     // installed on a closed session, and dispose the candidate on failure.
     try {
       this.checkAlive();
+      if ((await this.currentDocumentIdentity(signal)) !== expectedDocument) throw new AdlError('E_STALE_STATE');
       if (new URL(this.page.url()).origin !== this.origin) {
         await this.close();
         throw new AdlError('E_POLICY_DENIED');
@@ -2026,6 +2256,7 @@ class BrowserSession implements AdapterSession {
     }
     const old = this.store;
     this.store = candidate;
+    this.storeDocumentIdentity = expectedDocument;
     // A navigation committed while the handle was being created leaves
     // storeGeneration behind, so snapshot() recovers lazily next time.
     this.storeGeneration = gen;
@@ -2077,17 +2308,128 @@ class BrowserSession implements AdapterSession {
         await this.close();
         throw new AdlError('E_POLICY_DENIED');
       }
-      await this.freshStoreAssign();
+      await this.freshStoreAssign(signal);
       return true;
     };
     for (let attempt = 0; ; attempt++) {
+      if (this.isolatedReadOnly) return this.isolatedSnapshot(signal);
+      const attemptDocument = await this.currentDocumentIdentity(signal);
       try {
-        return await this.snapshotAttempt(signal, recover);
+        const result = await this.snapshotAttempt(signal, recover);
+        if (this.isolatedReadOnly) return result;
+        // Recovery can replace the store inside snapshotAttempt. Bind publication
+        // to that store's browser-owned document identity, never a navigation
+        // event counter (pushState also emits framenavigated).
+        const currentDocument = await this.currentDocumentIdentity(signal);
+        if (currentDocument !== this.storeDocumentIdentity) throw new AdlError('E_STALE_STATE');
+        this.notePublishedDocument(currentDocument);
+        return result;
       } catch (error) {
+        if (
+          !this.isolatedReadOnly &&
+          error instanceof AdlError &&
+          error.code === 'E_PRIVACY_BLOCKED' &&
+          error.reason === 'untrusted_dom_api' &&
+          this.canPublishIsolated(attemptDocument) &&
+          (await this.currentDocumentIdentity(signal)) === attemptDocument
+        ) {
+          await this.activateIsolatedRead(attemptDocument, signal);
+          return this.isolatedSnapshot(signal);
+        }
         if (attempt > 0 || !(error instanceof AdlError) || error.code !== 'E_STALE_STATE') throw error;
         if (!(await recover())) throw error;
       }
     }
+  }
+
+  private async isolatedSnapshot(signal?: AbortSignal): Promise<RawSnapshot> {
+    this.checkAlive();
+    await this.settleRedirect();
+    const page = this.page,
+      generation = this.documentGeneration,
+      urlBefore = page.url();
+    const combined = AbortSignal.any([this.controller.signal, ...(signal ? [signal] : [])]);
+    if (combined.aborted) throw new AdlError('E_CANCELLED');
+    if (new URL(urlBefore).origin !== this.origin) throw new AdlError('E_POLICY_DENIED');
+    await this.owner.callGuard(urlBefore);
+    const reader = await this.isolatedStore(combined);
+    const cfg = {
+      maxOut: 20000,
+      visitCap: 100000,
+      maxDepth: MAX_DOM_DEPTH,
+      fieldMax: 512,
+      isolatedReadOnly: true,
+      secretLabelPattern: SECRET_LABEL_PATTERN,
+      personalLabelPattern: PERSONAL_LABEL_PATTERN,
+      privacyRules: BROWSER_PRIVACY_RULES,
+    };
+    const res = await reader.evaluate<PageSnapshot, typeof cfg>(snapshotPageFn, cfg, combined);
+    const rawTitle = await reader.evaluate(
+      (_store: Store) => {
+        const title = Reflect.get(Object.getPrototypeOf(document), 'title', document);
+        return typeof title === 'string' && title.length <= 4096 ? title : '';
+      },
+      null,
+      combined,
+    );
+    await reader.evaluate(
+      (store: Store) => {
+        for (const id of Array.from(store.nodes.keys()))
+          if (!store.seen.has(id)) {
+            const n = store.nodes.get(id);
+            if (n) store.ids.delete(n);
+            store.nodes.delete(id);
+          }
+        store.seen.clear();
+      },
+      null,
+      combined,
+    );
+    this.checkAlive();
+    if (combined.aborted) throw new AdlError('E_CANCELLED');
+    if (generation !== this.documentGeneration || page.url() !== urlBefore) throw new AdlError('E_STALE_STATE');
+    await this.owner.callGuard(urlBefore);
+    this.checkAlive();
+    if (combined.aborted) throw new AdlError('E_CANCELLED');
+    if (generation !== this.documentGeneration || page.url() !== urlBefore) throw new AdlError('E_STALE_STATE');
+    if (page.frames().length > 1) {
+      res.truncated = true;
+      res.source_limits.push('frame_unavailable');
+    }
+    const url = redactUrl(urlBefore, this.policy.allowPersonalData),
+      title = redactString(rawTitle, this.policy.allowPersonalData);
+    const warnings = [...this.networkBlocks.values()]
+      .map(({ seq: _seq, ...warning }) => warning)
+      .sort((a, b) => Number(isActionNetworkBlock(b)) - Number(isActionNetworkBlock(a)));
+    const warningSeq = this.blockSeq;
+    const httpStatus =
+      this.documentStatus !== undefined && this.documentStatus >= 400 ? this.documentStatus : undefined;
+    const fingerprint = crypto
+      .createHash('sha256')
+      .update(
+        res.sig +
+          JSON.stringify([
+            url,
+            title,
+            warningSeq,
+            httpStatus ?? null,
+            res.truncated,
+            [...new Set(res.source_limits)].sort(),
+          ]),
+      )
+      .digest('hex');
+    return {
+      elements: res.elements,
+      fingerprint,
+      truncated: res.truncated,
+      read_only: true,
+      ...(res.source_limits.length ? { source_limits: [...new Set(res.source_limits)] } : {}),
+      url,
+      title,
+      warningSeq,
+      ...(warnings.length ? { warnings } : {}),
+      ...(httpStatus !== undefined ? { http_status: httpStatus } : {}),
+    };
   }
 
   private async snapshotAttempt(
@@ -2104,9 +2446,10 @@ class BrowserSession implements AdapterSession {
     const cfg = {
       maxOut,
       visitCap: 100000,
-      maxDepth: 12,
+      maxDepth: MAX_DOM_DEPTH,
       fieldMax: 512,
       secretLabelPattern: SECRET_LABEL_PATTERN,
+      personalLabelPattern: PERSONAL_LABEL_PATTERN,
       privacyRules: BROWSER_PRIVACY_RULES,
     };
     let res: PageSnapshot;
@@ -2125,6 +2468,7 @@ class BrowserSession implements AdapterSession {
         throw new AdlError('E_INTERNAL');
       }
       this.checkAlive();
+      if (this.isolatedReadOnly) return this.isolatedSnapshot(signal);
       try {
         res = await this.collectSnapshot(this.store!, cfg, signal);
       } catch (e2) {
@@ -2149,10 +2493,14 @@ class BrowserSession implements AdapterSession {
         await store.dispose().catch(() => undefined);
       }
     const frames = this.page.frames().filter(frame => frame !== this.page.mainFrame());
-    if (frames.length > 32) res.truncated = true;
+    if (frames.length > 32) {
+      res.truncated = true;
+      res.source_limits.push('frame_limit');
+    }
     for (const frame of frames.slice(0, 32)) {
       if (res.elements.length >= maxOut) {
         res.truncated = true;
+        res.source_limits.push('element_limit');
         break;
       }
       try {
@@ -2206,6 +2554,7 @@ class BrowserSession implements AdapterSession {
         res.elements.push(...child.elements);
         res.sig += child.sig;
         res.truncated ||= child.truncated;
+        res.source_limits.push(...child.source_limits);
         await store.evaluate(value => {
           for (const [id, node] of value.nodes)
             if (!value.seen.has(id)) {
@@ -2216,6 +2565,7 @@ class BrowserSession implements AdapterSession {
         });
       } catch {
         res.truncated = true;
+        res.source_limits.push('frame_unavailable');
       }
     }
     // Prune the private handle table to the current observation (bounds memory).
@@ -2257,12 +2607,24 @@ class BrowserSession implements AdapterSession {
     // Only an error status is reported; a change of status (for example a reload) is a new revision.
     const httpStatus =
       this.documentStatus !== undefined && this.documentStatus >= 400 ? this.documentStatus : undefined;
-    const fingerprint = digest(res.sig + JSON.stringify([url, title, warningSeq, actionEvidence, httpStatus ?? null]));
+    const fingerprint = digest(
+      res.sig +
+        JSON.stringify([
+          url,
+          title,
+          warningSeq,
+          actionEvidence,
+          httpStatus ?? null,
+          res.truncated,
+          [...new Set(res.source_limits)].sort(),
+        ]),
+    );
     await this.assertIntegrity(signal);
     return {
       elements: res.elements,
       fingerprint,
       truncated: res.truncated,
+      ...(res.source_limits.length ? { source_limits: [...new Set(res.source_limits)] } : {}),
       url,
       title,
       actionEvidence,
@@ -2288,6 +2650,29 @@ class BrowserSession implements AdapterSession {
     if (signal.aborted) throw new AdlError('E_CANCELLED');
     if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isSafeInteger(length) || length < 1 || length > 1048576)
       throw new AdlError('E_INVALID_ARGUMENT');
+    if (this.isolatedReadOnly) {
+      const page = this.page,
+        generation = this.documentGeneration,
+        url = page.url();
+      if (new URL(url).origin !== this.origin) throw new AdlError('E_POLICY_DENIED');
+      await this.owner.callGuard(url);
+      const combined = AbortSignal.any([this.controller.signal, signal]);
+      const reader = await this.isolatedStore(combined);
+      const result = await reader.evaluateElement(
+        elementId,
+        readTextPageFn,
+        { rules: BROWSER_PRIVACY_RULES, pattern: SECRET_LABEL_PATTERN },
+        combined,
+      );
+      this.checkAlive();
+      if (combined.aborted) throw new AdlError('E_CANCELLED');
+      if (generation !== this.documentGeneration || page.url() !== url) throw new AdlError('E_STALE_STATE');
+      await this.owner.callGuard(url);
+      this.checkAlive();
+      if (combined.aborted) throw new AdlError('E_CANCELLED');
+      if (generation !== this.documentGeneration || page.url() !== url) throw new AdlError('E_STALE_STATE');
+      return this.finishReadText(result, offset, length);
+    }
     let store = this.store!,
       frame: Frame | undefined;
     if (!elementId.startsWith(this.prefix + '-')) {
@@ -2337,240 +2722,7 @@ class BrowserSession implements AdapterSession {
       await element.scrollIntoViewIfNeeded({ timeout: this.policy.actionTimeoutMs });
       result = await isolatedCollect(
         element,
-        (root, arg: { rules: typeof BROWSER_PRIVACY_RULES; pattern: string }) => {
-          const r = (o: object, k: string): any => Reflect.get(Object.getPrototypeOf(o), k, o),
-            m = (o: object, k: string, ...a: unknown[]): any => Reflect.apply(r(o, k), o, a);
-          if (r(root, 'isConnected') !== true) return { error: 'missing' as const };
-          const protectedNode = (element: Element) => {
-            let n: Element | null = element,
-              depth = 0;
-            while (n && depth++ < arg.rules.ancestorCap) {
-              if (m(n, 'matches', arg.rules.regionSelector)) return true;
-              n = (r(n, 'parentElement') as Element | null) ?? (m(n, 'getRootNode') as ShadowRoot).host ?? null;
-            }
-            return n !== null;
-          };
-          if (protectedNode(root)) return { error: 'protected' as const };
-          const secret = new RegExp(arg.pattern, 'iu');
-          const skip = (e: Element) => {
-            if (
-              m(e, 'matches', 'script,style,input,textarea,select,option,optgroup') ||
-              m(e, 'matches', arg.rules.regionSelector)
-            )
-              return true;
-            if (e instanceof HTMLLabelElement) {
-              const field = e.control;
-              if (field) {
-                const hints = [
-                  field.id,
-                  field.getAttribute('name'),
-                  field.getAttribute('autocomplete'),
-                  field.getAttribute('aria-label'),
-                ]
-                  .filter(Boolean)
-                  .join(' ');
-                if (protectedNode(field) || (field as HTMLInputElement).type === 'password' || secret.test(hints))
-                  return true;
-              }
-            }
-            return false;
-          };
-          for (
-            let ancestor: Element | null = root, depth = 0;
-            ancestor && depth++ < arg.rules.ancestorCap;
-            ancestor =
-              (r(ancestor, 'parentElement') as Element | null) ??
-              (m(ancestor, 'getRootNode') as ShadowRoot).host ??
-              null
-          )
-            if (skip(ancestor)) return { text: '', truncated: false };
-          const displayNone = (e: Element) => {
-            try {
-              return getComputedStyle(e).display === 'none';
-            } catch {
-              return false;
-            }
-          };
-          const walker = m(
-            r(root, 'ownerDocument'),
-            'createTreeWalker',
-            root,
-            NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT,
-            {
-              acceptNode: (n: Node) =>
-                r(n, 'nodeType') === 1 && (skip(n as Element) || displayNone(n as Element))
-                  ? NodeFilter.FILTER_REJECT
-                  : NodeFilter.FILTER_ACCEPT,
-            },
-          ) as TreeWalker;
-          // Text a human cannot see (the snapshot's hidden_text rule) is left out and reported. The element read itself is not judged:
-          // an element flagged hidden_text is read as is, so that its text can be inspected.
-          const alphaOf = (color: string): number => {
-            const match =
-              /^rgba\(\s*[^,]+,[^,]+,[^,]+,\s*([\d.]+)(%?)\s*\)$/.exec(color) ?? /\/\s*([\d.]+)(%?)\s*\)$/.exec(color);
-            if (!match) return 1;
-            const value = parseFloat(match[1]!);
-            return match[2] ? value / 100 : value;
-          };
-          const looksHidden = (e: Element, withAncestors: boolean): boolean => {
-            try {
-              const style = getComputedStyle(e);
-              if (parseFloat(style.fontSize) <= 2 || parseFloat(style.opacity) < 0.05 || alphaOf(style.color) <= 0.05)
-                return true;
-              if (withAncestors && !m(e, 'checkVisibility', { opacityProperty: true })) return true;
-              if (
-                parseFloat(style.textIndent) <= -999 ||
-                /^rect\(\s*0(?:px)?[\s,]+0(?:px)?[\s,]+0(?:px)?[\s,]+0(?:px)?\s*\)$/.test(style.clip) ||
-                /^inset\(\s*(?:50|100)%/.test(style.clipPath)
-              )
-                return true;
-              const box = m(e, 'getBoundingClientRect') as DOMRect;
-              if (box.bottom + scrollY < -20) return true;
-              if (style.direction === 'ltr' && (box.right + scrollX < -20 || box.left + scrollX > innerWidth + 10000))
-                return true;
-              return (
-                (box.width <= 1 || box.height <= 1) && (style.overflowX !== 'visible' || style.overflowY !== 'visible')
-              );
-            } catch {
-              return false;
-            }
-          };
-          const filtering = !looksHidden(root, true);
-          const hiddenCache = new Map<Element, boolean>();
-          const hiddenBelowRoot = (e: Element | null, depth = 0): boolean => {
-            if (!e || e === root || depth > 256) return false;
-            let value = hiddenCache.get(e);
-            if (value === undefined) {
-              value = looksHidden(e, false) || hiddenBelowRoot(r(e, 'parentElement') as Element | null, depth + 1);
-              hiddenCache.set(e, value);
-            }
-            return value;
-          };
-          // Paragraph structure: text is joined per block. A block change gives a new line, or a blank line around paragraphs, headings,
-          // lists and tables; cells of one row are joined with " | "; <br> is a new line; whitespace collapses unless the element preserves it.
-          const BLOCKS = new Set(
-            'DIV P TR UL OL TABLE THEAD TBODY TFOOT SECTION ARTICLE ASIDE HEADER FOOTER NAV MAIN H1 H2 H3 H4 H5 H6 BLOCKQUOTE PRE FIGURE FIGCAPTION FORM FIELDSET LEGEND DL HR ADDRESS DETAILS SUMMARY CAPTION LI DT DD TD TH DIALOG HGROUP MENU'.split(
-              ' ',
-            ),
-          );
-          const PARAGRAPHS = new Set(
-            'P H1 H2 H3 H4 H5 H6 BLOCKQUOTE PRE FIGURE UL OL DL TABLE ARTICLE SECTION ASIDE MAIN HEADER FOOTER NAV FORM FIELDSET DETAILS ADDRESS HR'.split(
-              ' ',
-            ),
-          );
-          const tagOf = (e: Element) => String(r(e, 'tagName'));
-          const blocks = new Map<Element, Element>();
-          const blockOf = (owner: Element): Element => {
-            let found = blocks.get(owner);
-            if (found) return found;
-            found = root;
-            for (
-              let up: Element | null = owner, climbed = 0;
-              up && up !== root && climbed < 64;
-              climbed++, up = r(up, 'parentElement') as Element | null
-            )
-              if (BLOCKS.has(tagOf(up))) {
-                found = up;
-                break;
-              }
-            blocks.set(owner, found);
-            return found;
-          };
-          // The list or table an item or cell belongs to: moving between two of them is one line, leaving it is a paragraph break.
-          const groups = new Map<Element, Element>();
-          const groupOf = (block: Element): Element => {
-            let found = groups.get(block);
-            if (!found) {
-              const tag = tagOf(block);
-              found =
-                tag === 'LI' || tag === 'DT' || tag === 'DD'
-                  ? ((m(block, 'closest', 'ul,ol,dl,menu') as Element | null) ?? block)
-                  : tag === 'TD' || tag === 'TH'
-                    ? ((m(block, 'closest', 'table') as Element | null) ?? block)
-                    : block;
-              groups.set(block, found);
-            }
-            return found;
-          };
-          const preserved = new Map<Element, boolean>();
-          const preserves = (owner: Element): boolean => {
-            let value = preserved.get(owner);
-            if (value === undefined) {
-              try {
-                value = /^(pre|break-spaces)/.test(getComputedStyle(owner).whiteSpace);
-              } catch {
-                value = false;
-              }
-              preserved.set(owner, value);
-            }
-            return value;
-          };
-          const LIMIT = 1048576;
-          let text = '',
-            visited = 0,
-            truncated = false,
-            hidden = !filtering,
-            last: Element | null = null;
-          for (let node: Node | null = walker.nextNode(); node; node = walker.nextNode()) {
-            if (++visited > 100000) {
-              truncated = true;
-              break;
-            }
-            if (r(node, 'nodeType') === 1) {
-              if (tagOf(node as Element) === 'BR') text = text.replace(/ +$/, '') + '\n';
-              continue;
-            }
-            const owner = r(node, 'parentElement') as Element | null;
-            // Text that is not rendered (display:none, visibility:hidden, a closed details element) is not read.
-            if (!owner || !m(owner, 'checkVisibility', { visibilityProperty: true })) continue;
-            if (filtering && hiddenBelowRoot(owner)) {
-              hidden = true;
-              continue;
-            }
-            const keep = preserves(owner),
-              raw = String(r(node, 'nodeValue') ?? '');
-            let piece = keep ? raw.replace(/\r\n?/g, '\n') : raw.replace(/[ \t\n\r\f]+/g, ' ');
-            const block = blockOf(owner);
-            if (!keep && piece === ' ') {
-              if (text !== '' && block === last && !/[ \n]$/.test(text)) text += ' ';
-              continue;
-            }
-            if (piece === '') continue;
-            if (last !== null && block !== last) {
-              const before = tagOf(last),
-                after = tagOf(block);
-              text = text.replace(/ +$/, '');
-              if (
-                (before === 'TD' || before === 'TH') &&
-                (after === 'TD' || after === 'TH') &&
-                r(last, 'parentElement') === r(block, 'parentElement')
-              )
-                text += ' | ';
-              else {
-                const from = groupOf(last),
-                  to = groupOf(block),
-                  blank =
-                    PARAGRAPHS.has(before) ||
-                    PARAGRAPHS.has(after) ||
-                    (from !== to && (PARAGRAPHS.has(tagOf(from)) || PARAGRAPHS.has(tagOf(to))));
-                text += '\n'.repeat(Math.max(0, (blank ? 2 : 1) - /\n*$/.exec(text)![0].length));
-              }
-            }
-            if (!keep && (text === '' || /[ \n]$/.test(text))) piece = piece.replace(/^ /, '');
-            if (piece === '') continue;
-            last = block;
-            if (text.length + piece.length > LIMIT) {
-              text += piece.slice(0, LIMIT - text.length);
-              truncated = true;
-              break;
-            }
-            text += piece;
-          }
-          text = text.trim();
-          // Never return the prefix of a token cut at the source cap.
-          if (truncated) text = text.replace(/[A-Za-z0-9._%+@-]+$/u, '');
-          return { text, truncated, ...(hidden ? { hidden: true } : {}) };
-        },
+        readTextPageFn,
         { rules: BROWSER_PRIVACY_RULES, pattern: SECRET_LABEL_PATTERN },
         [],
         frame ?? this.page.mainFrame(),
@@ -2581,6 +2733,10 @@ class BrowserSession implements AdapterSession {
     this.checkAlive();
     if (signal.aborted) throw new AdlError('E_CANCELLED');
     if (generation !== this.documentGeneration) throw new AdlError('E_STALE_STATE');
+    return this.finishReadText(result, offset, length);
+  }
+
+  private finishReadText(result: PageTextResult, offset: number, length: number) {
     if ('error' in result)
       throw new AdlError(result.error === 'protected' ? 'E_PRIVACY_BLOCKED' : 'E_TARGET_NOT_FOUND');
     const text = redactText(result.text, this.policy.allowPersonalData === true);
@@ -2600,6 +2756,7 @@ class BrowserSession implements AdapterSession {
   }
 
   async capture(signal: AbortSignal): Promise<CapturedImage> {
+    this.requireInteractivePage();
     this.checkAlive();
     await this.assertIntegrity(signal);
     if (signal.aborted) {
@@ -2664,6 +2821,7 @@ class BrowserSession implements AdapterSession {
   }
 
   async gesture(plan: GesturePlan, reference: GestureReference, signal: AbortSignal): Promise<GestureExecution> {
+    this.requireInteractivePage();
     await this.assertIntegrity(signal);
     this.checkAlive();
     this.containment = undefined;
@@ -2737,6 +2895,7 @@ class BrowserSession implements AdapterSession {
     return this.page.locator(pointSelector('point', proof.pointNonce, point.x, point.y));
   }
   async resolvePoint(point: { x: number; y: number }, reference: GestureReference, signal: AbortSignal) {
+    this.requireInteractivePage();
     const locator = await this.pointTarget(point, reference, signal);
     if ((await locator.count()) !== 1) throw new AdlError('E_STALE_STATE');
     const node = await locator.elementHandle();
@@ -2767,6 +2926,7 @@ class BrowserSession implements AdapterSession {
     signal: AbortSignal,
     onDispatch: () => void,
   ) {
+    this.requireInteractivePage();
     await this.assertIntegrity(signal);
     if (!this.policy.allowAllOperations) throw new AdlError('E_APPROVAL_REQUIRED', 'operation_not_granted');
     const locator = await this.pointTarget(point, reference, signal);
@@ -2789,6 +2949,7 @@ class BrowserSession implements AdapterSession {
   }
 
   async prepareAction(action: Action, signal: AbortSignal) {
+    this.requireInteractivePage();
     this.checkAlive();
     if (signal.aborted) throw new AdlError('E_CANCELLED');
     await this.assertIntegrity(signal);
@@ -2837,6 +2998,7 @@ class BrowserSession implements AdapterSession {
   }
 
   async handoff(paused: boolean, signal: AbortSignal, expiresAt?: number) {
+    this.requireInteractivePage();
     this.checkAlive();
     if (this.policy.browserHeadless !== false) throw new AdlError('E_UNSUPPORTED_ACTION');
     if (signal.aborted) throw new AdlError('E_CANCELLED');
@@ -2867,6 +3029,7 @@ class BrowserSession implements AdapterSession {
     onDispatch?: () => void,
     authorization?: ActionAuthorization,
   ): Promise<void | AdapterActResult> {
+    if (action.action !== 'navigate' && action.action !== 'back') this.requireInteractivePage();
     this.checkAlive();
     if (signal.aborted) throw new AdlError('E_CANCELLED');
     this.containment = undefined;
@@ -3073,6 +3236,7 @@ class BrowserSession implements AdapterSession {
     // it: navigate/back stay available on such a page, everything else fails.
     const navigationOnly = action.action === 'navigate' || action.action === 'back';
     const assertIntegrityOrLeaving = async () => {
+      if (navigationOnly && this.isolatedReadOnly) return;
       try {
         await this.assertIntegrity(signal);
       } catch (error) {
@@ -3115,10 +3279,17 @@ class BrowserSession implements AdapterSession {
         await assertEvidence();
         await assertIntegrityOrLeaving();
         onDispatch();
-        await this.page.goBack({ waitUntil: 'domcontentloaded' });
+        try {
+          await this.page.goBack({ waitUntil: 'domcontentloaded' });
+        } catch (error) {
+          this.checkAlive();
+          const failure = this.takeNavigationFailure(previous.url);
+          if (failure) throw new AdlError('E_POLICY_DENIED', failure);
+          throw error;
+        }
         await this.settleRedirect();
         complete();
-        await this.freshStoreAssign();
+        await this.freshStoreAssign(signal);
         return;
       } finally {
         await protocol.detach().catch(() => undefined);
@@ -3154,13 +3325,13 @@ class BrowserSession implements AdapterSession {
           complete();
           return;
         }
-        const proxyFailure = this.takeProxyNavigationFailure(u.href);
+        const proxyFailure = this.takeNavigationFailure(u.href);
         if (proxyFailure) throw new AdlError('E_POLICY_DENIED', proxyFailure);
         deny();
       }
       await this.settleRedirect();
       complete();
-      await this.freshStoreAssign();
+      await this.freshStoreAssign(signal);
       return;
     }
     if (action.action === 'read_state' || action.action === 'wait_for') throw new AdlError('E_UNSUPPORTED_ACTION');
@@ -3744,6 +3915,9 @@ class BrowserSession implements AdapterSession {
       this.manualNetworkGeneration++;
       this.manualNetworkExpires = 0;
       await this.navigationProtocol?.then(cdp => cdp.detach()).catch(() => undefined);
+      await this.documentIdentity?.dispose();
+      await this.isolatedReader?.dispose();
+      this.isolatedReader = null;
       await this.context.close();
       await store?.dispose().catch(() => {});
       for (const child of this.frameStores.values()) await child.dispose().catch(() => {});
@@ -4150,8 +4324,14 @@ export class BrowserAdapter implements Adapter {
             if (setCookie.length) outHeaders['set-cookie'] = setCookie.join('\n');
             return route.fulfill({ status: res.status || 599, headers: outHeaders, body: res.body });
           } catch (error) {
-            if (error instanceof AdlError && error.reason?.startsWith('proxy_'))
-              active.recordProxyNavigationFailure(route.request(), error.reason as ErrorReason);
+            if (
+              error instanceof AdlError &&
+              error.reason &&
+              (error.reason.startsWith('proxy_') ||
+                error.reason === 'tls_handshake_failed' ||
+                error.reason === 'transport_failure')
+            )
+              active.recordNavigationFailure(route.request(), error.reason as ErrorReason);
             await block(
               error instanceof AdlError
                 ? (error.reason ?? (error.code === 'E_RESOURCE_LIMIT' ? 'response_blocked' : 'network_error'))
@@ -4180,7 +4360,7 @@ export class BrowserAdapter implements Adapter {
       return active;
     } catch (e) {
       if (session) await session.close().catch(() => undefined);
-      const proxyFailure = session?.takeProxyNavigationFailure(config.url);
+      const proxyFailure = session?.takeNavigationFailure(config.url);
       if (proxyFailure) throw new AdlError('E_POLICY_DENIED', proxyFailure);
       if (e instanceof AdlError) throw e;
       throw new AdlError('E_POLICY_DENIED');

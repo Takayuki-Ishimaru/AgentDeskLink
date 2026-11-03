@@ -46,8 +46,8 @@ SELECT_CONTAINERS = ('combobox', 'list', 'listbox', 'tablist', 'menu', 'table', 
 OPTION_ATSPI_ROLES = ('menu item', 'list item', 'page tab', 'tree item', 'table row', 'list row')
 # Same vocabulary as the browser path (src/policy.ts + src/browser-approval.ts), including the Japanese terms.
 CONSEQUENTIAL = re.compile(
-    r"\b(?:delete|remove(?!\s+filters?\b)|upload|send|submit|purchase|checkout|pay|payment|login|log\s*in|sign\s*in|sign\s*up|register|withdraw|transfer|confirm|cancel|order)\b"
-    r"|削除|購入|注文|支払|決済|送信|登録|取消|取り消|キャンセル|振込|送金|転送|申込|申し込|解約|確定|ログイン", re.IGNORECASE)
+    r"\b(?:delete|remove(?!\s+filters?\b)|upload|send|submit|purchase|checkout|pay|payment|login|log\s*in|sign\s*in|sign\s*up|register|withdraw|transfer|confirm|cancel|order|close|quit|exit|discard|do(?:n't| not)\s+save)\b"
+    r"|削除|購入|注文|支払|決済|送信|登録|取消|取り消|キャンセル|振込|送金|転送|申込|申し込|解約|確定|ログイン|閉じる|終了|破棄|保存しない", re.IGNORECASE)
 # Port of SECRET_LABEL_PATTERN in src/privacy.ts.
 SECRET = re.compile(
     r"(?:^|[^a-z0-9])(?:password|passwd|pwd|passcode|secret|token|api[ _-]*key|access[ _-]*(?:key|token)|refresh[ _-]*token|private[ _-]*key|credentials?|authorization|auth|bearer|otp|cvv|cvc"

@@ -12,10 +12,10 @@ AgentDeskLink is an MCP server that connects AI agents to your local browser and
 
 [Get started](release-docs/INSTALL_en.md) · [What you can do](#what-you-can-do) · [Supported environments](#supported-environments) · [Release guide](release-docs/README_en.md) · [MIT License](LICENSE)
 
-> **0.1.9 / Beta**\
+> **0.1.10 / Beta**\
 > This beta is intended for a limited range of use. Before installing, review [supported environments and known limitations](release-docs/KNOWN_ISSUES_en.md).
 
-This version holds web-app save requests before sending them so you can approve their contents. You can also continue allowing writes to a trusted site for up to 30 minutes. Changes and warnings after an action, reading a selected area, and Linux tab switching and selection have improved. See [what changed](release-docs/RELEASE_NOTES_en.md) and the [operation settings and approval guide](release-docs/OPERATIONS.md).
+This version adds a read-only compatibility path for pages such as GitHub. It also improves deep-page reading and access to body text, concealed-text handling, Japanese personal-data masking, close/discard approvals, approval dialogs and error guidance. See [what changed](release-docs/RELEASE_NOTES_en.md) and the [operation settings and approval guide](release-docs/OPERATIONS.md).
 
 ## What you can do
 
@@ -30,7 +30,7 @@ Drag inside the browser, touch swipes and timestamped continuous frame capture a
 
 ## Get started in VS Code
 
-1. Download the common `agentdesklink-0.1.9.vsix` package, then install it with "Extensions: Install from VSIX".
+1. Download the common `agentdesklink-0.1.10.vsix` package, then install it with "Extensions: Install from VSIX".
 2. Open a folder and trust the workspace.
 3. Open **AgentDeskLink** in the activity bar.
 4. Choose **Open Settings** and configure the allowed browser origins or desktop app and the operation permissions you need.
@@ -79,9 +79,9 @@ Unknown secrets in images or text cannot be detected completely. Use Emergency S
 
 The panel also configures a visible browser, idle timeout and an HTTP(S) proxy without authentication. Use `adl_handoff` for a manual login in the visible browser. Ask mode requires a separate approval allowing same-origin website scripts and forms to send requests for at most 120 seconds while automation is paused. Website scripts may send, change or delete before a human click during this interval. Resume and observe again after the manual step. Resume and expiry cannot undo requests already dispatched.
 
-Bundled Node starts with `--use-system-ca`. Destination DNS/IP validation remains local, including through a proxy, so hosts resolvable only by the proxy are unsupported. Pages whose DOM APIs cannot be verified fail closed with `untrusted_dom_api`. See [supported environments and known limitations](release-docs/KNOWN_ISSUES_en.md).
+Bundled Node starts with `--use-system-ca`. Destination DNS/IP validation remains local, including through a proxy, so hosts resolvable only by the proxy are unsupported. Documents whose initial DOM APIs cannot be verified use isolated read-only compatibility. Later tampering with an already observed document stops with `untrusted_dom_api`. See [supported environments and known limitations](release-docs/KNOWN_ISSUES_en.md).
 
-`adl_observe` returns JSON without default values (such as `enabled: true` or empty values) and `format: "lines"` for escaped rows; diffs, scope and cursors work in all formats. `scope` searches the page: quote with `text:"v1.0: fixed"`, or use `role:` / `name:` / `id:` (see [operation settings](release-docs/OPERATIONS.md)). Links include `href`, images and canvas with a text alternative appear as `img`, and elements containing text that is hard for people to see carry `hidden_text: true`. Coordinate clicks use `adl_act` with `point: {frame_id,x,y}` in source CSS pixels from the latest retained capture. Capture again when geometry or the target changes.
+`adl_observe` returns JSON without default values (such as `enabled: true` or empty values) and `format: "lines"` for escaped rows; diffs, scope and cursors work in all formats. `scope` searches the page: quote with `text:"v1.0: fixed"`, or use `role:` / `name:` / `id:` (see [operation settings](release-docs/OPERATIONS.md)). Links include `href`, images and canvas with a text alternative appear as `img`, and concealed prose is omitted and marked with `hidden_text: true`. Default full observations expose body `landmarks`; DOM acquisition reaches depth 64. Coordinate clicks use `adl_act` with `point: {frame_id,x,y}` in source CSS pixels from the latest retained capture. Capture again when geometry or the target changes.
 
 Browser regions marked `data-adl-sensitive` or `data-adl-classification="SECRET"` / `"UNKNOWN"` protect their descendants as well. Neither a child marked `PUBLIC` nor `allowAllOperations` removes that protection. Semantic observations redact protected content, and actions within these regions are denied. Browser captures and retained crops mask them. These explicit markers complement automatic detection.
 

@@ -6,6 +6,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import {
   AdlError,
   HeldWritesError,
+  MAX_DOM_DEPTH,
   NativeError,
   safeError,
   type Action,
@@ -27,7 +28,14 @@ import {
   type BrowserTargetConfig,
 } from './types.js';
 import { isActionNetworkBlock, isWriteBlock } from './network-warnings.js';
-import { assertUrlAllowed, authorizeAction, isNativeConsequential, redactElement, redactString } from './policy.js';
+import {
+  assertUrlAllowed,
+  authorizeAction,
+  isNativeConsequential,
+  redactElement,
+  redactString,
+  redactText,
+} from './policy.js';
 import { SnapshotStore, type ObserveOptions, type ObserveResult } from './snapshot.js';
 import { VisualStore } from './visual.js';
 import { visualRequestSchema } from './visual-request.js';
@@ -89,6 +97,7 @@ type ApprovalProof = {
   origin?: string;
   application?: string;
   details?: string[];
+  context?: { kind: 'row' | 'listitem' | 'dialog' | 'form'; text: string };
   /** Every label the activation can carry, as the adapter reports them (siteGrantFor checks them for money-like words). */
   labels?: string[];
   /** The standing site grant a human may give with this request (siteGrantFor); never set for credentials, label-gated clicks or desktop controls. */
@@ -153,6 +162,26 @@ function heldRequestError(requestId: string) {
 }
 const HELD_DETAIL_LINES = 25;
 const HELD_DETAIL_BYTES = 8192;
+/** Context is supplemental: never discard complete form/request details to fit it. */
+function contextualDetails(proof: ApprovalProof): string[] | undefined {
+  const context = proof.context;
+  if (
+    !context ||
+    !['row', 'listitem', 'dialog', 'form'].includes(context.kind) ||
+    typeof context.text !== 'string' ||
+    context.text.length > 512 ||
+    context.text.includes('\0')
+  )
+    return proof.details;
+  const text = redactText(context.text);
+  if (text.length > 512) return proof.details;
+  const line = `Page context (${context.kind}; untrusted page text, not request identity): ${JSON.stringify(text)}`;
+  const details = [line, ...(proof.details ?? [])];
+  return details.length <= HELD_DETAIL_LINES &&
+    Buffer.byteLength(JSON.stringify({ details }), 'utf8') <= HELD_DETAIL_BYTES
+    ? details
+    : proof.details;
+}
 /** adl_approvals waits at most this long for a released request's answer, so that the observation that follows sees the page's reaction. */
 const HELD_RESPONSE_WAIT_MS = 1500;
 const HELD_WATCH_MS = 500;
@@ -260,6 +289,7 @@ export class Engine {
         label: redactString(config.label),
         policy_class: config.classification,
         capabilities: this.browserCapabilities(config),
+        ...(this.gestureSurfaces(config) ? { gesture_surfaces: this.gestureSurfaces(config) } : {}),
       };
       this.targets.set(target.target_id, target);
     }
@@ -310,6 +340,15 @@ export class Engine {
           : []),
       ]),
     ];
+  }
+  /** Permitted gesture surface ids and kinds, reported only when the gesture capability is actually in force; selectors never are. */
+  private gestureSurfaces(config?: BrowserTargetConfig): { id: string; kinds: string[] }[] | undefined {
+    if (!config?.gestures?.enabled) return undefined;
+    if (!(this.policy.allowAllOperations || this.policy.operationMode !== 'read_only')) return undefined;
+    return config.gestures.surfaces.map(surface => ({
+      id: surface.id,
+      kinds: (['drag', 'swipe'] as const).filter(kind => surface.kinds.includes(kind)),
+    }));
   }
   private replaceDesktopTargets(targets: Target[]) {
     for (const [id, target] of this.targets) if (target.surface === 'desktop') this.targets.delete(id);
@@ -375,7 +414,7 @@ export class Engine {
         same_origin_iframe: true,
         cross_origin_iframe_approval: false,
       },
-      version: '0.1.9',
+      version: '0.1.10',
       transport: 'stdio',
       modes: [
         'strict_isolated',
@@ -487,12 +526,14 @@ export class Engine {
     return this.sessionLane(sessionId, async () => {
       const s = this.get(sessionId);
       if (!['pause', 'resume'].includes(command)) throw invalid('command');
+      if (s.raw.read_only) throw new AdlError('E_UNSUPPORTED_ACTION', 'isolated_read_only');
       if (s.target.surface !== 'browser' || this.policy.browserHeadless !== false || !s.adapter.handoff)
         throw new AdlError('E_UNSUPPORTED_ACTION');
       let expires = Date.now() + 120000;
       if (command === 'pause' && !this.policy.allowAllOperations) {
         if (this.policy.operationMode !== 'ask') throw new AdlError('E_APPROVAL_REQUIRED');
         await this.refresh(s, cancel, true);
+        if (s.raw.read_only) throw new AdlError('E_UNSUPPORTED_ACTION', 'isolated_read_only');
         const configured = this.browserConfig(s.target.application_id);
         const origin = new URL(s.raw.url ?? configured?.url ?? '').origin;
         expires = (await this.approvalFor(s, { action: 'handoff' }, s.revision, {
@@ -628,8 +669,16 @@ export class Engine {
   }
   private sessionLane<T>(session_id: string, fn: () => Promise<T>): Promise<T> {
     const s = this.sessions.get(session_id);
-    if (s?.target.surface === 'desktop') return this.enqueueDesktop(fn);
-    return this.enqueueSession(session_id, fn);
+    const run = async () => {
+      try {
+        return await fn();
+      } catch (error) {
+        if (s && error instanceof AdlError && error.code === 'E_STALE_STATE') error.detail.revision ??= s.revision;
+        throw error;
+      }
+    };
+    if (s?.target.surface === 'desktop') return this.enqueueDesktop(run);
+    return this.enqueueSession(session_id, run);
   }
   private get(id: string): Session {
     const s = this.sessions.get(id);
@@ -1046,6 +1095,7 @@ export class Engine {
       label: redactString(config.label),
       policy_class: config.classification,
       capabilities: this.browserCapabilities(config),
+      ...(this.gestureSurfaces(config) ? { gesture_surfaces: this.gestureSurfaces(config) } : {}),
     };
     this.urlTargets.set(parsed.href, { config, target });
     return target;
@@ -1120,6 +1170,7 @@ export class Engine {
         session_id: s.id,
         revision: 1,
         capabilities: instance.capabilities ?? target.capabilities,
+        ...(raw.read_only ? { read_only: true as const } : {}),
         mode,
         // Reported only for an error response (400 or higher), so an opened 404 page is not mistaken for a real one.
         ...(raw.http_status !== undefined ? { http_status: raw.http_status } : {}),
@@ -1272,7 +1323,8 @@ export class Engine {
       return this.deadline(
         async signal => {
           await this.refresh(s, signal);
-          if (s.revision !== expected_revision) throw new AdlError('E_STALE_STATE');
+          if (s.revision !== expected_revision)
+            throw new AdlError('E_STALE_STATE', undefined, { revision: s.revision });
           const { metadata: reference } = await this.visuals.view(
             s.id,
             frame_id,
@@ -1325,7 +1377,8 @@ export class Engine {
       return this.deadline(
         async signal => {
           await this.refresh(s, signal);
-          if (s.revision !== expected_revision) throw new AdlError('E_STALE_STATE');
+          if (s.revision !== expected_revision)
+            throw new AdlError('E_STALE_STATE', undefined, { revision: s.revision });
           const reference = (await this.visuals.view(s.id, frame_id, { max_dimension: 64, max_pixels: 4096 }, signal))
             .metadata;
           if (
@@ -1481,7 +1534,8 @@ export class Engine {
       const s = this.get(session_id);
       if (options.depth !== undefined) {
         if (s.target.surface !== 'browser') throw new AdlError('E_UNSUPPORTED_ACTION');
-        if (!Number.isSafeInteger(options.depth) || options.depth < 1 || options.depth > 12) throw invalid('depth');
+        if (!Number.isSafeInteger(options.depth) || options.depth < 1 || options.depth > MAX_DOM_DEPTH)
+          throw invalid('depth');
       }
       await this.refresh(s, cancel);
       if (options.text) {
@@ -1516,6 +1570,7 @@ export class Engine {
           return {
             ok: true,
             revision: s.revision,
+            ...(s.raw.read_only ? { read_only: true as const } : {}),
             ...(redactions > 0 ? { redactions } : {}),
             truncated: read.truncated || next !== null,
             text: {
@@ -1777,7 +1832,8 @@ export class Engine {
     if (this.approvalPending.size >= 8 || this.approvalTerminal.size + this.approvalPending.size >= 128)
       throw new AdlError('E_RESOURCE_LIMIT');
     const raw = action.value,
-      value = typeof raw === 'string' ? describeApprovalValue(raw, proof.risk === 'credential') : undefined;
+      value = typeof raw === 'string' ? describeApprovalValue(raw, proof.risk === 'credential') : undefined,
+      details = contextualDetails(proof);
     // Browser summaries name the http origin; desktop summaries name the configured application (the window title is the untrusted target label).
     const summary: ApprovalSummary = {
       // Held writes: the control already ran; what the human approves is the request it left waiting.
@@ -1789,7 +1845,7 @@ export class Engine {
       role: redactString(proof.role).slice(0, 100),
       name: redactString(proof.name).slice(0, 128),
       risk: value?.kind === 'secret' || proof.risk === 'credential' ? 'credential' : 'consequential',
-      ...(proof.details ? { details: proof.details } : {}),
+      ...(details ? { details } : {}),
       ...(value ? { value } : {}),
       // Only a request that carries no credential can offer the human the standing site grant.
       ...(proof.grant && value?.kind !== 'secret' && proof.risk !== 'credential' ? { grant: proof.grant } : {}),
@@ -1808,7 +1864,7 @@ export class Engine {
     };
     this.approvalPending.set(s.id, entry);
     try {
-      const reply = await this.approval.request('POST', '/v1/requests', entry, {
+      const request = {
         v: 1,
         request_id: entry.request_id,
         server_id: this.approvalServerId,
@@ -1816,7 +1872,13 @@ export class Engine {
         binding,
         expires_at: entry.expires_at,
         summary,
-      });
+      };
+      // The transport also caps the entire envelope. Optional context must not make an otherwise valid request fail.
+      if (details !== proof.details && Buffer.byteLength(JSON.stringify(request), 'utf8') > HELD_DETAIL_BYTES) {
+        if (proof.details) summary.details = proof.details;
+        else delete summary.details;
+      }
+      const reply = await this.approval.request('POST', '/v1/requests', entry, request);
       // Nothing but a standing site grant (offered in summary.grant) may approve a request before a human has seen it.
       if (reply.status === 'approved' && reply.granted === 'site_writes' && summary.grant)
         entry.granted = 'site_writes';
@@ -1980,6 +2042,7 @@ export class Engine {
       name: liveProof?.name ?? '',
       ...(liveProof?.origin !== undefined ? { origin: liveProof.origin } : {}),
       details,
+      ...(liveProof?.context ? { context: liveProof.context } : {}),
       ...(grant ? { grant } : {}),
     };
     try {
@@ -2072,12 +2135,15 @@ export class Engine {
     const pageScroll = isPageScroll(action, s.target.surface);
     const actionEvidence = this.freshnessFor(s, expected, action);
     if (!['read_state', 'wait_for'].includes(action.action) && expected > s.revision)
-      throw new AdlError('E_STALE_STATE', 'revision_ahead', { argument: 'expected_revision' });
+      throw new AdlError('E_STALE_STATE', 'revision_ahead', {
+        argument: 'expected_revision',
+        revision: s.revision,
+      });
     if (!['read_state', 'wait_for'].includes(action.action) && s.revision !== expected && !actionEvidence) {
       // Held writes are bound to the exact bytes of the page's requests, not to the DOM revision: an agent that acts on an old revision must not
       // abort the save a human is looking at.
       if (!this.approvalPending.get(s.id)?.hold) await this.invalidateApproval(s.id);
-      throw new AdlError('E_STALE_STATE');
+      throw new AdlError('E_STALE_STATE', undefined, { revision: s.revision });
     }
     if (action.action === 'read_state') return { ok: true, revision: s.revision };
     if (action.action === 'wait_for')
@@ -2553,7 +2619,10 @@ export class Engine {
       )
         throw invalid('expected_revision');
       if (expected! > this.get(step.session_id).revision)
-        throw new AdlError('E_STALE_STATE', 'revision_ahead', { argument: 'expected_revisions' });
+        throw new AdlError('E_STALE_STATE', 'revision_ahead', {
+          argument: 'expected_revisions',
+          revision: this.get(step.session_id).revision,
+        });
       this.validateAction(step, this.get(step.session_id).target.surface);
     }
     if (this.tasks.size >= 128) {

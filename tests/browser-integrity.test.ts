@@ -91,11 +91,35 @@ for (const mode of ['read_only', 'standard', 'ask', 'all'] as const)
     },
   );
 
-test('page-load prototype forgery is denied before first observation', { timeout: 20000 }, async () => {
-  await assert.rejects(fixture('all', '<script>Element.prototype.matches=function(){return false}</script>'), {
-    code: 'E_PRIVACY_BLOCKED',
-  });
-});
+test(
+  'page-load prototype forgery enters isolated read-only mode without invoking the forged method',
+  { timeout: 30000 },
+  async () => {
+    const f = await fixture(
+      'all',
+      '<script>window.matchCalls=0;Element.prototype.matches=function(){window.matchCalls++;throw new Error("forged matches called")}</script>',
+    );
+    try {
+      assert.equal((f.session as unknown as { read_only?: boolean }).read_only, true);
+      assert.deepEqual(f.session.capabilities, ['observe', 'read_state', 'wait_for', 'navigate', 'back']);
+      const observed = await f.engine.observe(f.session.session_id, { token_budget: 8000 });
+      assert.equal(observed.read_only, true);
+      assert.ok(observed.elements?.some(e => e.name === 'Open'));
+      assert.ok(!JSON.stringify(observed).includes('PRIVATE_CANARY_CONTENT'));
+      assert.ok(!('actionEvidence' in observed) && !('action_evidence' in observed));
+      const open = observed.elements!.find(e => e.name === 'Open')!;
+      await assert.rejects(
+        f.engine.act(f.session.session_id, { action: 'click', element_id: open.id }, observed.revision),
+        error =>
+          typeof error === 'object' && error !== null && 'reason' in error && error.reason === 'isolated_read_only',
+      );
+      assert.equal(await f.page.evaluate(() => (window as unknown as { matchCalls: number }).matchCalls), 0);
+      assert.equal(await f.page.evaluate(() => (window as unknown as { clicks?: number }).clicks ?? 0), 0);
+    } finally {
+      await f.close();
+    }
+  },
+);
 
 test(
   'own DOM, document, attribute and collection API shadows fail without running hostile getters',

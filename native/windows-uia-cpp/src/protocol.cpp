@@ -235,17 +235,17 @@ bool IsSensitiveText(const std::string& text) {
 
 bool IsConsequentialText(const std::string& text) {
   const std::string normalized=NormalizeWidth(text);
-  for (const auto* label : {u8"削除",u8"購入",u8"注文",u8"支払",u8"決済",u8"送信",u8"登録",u8"取消",u8"取り消",u8"キャンセル",u8"振込",u8"送金",u8"転送",u8"申込",u8"申し込",u8"解約",u8"確定",u8"ログイン"})
+  for (const auto* label : {u8"削除",u8"購入",u8"注文",u8"支払",u8"決済",u8"送信",u8"登録",u8"取消",u8"取り消",u8"キャンセル",u8"振込",u8"送金",u8"転送",u8"申込",u8"申し込",u8"解約",u8"確定",u8"ログイン",u8"閉じる",u8"終了",u8"破棄",u8"保存しない"})
     if (normalized.find(label) != std::string::npos) return true;
   static const char* const kWords[] = {"delete", "upload", "send", "submit", "purchase", "checkout", "pay", "payment", "login",
-                                       "register", "withdraw", "transfer", "confirm", "cancel", "order"};
+                                       "register", "withdraw", "transfer", "confirm", "cancel", "order", "close", "quit", "exit", "discard"};
   const auto tokens=Tokens(Lower(SplitCamel(normalized)));
   for(size_t i=0;i<tokens.size();++i) {
     if (InList(kWords, sizeof(kWords) / sizeof(*kWords), tokens[i])) return true;
     const bool more = i+1<tokens.size();
     // "remove filters" is the browser vocabulary's one exemption; any other "remove" is consequential.
     if (tokens[i]=="remove") { if (more && (tokens[i+1]=="filter" || tokens[i+1]=="filters")) continue; return true; }
-    if (more && ((tokens[i]=="log" && tokens[i+1]=="in") || (tokens[i]=="sign" && (tokens[i+1]=="in" || tokens[i+1]=="up")))) return true;
+    if (more && ((tokens[i]=="log" && tokens[i+1]=="in") || (tokens[i]=="sign" && (tokens[i+1]=="in" || tokens[i+1]=="up")) || ((tokens[i]=="do" && i+2<tokens.size() && tokens[i+1]=="not" && tokens[i+2]=="save") || (tokens[i]=="dont" && tokens[i+1]=="save") || (tokens[i]=="don" && i+2<tokens.size() && tokens[i+1]=="t" && tokens[i+2]=="save")))) return true;
   }
   return false;
 }

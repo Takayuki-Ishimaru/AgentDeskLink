@@ -4,7 +4,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { setTimeout as delay } from 'node:timers/promises';
 import { BrowserAdapter } from '../src/browser.js';
 import { parsePolicy, assertUrlAllowed } from '../src/policy.js';
-import type { AdapterSession, Target } from '../src/types.js';
+import { MAX_DOM_DEPTH, type AdapterSession, type Target } from '../src/types.js';
 async function fixture(
   html: string | ((req: IncomingMessage, res: ServerResponse) => void),
   controls: { selector: string; actions: string[] }[] = [],
@@ -149,7 +149,7 @@ test('page text cannot authorize a selector; ambiguous selectors fail closed', a
 });
 test('depth and internal collection bounds mark truncation; oversized fields fail safely', async () => {
   for (const html of [
-    '<div>'.repeat(15) + '<button>Deep</button>' + '</div>'.repeat(15),
+    '<div>'.repeat(MAX_DOM_DEPTH + 1) + '<button>Deep</button>' + '</div>'.repeat(MAX_DOM_DEPTH + 1),
     Array.from({ length: 20001 }, (_, i) => `<button>Button ${i}</button>`).join(''),
   ]) {
     const f = await fixture(html, [], 10);
