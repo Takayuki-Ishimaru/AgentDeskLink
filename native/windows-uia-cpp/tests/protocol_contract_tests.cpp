@@ -1122,8 +1122,8 @@ int main() {
   for(const auto* label:{"PIN","auth","api_key","access-token","accessToken","newPassword","ApiKeyInput","apiKey1","password1","accessToken2","dummy@example.com",u8"暗証番号",u8"パスワード",u8"認証コード",u8"ＡＰＩキー",u8"apiキー"})CHECK(IsSensitiveText(label));
   g_test="consequential_vocabulary_shared_with_the_browser_and_linux_paths";
   for(const auto* label:{"Delete record","btnDelete","delete_all","delete-row","Submit Form","Log in","login","LogIn","Sign up","sign-in","Remove item","sendMail","Pay now","Checkout","Register","Transfer funds","Confirm","Cancel order","Order",
-                         u8"削除",u8"注文を確定",u8"キャンセル",u8"ログイン",u8"振込",u8"Ｄｅｌｅｔｅ",u8"送信"})CHECK(IsConsequentialText(label));
-  for(const auto* label:{"","Find","Fixture button","Remove filters","Remove filter","Shipping address","Recorder","Payload","Sender","Registered users","Confirmation","Fixture text","FixtureText","Cancelled","Orders list"})
+                         u8"削除",u8"注文を確定",u8"キャンセル",u8"ログイン",u8"振込",u8"Ｄｅｌｅｔｅ",u8"送信","Close","Quit","Exit","Discard","Don't save","Do not save",u8"閉じる",u8"終了",u8"破棄",u8"保存しない"})CHECK(IsConsequentialText(label));
+  for(const auto* label:{"","Find","Fixture button","Remove filters","Remove filter","Shipping address","Recorder","Payload","Sender","Registered users","Confirmation","Fixture text","FixtureText","Cancelled","Orders list","Save","Find","Save dialog"})
     { if(IsConsequentialText(label))Fail(__LINE__,"unexpectedly consequential",label); }
   for (const TestCase& t : kTests) {
     int before = g_failures;

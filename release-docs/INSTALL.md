@@ -2,12 +2,12 @@
 
 **日本語** | [English](INSTALL_en.md)
 
-対象バージョン: `0.1.9`（ベータ版）
+対象バージョン: `0.1.10`（ベータ版）
 
 ## 必要なもの
 
 - VS Code 1.101 以上。
-- 共通 VSIX `agentdesklink-0.1.9.vsix`。[対応環境と既知の制限](KNOWN_ISSUES.md)を確認してください。
+- 共通 VSIX `agentdesklink-0.1.10.vsix`。[対応環境と既知の制限](KNOWN_ISSUES.md)を確認してください。
 - Chrome がない場合、初回の Chromium 自動取得に必要なネット接続。
 
 1 つの VSIX に macOS / Apple silicon、Windows x64、Linux x64 用の Node.js と画像処理ライブラリを同梱します。macOS/Windows/Linux 用のデスクトップ操作 helper も含みます（Linux は Python 3 スクリプトで、OS の python3-gi などが必要です）。起動時に対応するものを選ぶため、別途ビルドする必要はありません。
@@ -16,7 +16,7 @@
 
 ## インストール
 
-1. リリースページから `agentdesklink-0.1.9.vsix` と `SHA256SUMS` をダウンロードします。
+1. リリースページから `agentdesklink-0.1.10.vsix` と `SHA256SUMS` をダウンロードします。
 2. [更新ガイドの方法](UPDATES.md)で VSIX の SHA-256 を計算し、一覧と一致することを確認します。
 3. VS Code のコマンドパレットで「拡張機能: VSIXからのインストール」を選び、VSIX を指定します。
 4. 利用するフォルダーを開き、内容を確認してワークスペースを信頼します。

@@ -28,7 +28,7 @@ const tier=mode==='standard'||mode==='ask';
 const out=o=>process.stdout.write(JSON.stringify(o)+'\\n');
 const win={target_id:'t-fixture',application_id:APP,label:'Notes window',window:{bounds:{x:0,y:0,width:400,height:300,coordinate_space:SPACE},display_ids:['d1'],minimized:false}};
 let label='Status: ready',rev=1,seq=0,external=false;const sessions=new Set();
-const elements=()=>[{id:'e1',role:'window',name:'Notes window',enabled:true},{id:'e2',role:'text',name:label,enabled:true},{id:'e3',role:'button',name:'Run',enabled:true},{id:'e4',role:'button',name:'Delete all',enabled:true},{id:'e5',role:'edit',name:'Password',enabled:true,sensitive:true},{id:'e6',role:'edit',name:'Name',value:'',enabled:true},{id:'e7',role:'edit',name:'Send to',value:'',enabled:true},{id:'e8',role:'button',name:'Confirm',enabled:true},{id:'e9',role:'button',name:'キャンセル',enabled:true}];
+const elements=()=>[{id:'e1',role:'window',name:'Notes window',enabled:true},{id:'e2',role:'text',name:label,enabled:true},{id:'e3',role:'button',name:'Run',enabled:true},{id:'e4',role:'button',name:process.env.FAKE_DANGER_LABEL||'Delete all',enabled:true},{id:'e5',role:'edit',name:'Password',enabled:true,sensitive:true},{id:'e6',role:'edit',name:'Name',value:'',enabled:true},{id:'e7',role:'edit',name:'Send to',value:'',enabled:true},{id:'e8',role:'button',name:'Confirm',enabled:true},{id:'e9',role:'button',name:'キャンセル',enabled:true}];
 createInterface({input:process.stdin}).on('line',l=>{
  if(!l.trim())return;let r;try{r=JSON.parse(l);}catch{return;}
  if(process.env.FAKE_LOG)appendFileSync(process.env.FAKE_LOG,JSON.stringify(r)+'\\n');
@@ -52,7 +52,7 @@ createInterface({input:process.stdin}).on('line',l=>{
 `;
 const APP_ID = 'com.example.notes',
   APP_PATH = 'C:\\Apps\\Notes\\notes.exe';
-type Env = Partial<Record<'FAKE_SPACE' | 'FAKE_LOG' | 'FAKE_MUTATE', string>>;
+type Env = Partial<Record<'FAKE_SPACE' | 'FAKE_LOG' | 'FAKE_MUTATE' | 'FAKE_DANGER_LABEL', string>>;
 interface Harness {
   adapter: NativeDesktopAdapter;
   argsLog: string[][];
@@ -708,4 +708,35 @@ test('server native vocabulary matches the helpers: extra terms, width folding a
     'Status: ready',
   ])
     assert.equal(isNativeConsequential(label), false, label);
+});
+
+test('native Close and 保存しない never dispatch before approval on any adapter', { timeout: 30000 }, async () => {
+  const b = await broker();
+  try {
+    for (const platform of ['win32', 'darwin', 'linux'])
+      for (const name of ['Close', '保存しない'])
+        for (const mode of ['standard', 'ask'] as const) {
+          const h = await harness(platform, { operationMode: mode }, {}, { FAKE_DANGER_LABEL: name });
+          const engine = new Engine(policyFor(platform, mode), { browser: fakeBrowser, desktop: h.adapter }, platform);
+          try {
+            const { session, observed, find } = await opened(engine);
+            const action: Action = { action: 'click', element_id: find(name).id };
+            await rejectsWith(engine.act(session.session_id, action, observed.revision), 'E_APPROVAL_REQUIRED');
+            assert.equal((await h.log()).filter(r => r.op === 'act').length, 0, `${platform}/${mode}/${name}`);
+            if (mode === 'ask') {
+              assert.equal(b.last().summary.name, name);
+              b.last().status = 'approved';
+              await engine.act(session.session_id, action, observed.revision);
+              const acts = (await h.log()).filter(r => r.op === 'act');
+              assert.equal(acts.length, 1);
+              assert.equal(acts[0]!.approved, true);
+            }
+          } finally {
+            await engine.shutdown();
+            await h.dispose();
+          }
+        }
+  } finally {
+    await b.close();
+  }
 });

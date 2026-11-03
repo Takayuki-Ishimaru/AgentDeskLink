@@ -4,6 +4,7 @@ import {
   BROWSER_PRIVACY_RULES,
   TEXT_REDACTION_RULES,
   PERSONAL_DATA_REDACTION_RULES,
+  PERSONAL_LABEL_PATTERN,
 } from './privacy.js';
 
 // This engine executes at screenshot mask resolution, in an isolated world.
@@ -14,7 +15,13 @@ function privacyMaskEngine() {
       pattern: sourcePattern,
       privacyRules,
       valuePatterns,
-    } = JSON.parse(source) as { pattern: string; privacyRules: typeof BROWSER_PRIVACY_RULES; valuePatterns: string[] };
+      maskPersonalData,
+    } = JSON.parse(source) as {
+      pattern: string;
+      privacyRules: typeof BROWSER_PRIVACY_RULES;
+      valuePatterns: string[];
+      maskPersonalData?: boolean;
+    };
     const pattern = new RegExp(sourcePattern, 'iu');
     const valueRules = valuePatterns.map(source => new RegExp(source, 'i'));
     const secret = (text: string) =>
@@ -145,6 +152,7 @@ function privacyMaskEngine() {
         if (
           inSensitiveRegion(node) ||
           (!labelText && hints.some(secret)) ||
+          (control && maskPersonalData && /(?:^|\s)name(?:$|\s)/i.test(attr(node, 'autocomplete') ?? '')) ||
           (control && (secretValue(value) || selected))
         ) {
           if (out.length >= 1000) throw new Error('Privacy mask output limit');
@@ -163,6 +171,6 @@ export function ensureBrowserPrivacySelectors(): Promise<void> {
   return (registration ??= selectors.register('adlprivacy', privacyMaskEngine, { contentScript: true }));
 }
 export function privacyMaskSelector(allowPersonalData = false): string {
-  return `adlprivacy=${JSON.stringify({ pattern: SECRET_LABEL_PATTERN, privacyRules: BROWSER_PRIVACY_RULES, valuePatterns: [...TEXT_REDACTION_RULES, ...(allowPersonalData ? [] : PERSONAL_DATA_REDACTION_RULES)].map(([source]) => source) })}`;
+  return `adlprivacy=${JSON.stringify({ pattern: SECRET_LABEL_PATTERN + (allowPersonalData ? '' : '|' + PERSONAL_LABEL_PATTERN), privacyRules: BROWSER_PRIVACY_RULES, maskPersonalData: !allowPersonalData, valuePatterns: [...TEXT_REDACTION_RULES, ...(allowPersonalData ? [] : PERSONAL_DATA_REDACTION_RULES)].map(([source]) => source) })}`;
 }
 export const browserPrivacyMaskSelector = privacyMaskSelector();

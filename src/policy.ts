@@ -7,6 +7,7 @@ import {
   isSensitiveLabel,
   TEXT_REDACTION_RULES,
   PERSONAL_DATA_REDACTION_RULES,
+  PERSONAL_LABEL_PATTERN,
   BROWSER_PRIVACY_RULES,
 } from './privacy.js';
 import { POLICY_LABEL_PATTERN, NATIVE_LABEL_PATTERN, normalizeLabel } from './action-classifier.js';
@@ -437,6 +438,7 @@ export async function assertUrlAllowed(
 
 const SAFE_ROLES = new Set([
   'alert',
+  'banner',
   'article',
   'blockquote',
   'button',
@@ -446,6 +448,8 @@ const SAFE_ROLES = new Set([
   'code',
   'columnheader',
   'combobox',
+  'complementary',
+  'contentinfo',
   'dialog',
   'figure',
   'generic',
@@ -470,6 +474,7 @@ const SAFE_ROLES = new Set([
   'rowgroup',
   'rowheader',
   'searchbox',
+  'search',
   'slider',
   'spinbutton',
   'status',
@@ -586,7 +591,7 @@ export function redactElement(
   allowPersonalData = false,
   pageUrl?: string,
 ): Omit<Element, 'sensitive'> {
-  const { sensitive, ...safe } = element;
+  const { sensitive, personal, ...safe } = element;
   safe.role = SAFE_ROLES.has(safe.role) ? safe.role : 'generic';
   const isText = BROWSER_PRIVACY_RULES.textRoles.some(role => role === safe.role);
   const secret = sensitive === true || isSensitiveLabel(safe.id) || (!isText && isSensitiveLabel(safe.name));
@@ -596,6 +601,19 @@ export function redactElement(
   } else {
     safe.name = redactString(safe.name, allowPersonalData);
     if (safe.value !== undefined) safe.value = redactString(safe.value, allowPersonalData);
+  }
+  if (
+    !allowPersonalData &&
+    safe.value &&
+    (personal ||
+      (/^(textbox|searchbox|combobox)$/.test(safe.role) &&
+        new RegExp(PERSONAL_LABEL_PATTERN, 'iu').test(safe.name.normalize('NFKC'))))
+  )
+    safe.value = REDACTED;
+  // A pre-redaction length neither describes readable text nor belongs on the wire.
+  if (safe.text_length !== undefined && safe.name !== element.name) {
+    if (element.name_truncated) delete safe.text_length;
+    else safe.text_length = safe.name.length;
   }
   if (safe.href !== undefined) {
     // A masked or protected control never exposes where it leads.

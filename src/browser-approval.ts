@@ -21,6 +21,8 @@ export interface ActionProof {
   labels?: string[];
   origin: string;
   details?: string[];
+  /** Supplemental visible page context, captured before dispatch; never request identity. */
+  context?: { kind: 'row' | 'listitem' | 'dialog' | 'form'; text: string };
   network?: { url: string; method: string; body: string };
   /** Consequential only because it submits a form: dispatchable in standard mode under the submission guard. */ submission?: 'plain';
   /** Consequential only through a verb that may stay in the session: dispatchable in standard mode with the network closed. */ contained?: boolean;
@@ -723,6 +725,112 @@ export async function inspectBrowserAction(
       };
       break;
     }
+    // Supplemental context is optional: incomplete or oversized text is omitted, never silently clipped.
+    // Read only a nearby semantic container, using bounded sibling traversal rather than allocating its children.
+    const context = (() => {
+      type Context = {
+        kind: 'row' | 'listitem' | 'dialog' | 'form';
+        text: string;
+      };
+      const parent = (n: Element): Element | null =>
+        (r(n, 'parentElement') as Element | null) ?? (m(n, 'getRootNode') as ShadowRoot).host ?? null;
+      const concealed = (n: Element): boolean => {
+        const style = getComputedStyle(n);
+        if (
+          hasHidden(n) ||
+          !m(n, 'checkVisibility', {
+            opacityProperty: true,
+            visibilityProperty: true,
+          })
+        )
+          return style.display !== 'contents' || hasHidden(n);
+        const color = style.color;
+        const alpha = /(?:,|\/)\s*([\d.]+)(%?)\s*\)$/.exec(color);
+        if (
+          parseFloat(style.fontSize) <= 2 ||
+          parseFloat(style.opacity) < 0.05 ||
+          (alpha && /^(?:rgba|[^)]*\/)/.test(color) && Number(alpha[1]) / (alpha[2] ? 100 : 1) <= 0.05)
+        )
+          return true;
+        if (
+          parseFloat(style.textIndent) <= -999 ||
+          /^rect\(\s*0(?:px)?[\s,]+0(?:px)?[\s,]+0(?:px)?[\s,]+0(?:px)?\s*\)$/.test(style.clip) ||
+          /^inset\(\s*(?:50|100)%/.test(style.clipPath)
+        )
+          return true;
+        const box = m(n, 'getBoundingClientRect') as DOMRect;
+        return (
+          box.bottom + scrollY < -20 ||
+          (style.direction === 'ltr' && (box.right + scrollX < -20 || box.left + scrollX > innerWidth + 10000)) ||
+          ((box.width <= 1 || box.height <= 1) && (style.overflowX !== 'visible' || style.overflowY !== 'visible'))
+        );
+      };
+      const hasHidden = (n: Element) => m(n, 'hasAttribute', 'hidden') || attr(n, 'aria-hidden') === 'true';
+      try {
+        let container: Element | null = parent(e);
+        for (let hops = 0; container && hops < 32; hops++, container = parent(container)) {
+          if (
+            !m(
+              container,
+              'matches',
+              'tr,[role="row" i],li,[role="listitem" i],dialog,[role="dialog" i],[role="alertdialog" i],form',
+            )
+          )
+            continue;
+          if (protectedNode(container) || r(container, 'isContentEditable') === true || r(container, 'shadowRoot'))
+            return undefined;
+          for (let a: Element | null = container, depth = 0; a; a = parent(a)) {
+            if (++depth > args.rules.ancestorCap || concealed(a)) return undefined;
+          }
+          const kind: Context['kind'] = m(container, 'matches', 'tr,[role="row" i]')
+            ? 'row'
+            : m(container, 'matches', 'li,[role="listitem" i]')
+              ? 'listitem'
+              : tagOf(container) === 'FORM'
+                ? 'form'
+                : 'dialog';
+          const skip =
+            'script,style,input,textarea,select,option,optgroup,button,a[href],[tabindex],[onclick],[role="button" i],[role="link" i],[role="textbox" i],[role="searchbox" i],[role="checkbox" i],[role="radio" i],[role="combobox" i],[role="slider" i],[role="spinbutton" i],[role="switch" i],[role="tab" i],[role="menuitem" i],[contenteditable]:not([contenteditable="false"]),label';
+          let value = '',
+            visits = 0;
+          const stack: { next: Node | null; depth: number }[] = [{ next: r(container, 'firstChild'), depth: 0 }];
+          while (stack.length) {
+            const frame = stack[stack.length - 1]!;
+            const node = frame.next;
+            if (!node) {
+              stack.pop();
+              continue;
+            }
+            frame.next = r(node, 'nextSibling');
+            if (++visits > 128) return undefined;
+            if (r(node, 'nodeType') === 3) {
+              const raw = str(r(node, 'nodeValue'));
+              if (raw.length > 4096) return undefined;
+              value += raw.replace(/\s+/g, ' ');
+              if (value.length > 512) return undefined;
+            } else if (r(node, 'nodeType') === 1) {
+              const child = node as Element;
+              if (child === e || m(child, 'matches', skip + ',' + args.rules.regionSelector) || concealed(child))
+                continue;
+              if (r(child, 'shadowRoot')) return undefined; // Do not describe an incomplete composed container.
+              if (r(child, 'firstChild')) {
+                if (frame.depth >= 8) return undefined;
+                value += ' ';
+                stack.push({
+                  next: r(child, 'firstChild'),
+                  depth: frame.depth + 1,
+                });
+              }
+            }
+          }
+          value = value.replace(/\s+/g, ' ').trim();
+          return value && value.length <= 512 && !value.includes('\0') ? { kind, text: value } : undefined;
+        }
+      } catch {
+        /* Context is optional; the action's existing inspection still decides authorization. */
+      }
+      return undefined;
+    })();
     const facts: ActionFacts = {
       tag,
       type,
@@ -745,6 +853,7 @@ export async function inspectBrowserAction(
       origin: doc.location.origin,
       network,
       details,
+      context,
       proof: JSON.stringify([
         doc.location.href,
         tag,
@@ -756,6 +865,7 @@ export async function inspectBrowserAction(
         form ? [str(r(form, 'action')), str(r(form, 'method')), attrs(form), formControls] : null,
         link,
         dialog,
+        context,
       ]),
     };
   };
@@ -782,6 +892,7 @@ export async function inspectBrowserAction(
     labels: [data.facts.name, data.facts.submitterName, data.facts.dialog?.name ?? ''].filter(l => l !== ''),
     origin: data.origin,
     ...(details ? { details } : {}),
+    ...(data.context ? { context: data.context } : {}),
     ...(data.network ? { network: data.network } : {}),
     // A submit that is consequential only because it submits may be dispatched under the adapter's
     // submission guard; labelled, credential or secret submits never are.

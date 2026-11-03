@@ -146,6 +146,7 @@ test(
         'CANARY_DISPLAY_NONE',
         'CANARY_VISIBILITY',
         'CANARY_INNER_REGION',
+        'TINY_TEXT',
       ])
         assert.ok(!text.includes(canary), canary);
 
@@ -163,7 +164,7 @@ test(
       const mixed = state.elements!.find(e => e.name === 'Mixed')!;
       assert.equal(
         mixed.value,
-        'Visible start\nTINY_TEXT\nVisible end',
+        'Visible start\nVisible end',
         'blocks become lines; hidden, protected and nested controls are skipped',
       );
       assert.equal(mixed.hidden_text, true, 'text a human cannot see is still flagged');

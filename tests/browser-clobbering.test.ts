@@ -6,7 +6,7 @@ import type { Page } from 'playwright';
 import { BrowserAdapter } from '../src/browser.js';
 import { Engine } from '../src/core.js';
 import { parsePolicy, assertUrlAllowed } from '../src/policy.js';
-import { AdlError, safeError, type AdapterSession } from '../src/types.js';
+import { AdlError, type AdapterSession } from '../src/types.js';
 
 // Named properties that Chromium exposes as own keys of the document, of
 // element collections and of forms, overlapping reserved DOM API names.
@@ -314,51 +314,47 @@ test(
 );
 
 test(
-  'a navigation that lands on an unverifiable page reports untrusted_dom_api without destroying the session, and the session can leave',
+  'navigation into an initially incompatible page enters sticky isolated read-only mode and can leave',
   { timeout: 30000 },
   async () => {
     const f = await fixture('standard', {
       '/': '<button id="go" type="button">Go</button>',
-      '/bad': '<script>Element.prototype.matches=function(){return false}</script><button type="button">Bad</button>',
+      '/bad':
+        '<script>window.badClicks=0;Element.prototype.matches=function(){throw new Error("main-world matches called")}</script><button id="bad" type="button" onclick="window.badClicks++">Bad</button>',
     });
     try {
       const before = await f.engine.observe(f.id);
-      await assert.rejects(
-        f.engine.act(f.id, { action: 'navigate', url: f.origin + '/bad' }, before.revision),
-        (error: unknown) => {
-          assert.ok(error instanceof AdlError);
-          assert.equal(error.code, 'E_PRIVACY_BLOCKED');
-          assert.equal(error.reason, 'untrusted_dom_api');
-          assert.equal(safeError(error).may_have_executed, undefined);
-          return true;
-        },
-      );
+      const entered = await f.engine.act(f.id, { action: 'navigate', url: f.origin + '/bad' }, before.revision);
+      assert.equal(entered.ok, true);
       assert.equal(f.page.url(), f.origin + '/bad');
       assert.ok(
         (await f.engine.listSessions()).sessions.some(s => s.session_id === f.id),
         'session survives',
       );
+      const bad = await f.engine.observe(f.id, { token_budget: 8000 });
+      assert.equal(bad.read_only, true);
+      assert.ok(bad.elements!.some(e => e.name === 'Bad'));
+      const badButton = bad.elements!.find(e => e.name === 'Bad')!;
       await assert.rejects(
-        f.engine.observe(f.id),
-        (error: unknown) =>
-          error instanceof AdlError && error.code === 'E_PRIVACY_BLOCKED' && error.reason === 'untrusted_dom_api',
+        f.engine.act(f.id, { action: 'click', element_id: badButton.id }, bad.revision),
+        (error: unknown) => error instanceof AdlError && error.reason === 'isolated_read_only',
       );
-      await assert.rejects(
-        f.instance.snapshot(),
-        (error: unknown) =>
-          error instanceof AdlError && error.code === 'E_PRIVACY_BLOCKED' && error.reason === 'untrusted_dom_api',
-      );
-      // Leaving the page reads nothing from its DOM, so the adapter still navigates away.
+      assert.equal(await f.page.evaluate(() => (window as unknown as { badClicks: number }).badClicks), 0);
+      assert.equal((await f.instance.snapshot()).read_only, true);
+
+      // Once compatibility mode has been published, navigation away and back remain available and read-only stays sticky.
       await f.instance.act({ action: 'navigate', url: f.origin + '/' }, new AbortController().signal);
       const after = await f.engine.observe(f.id);
+      assert.equal(after.read_only, true);
       assert.ok(after.elements!.some(e => e.name === 'Go'));
-      // The engine also lets a client leave an unverifiable page with its last revision.
-      await assert.rejects(f.engine.act(f.id, { action: 'navigate', url: f.origin + '/bad' }, after.revision), {
-        code: 'E_PRIVACY_BLOCKED',
-      });
-      const left = await f.engine.act(f.id, { action: 'back' }, after.revision);
+      await f.engine.act(f.id, { action: 'navigate', url: f.origin + '/bad' }, after.revision);
+      const backBase = await f.engine.observe(f.id);
+      assert.equal(backBase.read_only, true);
+      const left = await f.engine.act(f.id, { action: 'back' }, backBase.revision);
       assert.equal(left.ok, true);
-      assert.ok((await f.engine.observe(f.id)).elements!.some(e => e.name === 'Go'));
+      const returned = await f.engine.observe(f.id);
+      assert.equal(returned.read_only, true);
+      assert.ok(returned.elements!.some(e => e.name === 'Go'));
     } finally {
       await f.close();
     }

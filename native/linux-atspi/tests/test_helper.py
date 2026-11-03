@@ -5,6 +5,7 @@ Run inside a headless accessibility desktop (Xvfb + private a11y bus), for examp
   native/linux-atspi/tests/run-xvfb.sh python3 -m unittest -v native/linux-atspi/tests/test_helper.py
 """
 import json
+import importlib.util
 import os
 import select
 import shutil
@@ -83,6 +84,17 @@ def by(elements, role=None, name=None, name_prefix=None):
             continue
         return element
     raise AssertionError('no element role=%r name=%r in %s' % (role, name or name_prefix, [(e['role'], e.get('name')) for e in elements]))
+
+
+class PureLabelTest(unittest.TestCase):
+    def test_close_and_discard_labels_are_consequential(self):
+        spec = importlib.util.spec_from_file_location('adl_linux_atspi_helper', HELPER)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        for label in ('Close', 'Quit', 'Exit', 'Discard', "Don't save", 'Do not save', '閉じる', '終了', '破棄', '保存しない'):
+            self.assertTrue(module.consequential_label(label), label)
+        for label in ('Save', 'Find', 'Save dialog', 'Closeable'):
+            self.assertFalse(module.consequential_label(label), label)
 
 
 class FixtureTest(unittest.TestCase):

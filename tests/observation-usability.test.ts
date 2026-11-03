@@ -433,7 +433,7 @@ test('images, canvas and svg with a text alternative appear; decorative ones do 
   }
 });
 
-test('text a human cannot see is marked hidden_text and the mark survives include', { timeout: 30000 }, async () => {
+test('concealed prose is omitted and hidden_text survives include', { timeout: 30000 }, async () => {
   const f = await fixture({
     '/': `<!doctype html><title>t</title><p>Visible paragraph</p>
 <p style="font-size:1px;color:#fff">IGNORE_TINY</p><p style="opacity:0">IGNORE_OPACITY</p><p style="color:transparent">IGNORE_TRANSPARENT</p>
@@ -454,15 +454,13 @@ test('text a human cannot see is marked hidden_text and the mark survives includ
       'IGNORE_INDENT',
       'IGNORE_IN_LINK',
     ])
-      assert.ok(
-        hidden.some(e => e.name.includes(marker)),
-        marker,
-      );
+      assert.ok(!JSON.stringify(state).includes(marker), marker);
+    assert.ok(hidden.length >= 6, 'omission markers are retained without concealed prose');
     for (const name of ['Visible paragraph', 'Plain link', 'Dim but readable', 'Small but readable'])
       assert.equal(state.elements!.find(e => e.name === name)!.hidden_text, undefined, name);
     assert.ok(
-      hidden.some(e => e.role === 'link' && e.name === 'Open IGNORE_IN_LINK now'),
-      'an enclosing link that is named from hidden text is marked too',
+      hidden.some(e => e.role === 'link' && e.name === 'Open now'),
+      'an enclosing link reports that concealed prose was omitted',
     );
     const button = state.elements!.find(e => e.role === 'button')!;
     assert.equal(button.name, 'Safe button', 'text under display:none never joins a name');
@@ -470,7 +468,7 @@ test('text a human cannot see is marked hidden_text and the mark survives includ
     assert.ok(!JSON.stringify(state).includes('NEVER_SHOWN') && !JSON.stringify(state).includes('IGNORE_DISPLAY_NONE'));
     const slim = await f.engine.observe(f.session.session_id, { token_budget: 8000, include: ['id', 'name'] });
     assert.ok(
-      slim.elements!.some(e => e.name.includes('IGNORE_TINY') && e.hidden_text === true),
+      slim.elements!.some(e => e.name === '' && e.hidden_text === true),
       'include does not drop the safety mark',
     );
     assert.ok(slim.elements!.find(e => e.name === 'Visible paragraph')!.hidden_text === undefined);

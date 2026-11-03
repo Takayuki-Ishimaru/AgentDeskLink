@@ -14,6 +14,20 @@ const MAX_POOL_SOCKETS = 8;
 export const HOP_RE =
   /^(connection|keep-alive|proxy-authenticate|proxy-authorization|te|trailer|transfer-encoding|upgrade|content-length|content-encoding|host|set-cookie)$/i;
 
+// Safe classification of a transport-level or TLS failure at a socket handler.
+// Only a bounded reason is reported; the original error (message, URL, hostname
+// or certificate text) never leaves here. AdlError guard and policy rejections
+// pass through unchanged, and an aborted signal is a cancellation, not a failure.
+const TLS_ERROR_RE = /^(?:ERR_SSL|ERR_TLS|SSL_|HANDSHAKE|CERT_|UNABLE_TO_|DEPTH_ZERO|SELF_SIGNED|HOSTNAME|ERR_ALPN)/;
+export function safeTransportError(error: unknown, signal?: AbortSignal): AdlError {
+  if (signal?.aborted) return new AdlError('E_CANCELLED');
+  if (error instanceof AdlError) return error;
+  const code = (error as { code?: unknown } | null)?.code;
+  if (typeof code === 'string' && code.length <= 64 && TLS_ERROR_RE.test(code))
+    return new AdlError('E_POLICY_DENIED', 'tls_handshake_failed');
+  return new AdlError('E_POLICY_DENIED', 'transport_failure');
+}
+
 export interface FetchResult {
   status: number;
   headers: http.IncomingHttpHeaders;
@@ -110,7 +124,7 @@ class PinnedTunnelAgent extends https.Agent {
       this.tunnels.add(secure);
       secure.once('close', () => this.tunnels.delete(secure));
       secure.once('secureConnect', () => done(null, secure));
-      secure.once('error', () => done(new AdlError('E_POLICY_DENIED')));
+      secure.once('error', error => done(safeTransportError(error, this.signal)));
     });
     connect.end();
     return undefined;
@@ -302,20 +316,20 @@ export function pinnedFetch(
         compressed += chunk.length;
         if (compressed > limit) finish(new AdlError('E_RESOURCE_LIMIT'));
       });
-      res.on('error', () => finish(new AdlError('E_POLICY_DENIED')));
-      res.on('aborted', () => finish(new AdlError('E_POLICY_DENIED')));
+      res.on('error', error => finish(safeTransportError(error, signal)));
+      res.on('aborted', () => finish(new AdlError('E_POLICY_DENIED', 'transport_failure')));
       const stream = decoder ? res.pipe(decoder) : res;
       stream.on('data', (chunk: Buffer) => {
         expanded += chunk.length;
         if (expanded > limit) finish(new AdlError('E_RESOURCE_LIMIT'));
         else chunks.push(chunk);
       });
-      stream.on('error', () => finish(new AdlError('E_POLICY_DENIED')));
+      if (decoder) decoder.on('error', () => finish(new AdlError('E_POLICY_DENIED')));
       stream.on('end', () =>
         finish(undefined, { status: res.statusCode ?? 0, headers: res.headers, body: Buffer.concat(chunks) }),
       );
     });
-    req.on('error', () => finish(tunnel?.lastFailure ?? new AdlError('E_POLICY_DENIED')));
+    req.on('error', error => finish(tunnel?.lastFailure ?? safeTransportError(error, signal)));
     req.end(body);
   });
 }

@@ -17,7 +17,7 @@ export const POLICY_LABEL_PATTERN =
 
 // The native helpers' vocabulary, NATIVE_CONSEQUENTIAL in src/policy.ts (flags: 'iu').
 export const NATIVE_LABEL_PATTERN =
-  '\\b(?:delete|remove(?!\\s+filters?\\b)|upload|send|submit|purchase|checkout|pay|payment|login|log\\s*in|sign\\s*in|sign\\s*up|register|withdraw|transfer|confirm|cancel|order)\\b|削除|購入|注文|支払|決済|送信|登録|取消|取り消|キャンセル|振込|送金|転送|申込|申し込|解約|確定|ログイン';
+  "\\b(?:delete|remove(?!\\s+filters?\\b)|upload|send|submit|purchase|checkout|pay|payment|login|log\\s*in|sign\\s*in|sign\\s*up|register|withdraw|transfer|confirm|cancel|order|close|quit|exit|discard|do(?:n'?t| not)\\s+save)\\b|削除|購入|注文|支払|決済|送信|登録|取消|取り消|キャンセル|振込|送金|転送|申込|申し込|解約|確定|ログイン|閉じる|終了|破棄|保存しない";
 
 export interface LabelLists {
   allow: string[];

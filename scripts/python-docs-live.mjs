@@ -76,7 +76,11 @@ test(
       });
       state = await observe();
       assert.equal(state.elements.find(e => e.id === fields[0].id).value, 'dictionary');
-      for (const field of fields.slice(1)) assert.equal(state.elements.find(e => e.id === field.id).value, '');
+      for (const field of fields.slice(1)) {
+        const unchanged = state.elements.find(e => e.id === field.id);
+        assert.ok(unchanged, 'the other search field remains observable');
+        assert.equal(unchanged.value ?? '', '');
+      }
       inputVerified = true;
       await capture('search-input.png');
       await writeFile(resolve(out, 'input-readback.json'), JSON.stringify(state, null, 2));

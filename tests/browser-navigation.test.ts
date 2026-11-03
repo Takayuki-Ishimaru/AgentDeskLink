@@ -367,6 +367,7 @@ test('privacy, cancellation and timeout failures are never retried', { timeout: 
   const f = await fixture();
   try {
     const s = await f.adapter.open(f.target, 'strict_isolated', sig());
+    await s.snapshot(); // Publish trusted state before injecting a runtime integrity failure.
     const held = internals(s);
     let collects = 0;
     const realCollect = held.collectSnapshot.bind(held);

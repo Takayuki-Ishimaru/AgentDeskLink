@@ -7,12 +7,30 @@ import {
   redactString,
   redactElement,
   authorizeAction,
+  isNativeConsequential,
 } from '../src/policy.js';
 const config = () =>
   parsePolicy({
     allowedOrigins: ['https://example.com'],
     browserTargets: [{ id: 'demo', label: 'Demo', url: 'https://example.com', classification: 'PUBLIC' }],
   });
+test('native app-closing and discard labels require the consequential gate', () => {
+  for (const label of [
+    'Close',
+    'Quit',
+    'Exit',
+    'Discard',
+    "Don't save",
+    'Do not save',
+    '閉じる',
+    '終了',
+    '破棄',
+    '保存しない',
+  ])
+    assert.equal(isNativeConsequential(label), true, label);
+  for (const label of ['Save', 'Find', 'Save dialog', 'Closeable'])
+    assert.equal(isNativeConsequential(label), false, label);
+});
 test('policy is closed by default and rejects malformed/unknown configuration', async () => {
   const p = parsePolicy({});
   assert.deepEqual(p.allowedOrigins, []);

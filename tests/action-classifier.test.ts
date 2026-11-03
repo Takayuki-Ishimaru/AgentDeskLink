@@ -510,7 +510,7 @@ test('frozen legacy vocabularies keep their exact sources', () => {
   );
   assert.equal(
     NATIVE_LABEL_PATTERN,
-    String.raw`\b(?:delete|remove(?!\s+filters?\b)|upload|send|submit|purchase|checkout|pay|payment|login|log\s*in|sign\s*in|sign\s*up|register|withdraw|transfer|confirm|cancel|order)\b|削除|購入|注文|支払|決済|送信|登録|取消|取り消|キャンセル|振込|送金|転送|申込|申し込|解約|確定|ログイン`,
+    String.raw`\b(?:delete|remove(?!\s+filters?\b)|upload|send|submit|purchase|checkout|pay|payment|login|log\s*in|sign\s*in|sign\s*up|register|withdraw|transfer|confirm|cancel|order|close|quit|exit|discard|do(?:n'?t| not)\s+save)\b|削除|購入|注文|支払|決済|送信|登録|取消|取り消|キャンセル|振込|送金|転送|申込|申し込|解約|確定|ログイン|閉じる|終了|破棄|保存しない`,
   );
 });
 
@@ -533,6 +533,20 @@ test('frozen vocabularies still decide the way the legacy and native tiers did',
     assert.ok(!legacy.test(label), `legacy ${label}`);
   }
   assert.ok(!policy.test('Cancel') && !policy.test('Order') && !policy.test('キャンセル'));
+  for (const label of [
+    'Close',
+    'Quit',
+    'Exit',
+    'Discard',
+    "Don't save",
+    'Do not save',
+    '閉じる',
+    '終了',
+    '破棄',
+    '保存しない',
+  ])
+    assert.ok(native.test(label), label);
+  assert.ok(!policy.test('Close') && !policy.test('閉じる'), 'browser legacy vocabulary stays unchanged');
   // The tier classifier does not share these words: bare "Cancel" is a dismiss idiom there.
   assert.deepEqual(verdict(button('Cancel')), v(false));
 });

@@ -1,35 +1,30 @@
-# AgentDeskLink 0.1.9 (beta)
+# AgentDeskLink 0.1.10 (beta)
 
 [日本語](RELEASE_NOTES_ja.md) | **English**
 
 This beta lets AI agents control a local browser and desktop through MCP. Check the [supported environments and known limitations](KNOWN_ISSUES_en.md) before use.
 
-## Changes since 0.1.8
+## Changes since 0.1.9
 
-- **Approve the requests web apps send to save data.** Ask mode holds fetch / XHR writes started during an action before sending them. Review the method, URL and body (with secrets masked), then send only the approved requests. The AI waits with `adl_approvals` and does not need to repeat the action.
-- **Allow writes to a site for a limited time.** “Allow further writes to this site” in the approval dialog grants eligible requests from the AI server in the same VS Code window to the same destination origin for up to 30 minutes. The grant applies across chats and can be viewed and revoked in the settings panel. Requests carrying credentials and actions classified as purchases or payments are excluded. See the details below.
-- **Identify changes that were not saved.** An action whose writes were blocked returns `write_blocked: true`. Standard mode continues to block write requests, so a change visible on screen may not have been saved.
-- **Read clearer changes and warnings after an action.** The server waits up to 400 ms for requests started by the action and page changes to settle before returning the diff. Warnings are reported once, and action responses include warnings belonging to that action.
-- **Use GET search forms without approval.** Recognised GET search forms work in Standard and Ask modes without approval. POST forms, forms carrying credentials and consequential actions such as deletion are excluded from this exception.
-- **Simpler approval for Delete buttons.** Buttons classified as consequential only because of “Delete”, “Remove” or “削除” also run with network restrictions in Ask mode, which asks about the write request when one occurs. Other consequential controls, such as purchase or send, still require approval for the button action itself.
-- **Read a selected area and get clearer scroll results.** Use `scope: "within:<element_id>"` in `adl_observe` to read inside an element. Reading main, article, named section and paragraph text containing links has improved. Scroll results distinguish a target that cannot scroll from one already at its edge.
-- **Better Linux tab switching and selection.** Switching GTK tabs keeps the session open with `focus_moved` when focus moves within the same window. Observe again before the next action. Use `select` with `value` to choose a named option in a combo box, list or tab list. Consequential options must be targeted directly.
+- **A compatibility path for reading pages such as GitHub.** An initial document whose DOM APIs cannot be verified is read through browser DOM APIs isolated from page JavaScript. A session marked `read_only: true` supports text, search and navigation; input, clicks, scrolling, capture and manual handoff are refused. Personal-data masking and network restrictions remain in place.
+- **Read deeper page structures and reach the body beyond a long table of contents.** DOM acquisition reaches depth 64. Default full observations include `landmarks` that lead to the body; use `text` or `within:<element_id>` to read the relevant content. `source_limits` distinguishes data omitted during acquisition from response pagination.
+- **Omit concealed prose while preserving useful control labels.** Hidden, transparent and tiny prose is excluded and marked with `hidden_text: true`. Legitimate screen-reader control labels remain accessible names. The flag alone does not establish malicious intent.
+- **Improved masking of Japanese personal data.** Protection now covers postal codes, numbered addresses, labeled names and addresses, and input values identified by form labels or autocomplete hints. Arbitrary unlabeled names and addresses cannot all be recognized. Enabling `allowPersonalData` still keeps credentials and explicitly protected regions protected.
+- **Approval for closing or discarding in desktop apps.** Close, Quit, Exit, Discard and Do not save are denied in Standard mode and require confirmation before dispatch in Ask mode. A disappearing target or a focus change does not prove that an app exited; check the target list again.
+- **Clearer approval dialogs.** Dialogs use Japanese or English according to the VS Code display language. Browser actions can include nearby row, item or dialog context. This is page-provided information and does not certify which resource the server will affect. Protected regions, concealed prose and input values are excluded from this extra context.
+- **Clearer diagnostics for continuing an operation.** Connection failures are distinguished from policy blocks, stale-state errors include the current revision, and targets expose supported gesture surfaces. Observe again after an error and avoid repeating an action whose effect may already have occurred.
 
-## Save approvals and continued site permission
+## Compatibility-read scope
 
-Held writes cover POST, PUT, PATCH and DELETE requests from the main frame to the same origin or a granted origin. Bodies may be absent or contain up to 64 KiB of JSON, URL-encoded data or text/plain. Multipart, files, binary or streaming bodies, synchronous XHR, beacons and iframe writes cannot be held and are blocked. Writes started outside an action, such as timers and autosave, are also blocked. Start a save through an explicit action.
+A compatibility session stays read-only; changing permissions does not enable input in it. Child-frame contents are omitted and reported as `frame_unavailable` in `source_limits`. Later tampering with the same document already observed through the normal path still stops with `untrusted_dom_api`.
 
-Approval sends the held requests. Denial, expiry, navigation, page-side cancellation and emergency stop discard them. Requests already sent cannot be undone. `ok: true` acknowledges input and does not guarantee that data was saved or a site operation completed.
-
-Continued site permission ends on a settings or workspace-trust change, emergency stop, extension reload, revocation or expiry. Approval before a consequential button action, GET form submissions that require approval, and sets of writes to multiple origins remain outside this grant. Exclusion of credentials, purchases and payments relies on best-effort classification of site labels and URLs. While the grant is active, the AI can write to the site without asking again; use it only for sites you trust.
-
-See [operation settings and approvals](OPERATIONS.md) and [known limitations](KNOWN_ISSUES_en.md) for the full scope and steps.
+Save-request approvals and continued permission to write to a trusted site for up to 30 minutes remain available. See [operation settings and approvals](OPERATIONS.md) and [known limitations](KNOWN_ISSUES_en.md) for their scope and restrictions.
 
 ## Installation and updates
 
-Use VS Code 1.101 or newer and select “Extensions: Install from VSIX...” to install `agentdesklink-0.1.9.vsix`. The same VSIX supports macOS / Apple silicon, Windows x64 and Linux x64. It bundles Node.js, image-processing libraries and desktop helpers for each OS. The Linux helper also needs OS-provided Python 3 and AT-SPI2 packages. Reload the window after installation.
+Use VS Code 1.101 or newer and select “Extensions: Install from VSIX...” to install `agentdesklink-0.1.10.vsix`. The same VSIX supports macOS / Apple silicon, Windows x64 and Linux x64. It bundles Node.js, image-processing libraries and desktop helpers for each OS. The Linux helper also needs OS-provided Python 3 and AT-SPI2 packages. Reload the window after installation.
 
-The updaters in 0.1.3 through 0.1.8 support this release. Automatic updates may arrive in stages. For manual installation, download the VSIX and `SHA256SUMS`, verify the hash and install. Updating from 0.1.2 or earlier requires manual installation.
+The updaters in 0.1.3 through 0.1.9 support this release. Automatic updates may arrive in stages. For manual installation, download the VSIX and `SHA256SUMS`, verify the hash and install. Updating from 0.1.2 or earlier requires manual installation.
 
 **An existing `agentdesklink.allowAllOperations: true` still takes precedence after updating.** To use a permission tier, select Read only, Standard or Ask in the panel. Enabling MCP alone grants no target access.
 

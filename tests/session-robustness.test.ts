@@ -166,35 +166,35 @@ test(
   },
 );
 
-test(
-  'a checkbox that vanishes before the click still fails safely and closes the session',
-  { timeout: 40000 },
-  async () => {
-    // The overlay keeps Playwright retrying; the first mouse move over it removes the checkbox, so the same "not attached" error arrives with no click ever sent.
-    const html = `<!doctype html><body><input id="ghost" type="checkbox" aria-label="Ghost"><div id="cover" style="position:fixed;left:0;top:0;right:0;bottom:0"></div>
+test('a covered or disappearing checkbox fails safely and closes the session', { timeout: 40000 }, async () => {
+  // Chromium may retry without moving the mouse, or detach the checkbox after a mouse move.
+  // Either backend outcome must preserve execution uncertainty and close the session.
+  const html = `<!doctype html><body><input id="ghost" type="checkbox" aria-label="Ghost"><div id="cover" style="position:fixed;left:0;top:0;right:0;bottom:0"></div>
 <script>document.getElementById('cover').addEventListener('mousemove',()=>setTimeout(()=>document.getElementById('ghost').remove(),150));</script></body>`;
-    const f = await page(html, { operationMode: undefined }, [{ selector: '#ghost', actions: ['check'] }]);
-    try {
-      const session = await f.open();
-      const observed = await f.engine.observe(session.session_id);
-      const ghost = observed.elements!.find(e => e.name === 'Ghost')!;
-      await assert.rejects(
-        f.engine.act(session.session_id, { action: 'check', element_id: ghost.id, checked: true }, observed.revision),
-        (error: unknown) => {
-          const safe = safeError(error);
-          return safe.code === 'E_INTERNAL' && safe.may_have_executed === true;
-        },
-      );
-      assert.equal(
-        f.engine.listSessions().sessions.length,
-        0,
-        'unproven execution keeps the safe close-the-session behaviour',
-      );
-    } finally {
-      await f.close();
-    }
-  },
-);
+  const f = await page(html, { operationMode: undefined }, [{ selector: '#ghost', actions: ['check'] }]);
+  try {
+    const session = await f.open();
+    const observed = await f.engine.observe(session.session_id);
+    const ghost = observed.elements!.find(e => e.name === 'Ghost')!;
+    await assert.rejects(
+      f.engine.act(session.session_id, { action: 'check', element_id: ghost.id, checked: true }, observed.revision),
+      (error: unknown) => {
+        const safe = safeError(error);
+        assert.ok(['E_INTERNAL', 'E_TIMEOUT'].includes(safe.code), JSON.stringify(safe));
+        assert.equal(safe.may_have_executed, true);
+        assert.equal(safe.retryable, false);
+        return true;
+      },
+    );
+    assert.equal(
+      f.engine.listSessions().sessions.length,
+      0,
+      'unproven execution keeps the safe close-the-session behaviour',
+    );
+  } finally {
+    await f.close();
+  }
+});
 
 function fakeBrowser(seen: { config?: BrowserTargetConfig | undefined }[] = []): Adapter & { pngs: Buffer[] } {
   const pngs: Buffer[] = [];

@@ -357,3 +357,44 @@ test(
     assert.ok(g.events.some(e => e.kind === 'up'));
   },
 );
+test(
+  'gesture module: unknown surface id, disallowed kind and disabled policy give distinct safe reasons',
+  { timeout: 3000 },
+  async () => {
+    const run = (f: ReturnType<typeof fake>) =>
+      runBrowserGesture(f.page, f.plan, f.policy, f.reference, new AbortController().signal, () => {});
+    const unknown = fake();
+    unknown.plan.surface_id = 'not-configured';
+    await assert.rejects(run(unknown), (error: unknown) => {
+      const e = error as { code?: string; reason?: string; message?: string };
+      assert.equal(e.code, 'E_POLICY_DENIED');
+      assert.equal(e.reason, 'gesture_surface_not_found');
+      assert.ok(!JSON.stringify({ m: e.message, r: e.reason }).includes('#board'));
+      return true;
+    });
+    assert.equal(inputEvents(unknown.events).length, 0);
+    const wrongKind = fake();
+    wrongKind.policy.surfaces[0]!.kinds = ['swipe'];
+    await assert.rejects(run(wrongKind), (error: unknown) => {
+      const e = error as { code?: string; reason?: string };
+      assert.equal(e.code, 'E_POLICY_DENIED');
+      assert.equal(e.reason, 'gesture_kind_not_allowed');
+      return true;
+    });
+    assert.equal(inputEvents(wrongKind.events).length, 0);
+    const disabled = fake();
+    disabled.policy.enabled = false;
+    await assert.rejects(run(disabled), (error: unknown) => {
+      const e = error as { code?: string; reason?: string };
+      assert.equal(e.code, 'E_POLICY_DENIED');
+      assert.equal(e.reason, 'gesture_disabled');
+      return true;
+    });
+    assert.equal(inputEvents(disabled.events).length, 0);
+    const allowed = fake();
+    allowed.policy.surfaces[0]!.kinds = ['drag'];
+    const out = await run(allowed);
+    assert.equal(out.kind, 'drag');
+    assert.equal(out.released_input, true);
+  },
+);

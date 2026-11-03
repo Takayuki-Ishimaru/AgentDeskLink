@@ -94,14 +94,20 @@ function validate(
   reference: GestureReference,
 ): { selector: string; kind: GestureKind; viewport: Viewport } {
   if (policy === null || typeof policy !== 'object') invalid();
-  if (policy.enabled !== true) denied();
+  if (policy.enabled !== true) throw new AdlError('E_POLICY_DENIED', 'gesture_disabled');
   const kind = plan?.kind;
   if (kind !== 'drag' && kind !== 'swipe') invalid();
   const surfaces = Array.isArray(policy.surfaces) ? policy.surfaces : invalid();
   const matches = surfaces.filter(s => s !== null && typeof s === 'object' && s.id === plan?.surface_id);
-  if (matches.length !== 1) denied();
+  // A nonmatching surface id is its own safe actionable reason (never a selector
+  // or page data); a malformed or ambiguous match keeps the generic denial.
+  if (matches.length !== 1)
+    throw matches.length === 0
+      ? new AdlError('E_POLICY_DENIED', 'gesture_surface_not_found')
+      : new AdlError('E_POLICY_DENIED');
   const surface = matches[0]!;
-  if (!Array.isArray(surface.kinds) || !surface.kinds.includes(kind)) denied();
+  if (!Array.isArray(surface.kinds)) denied();
+  if (!surface.kinds.includes(kind)) throw new AdlError('E_POLICY_DENIED', 'gesture_kind_not_allowed');
   if (typeof surface.selector !== 'string' || surface.selector.length === 0) invalid();
   if (reference === null || typeof reference !== 'object' || reference.coordinate_space !== 'viewport_css_pixels')
     invalid();
