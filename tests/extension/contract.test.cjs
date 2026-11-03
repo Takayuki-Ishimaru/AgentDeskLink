@@ -109,7 +109,8 @@ function harness(initial = {}, options = {}) {
     notifications = [],
     posts = [],
     warnings = [],
-    dialogs = [];
+    dialogs = [],
+    outputLines = [];
   const state = new Map();
   const subscriptions = [];
   const vscode = {
@@ -186,7 +187,13 @@ function harness(initial = {}, options = {}) {
         views.set(id, provider);
         return { dispose() {} };
       },
-      createOutputChannel: () => ({ appendLine() {}, show() {}, dispose() {} }),
+      createOutputChannel: () => ({
+        appendLine: line => {
+          outputLines.push(String(line));
+        },
+        show() {},
+        dispose() {},
+      }),
       showErrorMessage: async text => {
         notifications.push(text);
       },
@@ -273,6 +280,8 @@ function harness(initial = {}, options = {}) {
     TextEncoder,
     fetch: (...args) =>
       options.fetch ? options.fetch(...args) : Promise.reject(new Error('unexpected network request')),
+    // A test clock replaces the extension's Date (its own realm has none of the test's globals), so grant lifetimes can be moved without waiting.
+    ...(options.clock ? { Date: options.clock.Date } : {}),
     setTimeout: options.setTimeout ?? setTimeout,
     clearTimeout,
     setInterval,
@@ -302,8 +311,11 @@ function harness(initial = {}, options = {}) {
     posts,
     warnings,
     dialogs,
+    outputLines,
     state,
     changes,
+    folders,
+    trust,
     browserSentinels,
     deactivate: async () => {
       await module.exports.deactivate?.();
@@ -500,6 +512,44 @@ test('approval broker requires a host modal and consumes a one-shot decision ato
   });
   assert.equal((await replay.json()).consumed_now, false);
   assert.ok(h.notifications.some(message => String(message).includes('asks to approve this browser action once')));
+});
+test('a held page request is asked as the request to send, not as the control that already ran', async () => {
+  const h = harness(
+    { enabled: true, operationMode: 'ask', browserOrigins: ['https://example.com'] },
+    { confirmWarning: 'Deny (same as Cancel/Esc) / 拒否（キャンセル・Escも同じ）' },
+  );
+  await h.ready;
+  const [definition] = await h.providers.get('agentdesklink.mcp').provideMcpServerDefinitions();
+  const request_id = crypto.randomUUID();
+  const post = await fetch(`${definition.env.ADL_APPROVAL_URL}/v1/requests`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${definition.env.ADL_APPROVAL_TOKEN}`, 'content-type': 'application/json' },
+    body: JSON.stringify({
+      v: 1,
+      request_id,
+      server_id: crypto.randomUUID(),
+      control_epoch: definition.env.ADL_APPROVAL_EPOCH,
+      binding: 'c'.repeat(64),
+      expires_at: Date.now() + 60_000,
+      summary: {
+        action: 'send_request',
+        surface: 'browser',
+        target: 'Tasks',
+        origin: 'https://example.com',
+        role: 'button',
+        name: 'Add task',
+        risk: 'consequential',
+        details: ['Request POST https://example.com/api/tasks', '"title": "Buy milk"'],
+      },
+    }),
+  });
+  assert.equal(post.status, 201);
+  for (let i = 0; i < 20 && !h.notifications.length; i++) await new Promise(resolve => setTimeout(resolve, 5));
+  const shown = h.notifications.map(String).join('\n');
+  assert.match(shown, /The page is waiting to send the request below\. Send it once\?/);
+  assert.match(shown, /Action: send the request below \(the control was already used\)/);
+  assert.match(shown, /• Request POST https:\/\/example\.com\/api\/tasks/);
+  assert.doesNotMatch(shown, /asks to approve this browser action once/);
 });
 test('Ask broker is withheld when physical native control targets the VS Code host', async () => {
   const h = harness({
@@ -1496,6 +1546,445 @@ test('Ask broker is withheld when a semantic-only native target is the VS Code h
   assert.match(h.posts.at(-1).status.mcp, /native target can control the VS Code host/);
 });
 
+// ---- Standing site-write grants: the third dialog item, auto-approval at POST time, and the end of a grant ----
+const ALLOW_SITE = 'Allow further writes to this site / このサイトへの書き込みを続けて許可';
+const SITE = 'https://example.com';
+const OTHER_SITE = 'https://other.example';
+const SERVER_A = '11111111-1111-4111-8111-111111111111';
+const SERVER_B = '22222222-2222-4222-8222-222222222222';
+// A Date for the extension's own realm whose clock can be moved forward, so a grant's 30 minutes need no waiting.
+function fakeClock() {
+  let offset = 0;
+  class ClockDate extends Date {
+    constructor(...args) {
+      if (args.length) super(...args);
+      else super(ClockDate.now());
+    }
+    static now() {
+      return super.now() + offset;
+    }
+  }
+  return {
+    Date: ClockDate,
+    now: () => ClockDate.now(),
+    advance: ms => {
+      offset += ms;
+    },
+  };
+}
+// Ask mode with two granted origins and a configured desktop app; the dialog answer is whatever h.choice.current is (a title, an item, a function or undefined for Cancel).
+function grantHarness(choice, options = {}) {
+  const pick = { current: choice };
+  const h = harness(
+    {
+      enabled: true,
+      operationMode: 'ask',
+      browserOrigins: [SITE, OTHER_SITE],
+      desktopAppId: 'fixture-app',
+      desktopAppPath:
+        process.platform === 'win32' ? 'C:\\Apps\\fixture\\fixture-app.exe' : '/Applications/fixture-app.app',
+    },
+    { ...options, confirmWarning: args => (typeof pick.current === 'function' ? pick.current(args) : pick.current) },
+  );
+  h.choice = pick;
+  return h;
+}
+async function brokerOf(h) {
+  const [definition] = await h.providers.get('agentdesklink.mcp').provideMcpServerDefinitions();
+  return {
+    url: definition.env.ADL_APPROVAL_URL,
+    epoch: definition.env.ADL_APPROVAL_EPOCH,
+    headers: { authorization: `Bearer ${definition.env.ADL_APPROVAL_TOKEN}`, 'content-type': 'application/json' },
+  };
+}
+async function requestState(h, request_id, method = 'GET', broker) {
+  const b = broker ?? (await brokerOf(h));
+  const response = await fetch(`${b.url}/v1/requests/${request_id}`, { method, headers: b.headers });
+  return response.json();
+}
+async function settle(h, request_id) {
+  let reply;
+  for (let i = 0; i < 100; i++) {
+    reply = await requestState(h, request_id);
+    if (reply.status !== 'pending') break;
+    await sleep(5);
+  }
+  return reply;
+}
+// POSTs one approval request like the Engine does and, unless poll is false, waits for the decision. grant: null omits the field; summary replaces the whole summary.
+async function postGrantable(
+  h,
+  {
+    origin = SITE,
+    server_id = SERVER_A,
+    action = 'send_request',
+    risk = 'consequential',
+    grant = { scope: 'site_writes', origin },
+    summary,
+    now = Date.now,
+    poll = true,
+    broker,
+  } = {},
+) {
+  const b = broker ?? (await brokerOf(h));
+  const request_id = crypto.randomUUID();
+  const response = await fetch(`${b.url}/v1/requests`, {
+    method: 'POST',
+    headers: b.headers,
+    body: JSON.stringify({
+      v: 1,
+      request_id,
+      server_id,
+      control_epoch: b.epoch,
+      binding: 'd'.repeat(64),
+      expires_at: now() + 60_000,
+      summary: summary ?? {
+        action,
+        surface: 'browser',
+        target: 'PUT /api/xhr',
+        origin,
+        risk,
+        ...(grant === null ? {} : { grant }),
+      },
+    }),
+  });
+  const text = await response.text();
+  const post = response.status === 201 ? JSON.parse(text) : undefined;
+  const reply = post && poll && post.status === 'pending' ? await settle(h, request_id) : post;
+  return { status: response.status, post, reply, request_id };
+}
+// The number of dialogs one request caused.
+async function dialogsFor(h, options) {
+  const before = h.warnings.length;
+  const result = await postGrantable(h, options);
+  return { ...result, dialogs: h.warnings.length - before };
+}
+async function giveGrant(h, options = {}) {
+  const previous = h.choice.current;
+  h.choice.current = ALLOW_SITE;
+  const made = await postGrantable(h, options);
+  h.choice.current = previous;
+  assert.equal(made.reply.status, 'approved');
+  assert.equal(made.reply.granted, 'site_writes');
+  return made;
+}
+const panelGrants = async h => {
+  await sleep(30); // grant changes reach the panel in one coalesced publish
+  return h.posts.filter(x => x.type === 'state').at(-1).grants;
+};
+
+test('the approval dialog offers the standing-grant item only for grant-eligible browser summaries, and only that item creates a grant', async () => {
+  const h = grantHarness(APPROVE);
+  await h.ready;
+  const once = await dialogsFor(h);
+  assert.equal(once.dialogs, 1);
+  assert.equal(once.reply.status, 'approved');
+  assert.equal(once.reply.granted, undefined, 'Approve once is not a grant');
+  const [message, options, ...items] = h.warnings.at(-1);
+  assert.equal(items.length, 3);
+  assert.equal(items[0].title, APPROVE);
+  assert.equal(items[1].title, ALLOW_SITE);
+  assert.ok(!items[0].isCloseAffordance && !items[1].isCloseAffordance, 'only Deny is the close action');
+  assert.equal(items[2].isCloseAffordance, true);
+  assert.match(items[2].title, /Deny/);
+  const line = message.split('\n').find(x => x.startsWith('Standing option'));
+  assert.ok(line, 'the dialog explains the extra item');
+  for (const needle of [SITE, '30 minutes', '30 分間', /credentials/, /payment/, /panel/, /パネル/, /毎回確認/])
+    assert.ok(typeof needle === 'string' ? line.includes(needle) : needle.test(line), String(needle));
+  assert.match(options.detail, /third choice, when offered/);
+  assert.match(options.detail, /3 つ目の選択肢/);
+  assert.match(options.detail, /1回の操作/, 'the one-shot sentence is unchanged');
+  // Approving once again asks again, so the first approval created nothing.
+  assert.equal((await dialogsFor(h)).dialogs, 1);
+  // Without the Engine's grant field, for credentials, and for a native action, the dialog keeps its two items.
+  for (const variant of [{ grant: null }, { grant: null, risk: 'credential' }, { summary: DESKTOP_SUMMARY }]) {
+    assert.equal((await dialogsFor(h, variant)).dialogs, 1);
+    assert.equal(h.warnings.at(-1).length, 4, 'message, options, Approve and Deny');
+    assert.ok(!h.warnings.at(-1).some(x => x?.title === ALLOW_SITE));
+  }
+  assert.equal(
+    (await postGrantable(h, { summary: { ...DESKTOP_SUMMARY, grant: { scope: 'site_writes', origin: SITE } } })).status,
+    400,
+    'a native summary may not carry a grant',
+  );
+  // Only the exact Allow-site item creates a grant; Deny, Cancel and a lookalike do not.
+  for (const choice of [undefined, args => args.at(-1), { title: `${ALLOW_SITE} (copy)` }, 'Allow']) {
+    h.choice.current = choice;
+    const denied = await dialogsFor(h);
+    assert.equal(denied.reply.status, 'denied');
+    assert.equal(denied.reply.granted, undefined);
+  }
+  // The host cannot pick an item that was not offered either.
+  h.choice.current = ALLOW_SITE;
+  for (const variant of [{ grant: null }, { grant: null, risk: 'credential' }]) {
+    const refused = await dialogsFor(h, variant);
+    assert.equal(refused.reply.status, 'denied', 'the Allow-site title on a two-item dialog denies');
+  }
+  h.choice.current = APPROVE;
+  assert.equal((await dialogsFor(h)).dialogs, 1, 'no grant exists yet');
+  // The Allow-site item approves this request and creates the grant; the request is still consumed exactly once.
+  h.choice.current = ALLOW_SITE;
+  const made = await dialogsFor(h);
+  assert.equal(made.dialogs, 1);
+  assert.equal(made.post.status, 'pending');
+  assert.equal(made.reply.status, 'approved');
+  assert.equal(made.reply.granted, 'site_writes');
+  assert.equal((await requestState(h, made.request_id)).granted, 'site_writes');
+  const consumed = await requestState(h, made.request_id, 'DELETE');
+  assert.equal(consumed.status, 'consumed');
+  assert.equal(consumed.consumed_now, true);
+  assert.equal(consumed.granted, 'site_writes');
+  assert.equal((await requestState(h, made.request_id, 'DELETE')).consumed_now, false);
+});
+
+test('a site grant approves later eligible requests at POST time without a dialog, for the same server and destination origin only', async () => {
+  const h = grantHarness(undefined);
+  await h.ready;
+  await giveGrant(h);
+  assert.equal(h.warnings.length, 1);
+  const second = await dialogsFor(h);
+  assert.equal(second.status, 201);
+  assert.equal(second.post.status, 'approved', 'approved inside the POST reply itself');
+  assert.equal(second.post.granted, 'site_writes');
+  assert.equal(second.dialogs, 0);
+  const got = await requestState(h, second.request_id);
+  assert.deepEqual([got.status, got.granted], ['approved', 'site_writes']);
+  const used = await requestState(h, second.request_id, 'DELETE');
+  assert.deepEqual([used.status, used.consumed_now, used.granted], ['consumed', true, 'site_writes']);
+  assert.equal(
+    (await requestState(h, second.request_id, 'DELETE')).consumed_now,
+    false,
+    'one-shot consume is unchanged',
+  );
+  // A click or key press that submits a real form is covered like a held request.
+  for (const action of ['click', 'press']) {
+    const submit = await dialogsFor(h, { action });
+    assert.deepEqual([submit.dialogs, submit.post.status, submit.post.granted], [0, 'approved', 'site_writes'], action);
+  }
+  // Everything that is not covered asks as before.
+  const asks = async (variant, status = 201) => {
+    const result = await dialogsFor(h, variant);
+    assert.equal(result.status, status, JSON.stringify(variant));
+    return result.dialogs;
+  };
+  assert.equal(await asks({ grant: null }), 1, 'no grant field');
+  assert.equal(await asks({ grant: null, risk: 'credential' }), 1, 'credentials');
+  assert.equal(await asks({ server_id: SERVER_B }), 1, 'another AI server');
+  assert.equal(
+    await asks({ origin: OTHER_SITE, grant: { scope: 'site_writes', origin: OTHER_SITE } }),
+    1,
+    'another origin',
+  );
+  assert.equal(
+    await asks({ origin: SITE, grant: { scope: 'site_writes', origin: OTHER_SITE } }),
+    1,
+    'a destination without a grant',
+  );
+  assert.equal(
+    await asks({ grant: { scope: 'site_writes', origin: 'https://unlisted.example' } }, 400),
+    0,
+    'not a granted origin',
+  );
+  assert.equal(await asks({ action: 'fill' }, 400), 0, 'a grant on a fill is refused');
+  // The grant is keyed on the destination origin: a page on another granted origin writing to the granted one is covered.
+  const api = await dialogsFor(h, { origin: OTHER_SITE, grant: { scope: 'site_writes', origin: SITE } });
+  assert.deepEqual([api.dialogs, api.post.status], [0, 'approved']);
+});
+
+test('a request queued behind the dialog is approved without a second dialog once the grant exists', async () => {
+  let release;
+  const gate = new Promise(resolve => {
+    release = resolve;
+  });
+  const h = grantHarness(async () => {
+    await gate;
+    return ALLOW_SITE;
+  });
+  await h.ready;
+  const first = await postGrantable(h, { poll: false });
+  const queued = await postGrantable(h, { poll: false });
+  const other = await postGrantable(h, { poll: false, origin: OTHER_SITE });
+  assert.deepEqual([first.post.status, queued.post.status, other.post.status], ['pending', 'pending', 'pending']);
+  await sleep(20);
+  assert.equal(h.warnings.length, 1, 'one dialog at a time');
+  release();
+  const one = await settle(h, first.request_id);
+  const two = await settle(h, queued.request_id);
+  assert.deepEqual([one.status, one.granted], ['approved', 'site_writes']);
+  assert.deepEqual([two.status, two.granted], ['approved', 'site_writes'], 'covered by the grant of the first dialog');
+  const three = await settle(h, other.request_id);
+  assert.equal(h.warnings.length, 2, 'another origin still needs its own dialog');
+  assert.deepEqual([three.status, three.granted], ['approved', 'site_writes']);
+});
+
+test('site grants end on settings, emergency stop, folder and trust changes, by the clock and from the panel', async () => {
+  const clock = fakeClock();
+  const h = grantHarness(undefined, { clock });
+  const panel = await h.panel();
+  const now = clock.now;
+  const eligible = (variant = {}) => dialogsFor(h, { now, ...variant });
+  const give = (variant = {}) => giveGrant(h, { now, ...variant });
+  const covered = async () => {
+    const result = await eligible();
+    return result.dialogs === 0 && result.post.granted === 'site_writes';
+  };
+  const lastState = () => h.posts.filter(x => x.type === 'state').at(-1);
+  // Settings.
+  await give();
+  assert.equal(await covered(), true);
+  assert.equal((await panelGrants(h)).length, 1);
+  h.changes.fire({
+    affectsConfiguration: section => section === 'agentdesklink' || section === 'agentdesklink.browserOrigins',
+  });
+  assert.equal((await eligible()).dialogs, 1, 'a settings change ends the grant');
+  assert.ok(h.outputLines.some(x => x.includes('site grants cleared (1)')));
+  assert.equal((await panelGrants(h)).length, 0);
+  // Emergency stop and resume: the old credentials stop working, and after the resume the human is asked again.
+  await give();
+  const stale = await brokerOf(h);
+  await h.commands.get('agentdesklink.emergencyStop')();
+  assert.equal((await postGrantable(h, { now, broker: stale })).status, 403, 'revoked credentials');
+  assert.equal((await h.providers.get('agentdesklink.mcp').provideMcpServerDefinitions()).length, 0);
+  await h.commands.get('agentdesklink.resumeOperations')();
+  assert.equal((await eligible()).dialogs, 1, 'a grant never survives an emergency stop');
+  // Workspace folders and trust.
+  await give();
+  h.folders.fire();
+  assert.equal((await eligible()).dialogs, 1, 'a workspace change ends the grant');
+  await give();
+  h.trust.fire();
+  assert.equal((await eligible()).dialogs, 1, 'a trust change ends the grant');
+  // Expiry: a use does not extend the 30 minutes.
+  await give();
+  clock.advance(29 * 60_000);
+  assert.equal(await covered(), true, 'still live after 29 minutes');
+  clock.advance(2 * 60_000);
+  assert.equal((await eligible()).dialogs, 1, 'gone after 31 minutes, although it was used at minute 29');
+  assert.equal((await panelGrants(h)).length, 0);
+  // Panel revoke: the list names the grant, and revoking ends it and what it approved but nobody consumed.
+  await give();
+  const unconsumed = await eligible();
+  assert.equal(unconsumed.post.status, 'approved');
+  const [listed] = await panelGrants(h);
+  assert.equal(listed.origin, SITE);
+  assert.equal(listed.scope, 'site_writes');
+  assert.equal(listed.uses, 2);
+  await panel.send({ type: 'revokeSiteGrant', id: listed.id });
+  assert.equal(lastState().grants.length, 0);
+  assert.ok(h.outputLines.some(x => x.includes('site grant revoked (panel)')));
+  assert.equal(
+    (await requestState(h, unconsumed.request_id)).status,
+    'invalidated',
+    'an unconsumed approval cannot outlive its grant',
+  );
+  assert.equal((await eligible()).dialogs, 1);
+  // An id the broker does not know is reported; values that are not ids are ignored; nothing is thrown.
+  await panel.send({ type: 'revokeSiteGrant', id: crypto.randomUUID() });
+  assert.match(lastState().status.globalError, /すでに終了|already ended/);
+  const posts = h.posts.length;
+  for (const id of ['not-a-uuid', 42, undefined, { id: 1 }]) await panel.send({ type: 'revokeSiteGrant', id });
+  assert.equal(h.posts.length, posts, 'malformed ids post nothing');
+});
+
+test('a grant whose origin is no longer allowed ends even without a revoke', async () => {
+  const h = grantHarness(undefined);
+  const panel = await h.panel();
+  await giveGrant(h);
+  assert.equal((await panelGrants(h)).length, 1);
+  // The origin list shrinks without the change event (and so without the usual revoke): the broker still refuses to list or use the grant.
+  h.config.browserOrigins = [OTHER_SITE];
+  await panel.send({ type: 'ready' });
+  assert.equal(h.posts.filter(x => x.type === 'state').at(-1).grants.length, 0);
+  assert.ok(h.outputLines.some(x => x.includes('site grant ended: https://example.com')));
+  h.config.browserOrigins = [SITE, OTHER_SITE];
+  assert.equal((await dialogsFor(h)).dialogs, 1, 'it stays ended when the origin is allowed again');
+});
+
+test('the broker validates the grant field strictly', async () => {
+  const h = grantHarness(APPROVE);
+  await h.ready;
+  const grant = (over = {}) => ({ scope: 'site_writes', origin: SITE, ...over });
+  const bad = [
+    { grant: 'site_writes' },
+    { grant: [] },
+    { grant: grant({ scope: 'all' }) },
+    { grant: { scope: 'site_writes' } },
+    { grant: { origin: SITE } },
+    { grant: grant({ origin: `${SITE}/path` }) },
+    { grant: grant({ origin: `${SITE}/` }) },
+    { grant: grant({ origin: 'http://user:pw@example.com' }) },
+    { grant: grant({ origin: 'ftp://example.com' }) },
+    { grant: grant({ origin: 'https://unlisted.example' }) },
+    { grant: grant({ origin: `https://${'a'.repeat(300)}.example` }) },
+    { grant: grant({ origin: 5 }) },
+    { grant: grant({ extra: true }) },
+    { grant: grant(), risk: 'credential' },
+    { grant: grant(), action: 'fill' },
+    { grant: grant(), action: 'handoff' },
+  ];
+  for (const variant of bad) assert.equal((await postGrantable(h, variant)).status, 400, JSON.stringify(variant));
+  const base = {
+    action: 'send_request',
+    surface: 'browser',
+    target: 'PUT /api/xhr',
+    origin: SITE,
+    risk: 'consequential',
+  };
+  for (const summary of [
+    { ...base, grant: null },
+    { ...base, grant: grant(), value: { kind: 'secret', length: 8 } },
+    { ...base, grant: grant(), application: 'fixture-app' },
+    { ...DESKTOP_SUMMARY, grant: grant() },
+  ])
+    assert.equal((await postGrantable(h, { summary })).status, 400, JSON.stringify(summary));
+  assert.equal(h.warnings.length, 0, 'a refused summary never reaches the dialog');
+  const valid = await postGrantable(h, { grant: grant() });
+  assert.equal(valid.status, 201);
+  assert.equal(valid.reply.status, 'approved');
+  const publicValue = await postGrantable(h, {
+    summary: { ...base, grant: grant(), value: { kind: 'public', length: 3, preview: 'abc' } },
+  });
+  assert.equal(publicValue.status, 201, 'a public value does not disqualify the field');
+});
+
+test('each auto-approval and grant change is logged to the output channel and published to the panel', async () => {
+  const h = grantHarness(undefined);
+  await h.ready;
+  await h.panel();
+  await giveGrant(h);
+  assert.ok(h.outputLines.some(x => /site grant created: https:\/\/example\.com for server 11111111 \(30 min/.test(x)));
+  const a = await postGrantable(h);
+  const b = await postGrantable(h);
+  assert.deepEqual([a.post.status, b.post.status], ['approved', 'approved']);
+  const lines = h.outputLines.filter(x => x.includes('approved by site grant'));
+  assert.equal(lines.length, 2, 'one line per auto-approval, none for the dialog that created the grant');
+  assert.match(
+    lines[0],
+    new RegExp(
+      `approval ${a.request_id} approved by site grant https://example\\.com \\(send_request, server 11111111, use 2, 30 min left\\)`,
+    ),
+  );
+  assert.match(lines[1], /use 3,/);
+  assert.ok(lines.every(x => x.startsWith('[agentdesklink] ')));
+  const [grant] = await panelGrants(h);
+  assert.equal(grant.uses, 3, 'the creating request and both auto-approvals');
+  assert.equal(grant.expires_at - grant.created_at, 30 * 60_000);
+  assert.equal(grant.origin, SITE);
+  assert.match(grant.id, /^[0-9a-f-]{36}$/);
+  assert.deepEqual(Object.keys(grant).sort(), ['created_at', 'expires_at', 'id', 'origin', 'scope', 'uses']);
+  // A second dialog for the same server and origin replaces the grant instead of adding one.
+  await giveGrant(h);
+  assert.equal((await panelGrants(h)).length, 1);
+  await giveGrant(h, { server_id: SERVER_B });
+  await giveGrant(h, { origin: OTHER_SITE });
+  assert.equal((await panelGrants(h)).length, 3);
+  await h.deactivate();
+  assert.ok(
+    h.outputLines.some(x => x.includes('site grants cleared (3)')),
+    'deactivation ends every grant',
+  );
+});
+
 // ---- Allow-all confirmation (requirement 4) ----
 test('allow all lists what becomes possible without approval and Cancel keeps the previous tier', async () => {
   const h = harness(
@@ -1648,6 +2137,7 @@ test('the panel HTML carries the new sections with both languages for every stri
     'allow-unredacted-images',
     'browser-proxy-connect-hostname',
     'private-network-suggestion',
+    'site-grants',
   ])
     assert.match(html, new RegExp(`id="${id}"`), id);
   const part = (from, to) => html.slice(html.indexOf(from), html.indexOf(to, html.indexOf(from)));

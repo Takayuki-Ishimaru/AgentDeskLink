@@ -9,6 +9,12 @@ import {
   matchesLabelList,
   classifyLabel,
   isContainable,
+  isMoneyLike,
+  isMoneyLikeUrl,
+  BUY_SOURCE,
+  ORDER_IDIOMS_SOURCE,
+  EN_WORDS_SOURCE,
+  MONEY_EN_SOURCE,
 } from '../src/action-classifier.js';
 import type { ActionFacts, LabelVerdict, LabelLists } from '../src/action-classifier.js';
 import type { Action } from '../src/types.js';
@@ -547,4 +553,102 @@ test('a to-do item that starts with "Buy" is ordinary: only the bare verb and it
     assert.deepEqual(verdict(button(name)), v(false, null), name);
   const checkbox = button('Buy milk', { tag: 'input', type: 'checkbox', role: 'checkbox' });
   assert.deepEqual(verdict(checkbox, { action: 'check', checked: true }), v(false, null));
+});
+
+// Money-like vocabulary (site-write grant design D): purchases and payments never ride a standing grant.
+test('isMoneyLike: purchase, payment and transfer labels in English and Japanese are money-like', () => {
+  for (const label of [
+    'Purchase',
+    'Buy now',
+    'Buy',
+    'Checkout',
+    'Check out',
+    'Pay',
+    'Pay now',
+    'Make a payment',
+    'Place your order',
+    'Complete order',
+    'Order',
+    'Order now',
+    'Reorder',
+    'Subscribe',
+    'Transfer',
+    'Withdraw',
+    'Donate',
+    'PlaceOrder',
+    '購入',
+    '購入する',
+    '買う',
+    '決済',
+    '支払う',
+    '注文する',
+    '注文を確定',
+    '振込',
+    '送金',
+    '申込',
+    '申し込む',
+    '契約する',
+    '入金',
+    'チャージ',
+  ])
+    assert.equal(isMoneyLike(label), true, label);
+});
+
+test('isMoneyLike: ordinary saves, lookups and reading material are not money-like', () => {
+  for (const label of [
+    'Save',
+    'Save profile',
+    'Sort order',
+    'Order history',
+    'Buy milk',
+    'Send',
+    'Delete',
+    'Submit',
+    'Done',
+    'Add task',
+    '決済方法',
+    '注文履歴',
+    '契約内容',
+    '保存',
+    '',
+    '   ',
+  ])
+    assert.equal(isMoneyLike(label), false, JSON.stringify(label));
+});
+
+test('isMoneyLikeUrl: purchase and payment paths and action-style query values are money-like, and an unparsable URL fails closed', () => {
+  for (const url of [
+    'https://x.example/api/orders',
+    'https://x.example/api/orders/17',
+    'https://x.example/checkout',
+    'https://x.example/pay.php',
+    'https://x.example/a?action=purchase',
+    'https://x.example/a?_method=refund',
+    'https://x.example/Billing/',
+    'https://x.example/%63heckout',
+    'https://x.example/api/place-order',
+    'https://x.example/api/placeOrder',
+    'https://x.example/v1/subscriptions',
+    `https://x.example/${'a'.repeat(400)}-checkout`,
+    'not a url',
+    '',
+  ])
+    assert.equal(isMoneyLikeUrl(url), true, url);
+  for (const url of [
+    'https://x.example/api/tasks',
+    'https://x.example/api/orderings',
+    'https://x.example/items/1/remove',
+    'https://x.example/?q=order',
+    'https://x.example/profile?name=pay',
+    'https://x.example/api/save',
+  ])
+    assert.equal(isMoneyLikeUrl(url), false, url);
+});
+
+test('the money-like vocabulary shares the buy and order fragments of the tier vocabulary, so the two cannot drift', () => {
+  assert.ok(EN_WORDS_SOURCE.includes(BUY_SOURCE) && MONEY_EN_SOURCE.includes(BUY_SOURCE));
+  assert.ok(EN_WORDS_SOURCE.includes(ORDER_IDIOMS_SOURCE) && MONEY_EN_SOURCE.includes(ORDER_IDIOMS_SOURCE));
+  // Every label the tier vocabulary reads as a purchase or order idiom is money-like too.
+  for (const label of ['Buy now', 'Place your order', 'Order now', 'Reorder', 'Make a payment'])
+    assert.deepEqual(verdict(button(label)), v(true, 'label'), label);
 });

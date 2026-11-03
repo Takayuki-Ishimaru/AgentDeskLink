@@ -96,11 +96,17 @@ const contained = (result: { warnings?: { code: string }[] }) =>
     'contained_action',
   );
 
-async function assertStopped(f: Fixture, name: string) {
+// The reason tells what stopped it: a new read or navigation it cannot be attributed to (contained_request_blocked, the default), a
+// write that ask mode would hold for approval (requires_ask_mode), or a write nobody could be asked about (request_not_approvable).
+async function assertStopped(
+  f: Fixture,
+  name: string,
+  reason: 'contained_request_blocked' | 'requires_ask_mode' | 'request_not_approvable' = 'contained_request_blocked',
+) {
   await assert.rejects(f.click(name), (error: unknown) => {
     assert.ok(error instanceof AdlError, String(error));
     assert.equal(error.code, 'E_APPROVAL_REQUIRED');
-    assert.equal(error.reason, 'requires_ask_mode');
+    assert.equal(error.reason, reason);
     assert.equal(error.mayHaveExecuted, false);
     assert.equal((safeError(error) as { page_script_ran?: boolean }).page_script_ran, true, 'its handler has run');
     return true;
@@ -181,7 +187,7 @@ for (const [name, sign] of [
       const state = await f.observe();
       assert.equal(new URL(state.url!).pathname, '/', 'the page stays');
       assert.ok(
-        state.warnings?.some(w => w.code === 'requires_ask_mode'),
+        state.warnings?.some(w => w.code === 'contained_request_blocked'),
         'the next observation says so',
       );
     } finally {
@@ -211,18 +217,18 @@ test('standard: an affirmative in a Delete dialog is contained the same way', { 
   }
 });
 
-for (const [name, sign] of [
-  ['Delete on server', 'DELETE /items/1'],
-  ['Delete by read', 'GET /items/1/remove'],
-  ['Delete soon', 'GET /items/1/late'],
-  ['Delete and leave', 'GET /items/1/gone'],
-  ['Delete quietly', 'POST /beacon'],
-  ['Delete lazily', 'GET /items/1/chunk.js'],
+for (const [name, sign, reason] of [
+  ['Delete on server', 'DELETE /items/1', 'requires_ask_mode'],
+  ['Delete by read', 'GET /items/1/remove', 'contained_request_blocked'],
+  ['Delete soon', 'GET /items/1/late', 'contained_request_blocked'],
+  ['Delete and leave', 'GET /items/1/gone', 'contained_request_blocked'],
+  ['Delete quietly', 'POST /beacon', 'request_not_approvable'],
+  ['Delete lazily', 'GET /items/1/chunk.js', 'contained_request_blocked'],
 ] as const)
-  test(`standard: "${name}" is stopped before its request leaves`, { timeout: 60000 }, async () => {
+  test(`standard: "${name}" is stopped before its request leaves (${reason})`, { timeout: 60000 }, async () => {
     const f = await fixture('standard');
     try {
-      await assertStopped(f, name);
+      await assertStopped(f, name, reason);
       await new Promise(resolve => setTimeout(resolve, 400));
       assert.ok(!f.requests.includes(sign), `${sign} never reached the server`);
       const state = await f.observe();
@@ -323,17 +329,26 @@ async function broker() {
   };
 }
 
-test('ask: Delete still asks a human before anything runs', { timeout: 60000 }, async () => {
-  const stop = await broker();
-  const f = await fixture('ask');
-  try {
-    await assert.rejects(
-      f.click('Delete Buy milk'),
-      (error: unknown) => error instanceof AdlError && error.code === 'E_APPROVAL_REQUIRED' && !!error.requestId,
-    );
-    assert.deepEqual(await f.fires(), []);
-  } finally {
-    await f.close();
-    await stop();
-  }
-});
+// With an approver, a Delete that stays in the page runs contained without a dialog (a write it sends is held and asked about with its content:
+// see browser-held-writes.test.ts); a Delete that is gated for another reason still asks a human before anything runs.
+test(
+  'ask: a local Delete runs without a dialog, a Delete that is gated otherwise still asks first',
+  { timeout: 60000 },
+  async () => {
+    const stop = await broker();
+    const f = await fixture('ask');
+    try {
+      contained(await f.click('Delete Buy milk'));
+      assert.deepEqual(await f.fires(), ['d1'], 'dispatched without an approval');
+      assert.deepEqual(f.requests, [], 'nothing left the page');
+      await assert.rejects(
+        f.click('Delete and send'),
+        (error: unknown) => error instanceof AdlError && error.code === 'E_APPROVAL_REQUIRED' && !!error.requestId,
+      );
+      assert.deepEqual(await f.fires(), ['d1'], 'the gated Delete was not dispatched');
+    } finally {
+      await f.close();
+      await stop();
+    }
+  },
+);

@@ -2,12 +2,12 @@
 
 [日本語](INSTALL.md) | **English**
 
-Target version: `0.1.8` (beta)
+Target version: `0.1.9` (beta)
 
 ## Requirements
 
 - VS Code 1.101 or newer.
-- The common `agentdesklink-0.1.8.vsix` package. Check the [supported environments and known limitations](KNOWN_ISSUES_en.md).
+- The common `agentdesklink-0.1.9.vsix` package. Check the [supported environments and known limitations](KNOWN_ISSUES_en.md).
 - A network connection for the first Chromium download if Chrome is not installed.
 
 One VSIX bundles Node.js and image-processing libraries for macOS / Apple silicon, Windows x64 and Linux x64. It also includes the macOS, Windows and Linux desktop helpers (the Linux helper is a Python 3 script that needs the OS python3-gi packages). It selects the matching runtime at startup, so no separate build is needed.
@@ -16,7 +16,7 @@ The distribution file is shared across these operating systems. This common VSIX
 
 ## Installation
 
-1. Download `agentdesklink-0.1.8.vsix` and `SHA256SUMS` from the release page.
+1. Download `agentdesklink-0.1.9.vsix` and `SHA256SUMS` from the release page.
 2. Compute the SHA-256 using the [update guide](UPDATES_en.md) and confirm it matches the list.
 3. In the VS Code Command Palette, choose “Extensions: Install from VSIX...” and select the VSIX.
 4. Open the folder you want to use, review its contents and trust the workspace.
@@ -61,10 +61,10 @@ Check “Current permissions” in the panel to see the effective grants. Observ
 ### Permission tiers and one-shot approvals
 
 - **Read only**: observe, navigate and scroll. Browser operations are refused with `read_only_mode`. Allowed desktop apps are observe-only; operations are refused with `desktop_operation_not_granted`.
-- **Standard**: ordinary browser inputs, clicks and forms handled within JavaScript, plus ordinary actions on the allowed desktop app on macOS, Windows and Linux (click, fill, check, select, scroll); consequential actions such as purchase, deletion or credential entry are denied. Browser actions are classified by the control's verb (delete, send, pay, unsubscribe, log out…) and by real form submissions; links that only navigate within the same origin, a dialog's Cancel, and nouns such as Order history are ordinary.
-- **Ask each time**: standard actions plus inspected consequential actions approved once in a VS Code dialog. Submit buttons and Enter run as in Standard; only when a form is really submitted is the submission cancelled and approval requested. For a desktop app the dialog shows the app ID, window title, role and control name. Review the target and contents, then approve or deny. The AI cannot decide the approval. After approval, it retries the same operation.
+- **Standard**: ordinary browser inputs, clicks and forms handled within JavaScript, plus ordinary actions on the allowed desktop app on macOS, Windows and Linux (click, fill, check, select, scroll); consequential actions such as purchase, deletion or credential entry are denied. Browser actions are classified by the control's verb (delete, send, pay, unsubscribe, log out…) and by real form submissions; links that only navigate within the same origin, a dialog's Cancel, and nouns such as Order history are ordinary. Write requests a page sends to save data (fetch / XHR POST, PUT, PATCH, DELETE) are blocked, so most web apps cannot save changes (the action response carries `write_blocked: true`).
+- **Ask each time**: standard actions plus inspected consequential actions approved once in a VS Code dialog. Submit buttons and Enter run as in Standard; only when a form is really submitted is the submission cancelled and approval requested. A write the page sends during an action is held unsent inside the browser; the dialog shows its method, URL and body fields (secrets masked), only the approved content is sent, once, and the AI reads the outcome (`sent`) with `adl_approvals`. Delete / Remove buttons run without a confirmation of the click, and the write they send is approved in one dialog. Choosing "Allow further writes to this site" in the dialog approves further writes to the same site for up to 30 minutes without a dialog (credentials and purchases still ask; revoke it in the panel). For a desktop app the dialog shows the app ID, window title, role and control name. Review the target and contents, then approve or deny. The AI cannot decide the approval. After approval, the AI observes the result (for a form submission or a click approval it retries the same operation).
 
-Browser approvals cover inspected controls in the main document, open Shadow DOM and same-origin iframes. A desktop approval covers a single action on a consequential control (delete, send and similar) at the observed revision only. Sensitive controls such as password fields are always refused, even with approval. Closed shadow roots, out-of-process iframe proofs, generic AJAX/DELETE and file uploads remain unsupported. Changed contents, expiry and emergency stop invalidate approvals. Unavailable approval dialogs do not authorize consequential operations. Secret values are not sent to the dialog.
+Browser approvals cover inspected controls in the main document, open Shadow DOM and same-origin iframes. A desktop approval covers a single action on a consequential control (delete, send and similar) at the observed revision only. Sensitive controls such as password fields are always refused, even with approval. Closed shadow roots and out-of-process iframe proofs remain unsupported. A write can be held when it is a main-frame fetch / XHR with no body or a JSON, URL-encoded or text/plain body of at most 64 KiB. File uploads (multipart), binary bodies, writes from iframes, writes that start outside an action (timers, autosave) and a fifth write from one action are blocked. Changed contents, expiry and emergency stop invalidate approvals. Unavailable approval dialogs do not authorize consequential operations. Secret values are not sent to the dialog.
 
 An existing `allowAllOperations: true` still takes precedence after updating. To use a permission tier, select Read only, Standard or Ask each time in the panel. Reconnect external clients after changing settings when needed.
 
@@ -89,7 +89,7 @@ When launching the CLI from another MCP host, supply a policy JSON with `--confi
   python3 -c "import gi; gi.require_version('Atspi','2.0'); from gi.repository import Atspi; d=Atspi.get_desktop(0); print(*[(a.get_name(), a.get_process_id()) for a in (d.get_child_at_index(i) for i in range(d.get_child_count())) if a], sep='\n')"
   ```
 
-  Supported are window observation and the semantic actions click / fill / check / select / scroll. The standard tier refuses consequential controls (delete, send, purchase, login and similar) and sensitive fields such as passwords (sensitive fields stay refused even with all operations allowed). Physical input, window images and application launch/quit are unsupported on Linux and listed under `platform_unsupported` in `adl_capabilities`. Native Wayland apps expose size but no screen position or display ID. XWayland apps still return an X display ID within a Wayland session. GTK 4 check boxes have no AT-SPI action, so `check` is reported as unsupported for them. Without the prerequisite packages or an accessibility bus, operations fail with reason `linux_accessibility_unavailable`.
+  Supported are window observation and the semantic actions click / fill / check / select / scroll. The standard tier refuses consequential controls (delete, send, purchase, login and similar) and sensitive fields such as passwords (sensitive fields stay refused even with all operations allowed). Physical input, window images and application launch/quit are unsupported on Linux and listed under `platform_unsupported` in `adl_capabilities`. Native Wayland apps expose size but no screen position or display ID. XWayland apps still return an X display ID within a Wayland session. GTK 4 check boxes have no AT-SPI action, so `check` is reported as unsupported for them. Switching a GTK page tab keeps the session and returns the warning `focus_moved`; observe again before the next action. If another window or application becomes active, the session is closed with `desktop_focus_changed`. `select` accepts a `value` on a combo box, list or tab list and chooses the option by name. Without the prerequisite packages or an accessibility bus, operations fail with reason `linux_accessibility_unavailable`.
 
 Ubuntu 24.04 restricts user namespaces, so automatically downloaded Chromium may need an administrator to configure its sandbox. Use an OS-installed Chrome or ask your administrator to review Chromium's [sandbox setup](https://chromium.googlesource.com/chromium/src/+/main/docs/security/apparmor-userns-restrictions.md). AgentDeskLink does not change operating system settings automatically or launch Chromium with its sandbox disabled.
 

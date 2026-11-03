@@ -3,10 +3,10 @@ import assert from 'node:assert/strict';
 import { parsePolicy, assertUrlAllowed, redactElement, redactText, redactUrl } from '../src/policy.js';
 import { normalizePermissions, extensionPolicy, parsePermissionsEnv } from '../src/bundled-policy.js';
 import { describeApprovalValue } from '../src/approval-summary.js';
-import { AdlError, safeError } from '../src/types.js';
+import { AdlError, HeldWritesError, safeError } from '../src/types.js';
 import { SnapshotStore } from '../src/snapshot.js';
 import { Engine } from '../src/core.js';
-import type { Adapter } from '../src/types.js';
+import type { Adapter, ErrorReason } from '../src/types.js';
 
 test('resource origins grant only resource resolution and retain IP protections', async () => {
   const policy = parsePolicy({ allowedOrigins: ['https://app.test'], resourceOrigins: ['https://cdn.test'] });
@@ -111,6 +111,85 @@ test('safe errors expose actionable reasons and settings without granting retry 
   const approval = safeError(new AdlError('E_APPROVAL_REQUIRED', 'requires_ask_mode'));
   assert.equal(approval.workspace_setting, 'agentdesklink.operationMode');
   assert.equal(approval.retryable, false);
+});
+
+test('safe errors for held and blocked writes never offer a retry and carry only the right hints', () => {
+  for (const reason of [
+    'request_requires_approval',
+    'request_not_approvable',
+    'background_write_blocked',
+    'contained_request_blocked',
+  ] as const) {
+    const plain = safeError(new AdlError('E_APPROVAL_REQUIRED', reason, { page_script_ran: true }));
+    assert.equal(plain.reason, reason);
+    assert.equal(plain.retryable, false, reason);
+    assert.equal(plain.page_script_ran, true, reason);
+    assert.equal(plain.workspace_setting, undefined, reason);
+    assert.equal(
+      plain.policy_setting,
+      reason === 'contained_request_blocked' ? 'consequentialAllowLabels' : undefined,
+      reason,
+    );
+    assert.notEqual(plain.safe_message, 'This operation requires independent approval.', reason);
+    assert.equal(plain.request_id, undefined);
+  }
+  // The request_id of a held write is the approval to wait for, not a reason to repeat the action.
+  const pending = new AdlError('E_APPROVAL_REQUIRED', 'request_requires_approval', { page_script_ran: true });
+  pending.requestId = 'req-1';
+  const withId = safeError(pending);
+  assert.equal(withId.request_id, 'req-1');
+  assert.equal(withId.retryable, false);
+  assert.equal(withId.page_script_ran, true);
+  const retryable = new AdlError('E_APPROVAL_REQUIRED', 'form_submission_requires_approval');
+  retryable.requestId = 'req-2';
+  assert.equal(safeError(retryable).retryable, true);
+  const held = new HeldWritesError({ id: 'h1', requests: [] });
+  assert.equal(held.name, 'HeldWritesError');
+  assert.equal(held.code, 'E_APPROVAL_REQUIRED');
+  assert.equal(held.reason, 'request_requires_approval');
+  assert.equal(held.mayHaveExecuted, false);
+  held.requestId = 'req-3';
+  assert.deepEqual(
+    { retryable: safeError(held).retryable, id: safeError(held).request_id, ran: safeError(held).page_script_ran },
+    { retryable: false, id: 'req-3', ran: true },
+  );
+  assert.ok(held instanceof AdlError);
+});
+
+test('approved:true marks a form error that a standing site grant already approved; without it the key is absent', () => {
+  const granted = new AdlError('E_APPROVAL_REQUIRED', 'form_submission_requires_approval', {
+    revision: 3,
+    approved: true,
+  });
+  granted.requestId = 'req-4';
+  const safe = safeError(granted);
+  assert.equal(safe.approved, true);
+  assert.equal(safe.revision, 3);
+  assert.equal(safe.retryable, true);
+  assert.equal(safe.request_id, 'req-4');
+  assert.match(safe.safe_message, /approved: true/);
+  const ordinary = new AdlError('E_APPROVAL_REQUIRED', 'form_submission_requires_approval', { revision: 3 });
+  ordinary.requestId = 'req-5';
+  assert.equal('approved' in safeError(ordinary), false);
+  assert.equal('approved' in safeError(new AdlError('E_STALE_STATE')), false);
+  // A held write's message names the site-grant outcome so that an agent knows ok + approval.granted is a sent write.
+  assert.match(
+    safeError(new AdlError('E_APPROVAL_REQUIRED', 'request_requires_approval')).safe_message,
+    /approval\.granted = site_writes/,
+  );
+});
+
+test('rewritten reasons promise only what ask mode can do', () => {
+  const messages = (reason: ErrorReason) => safeError(new AdlError('E_APPROVAL_REQUIRED', reason)).safe_message;
+  assert.match(messages('method_requires_approval'), /not saved/);
+  assert.match(messages('method_requires_approval'), /ask mode/);
+  assert.doesNotMatch(messages('method_requires_approval'), /one-shot/);
+  assert.match(messages('requires_ask_mode'), /sent a write request/);
+  assert.match(messages('requires_ask_mode'), /consequentialAllowLabels/);
+  assert.equal(
+    safeError(new AdlError('E_APPROVAL_REQUIRED', 'method_requires_approval')).workspace_setting,
+    'agentdesklink.operationMode',
+  );
 });
 
 test('optional diff serialization failure preserves a completed action and its session', async () => {

@@ -257,3 +257,9 @@ details.section-group>summary{font-size:1em}
 .summary-state{margin-left:8px;font-weight:400;font-size:.92em;color:var(--vscode-descriptionForeground);overflow-wrap:anywhere}
 .summary-state:empty{display:none}
 .section:has(>details.section-group){margin:6px 0}
+
+/* Standing site-write grants: origin, remaining time and a revoke button on one wrapping row. */
+#site-grants{margin:4px 0 0}
+#site-grants li{flex-wrap:wrap;align-items:center}
+#site-grants li span:first-child{font-weight:600}
+#site-grants li span:nth-child(2){color:var(--vscode-descriptionForeground)}

@@ -1,50 +1,47 @@
-# AgentDeskLink 0.1.8 (beta)
+# AgentDeskLink 0.1.9 (beta)
 
 [日本語](RELEASE_NOTES_ja.md) | **English**
 
-This beta lets AI agents operate the local browser and desktop over MCP. Read the [supported environments and known limitations](KNOWN_ISSUES_en.md) before use.
+This beta lets AI agents control a local browser and desktop through MCP. Check the [supported environments and known limitations](KNOWN_ISSUES_en.md) before use.
 
-## Changes since 0.1.7
+## Changes since 0.1.8
 
-- **Fewer false positives in consequential-action checks.** Controls are still recognised by their verb (delete, send, pay, unsubscribe, log out…), and ordinary actions are now less often treated as consequential. Adjust the classification with `consequentialAllowLabels` / `consequentialDenyLabels`.
-- **Consistent detection and approval of real form submissions.** A real submission is detected for both GET and POST and requires approval, while forms handled within JavaScript (`preventDefault`) remain available in Standard mode. When a submission is approved, the page's scripts run on both the cancelled attempt and the approved retry. Use `wait_ms` in `adl_approvals` to wait for a decision. Retrying an action distinguishes human rejection (`approval_denied`), a withdrawn or used approval (`approval_invalidated`), and expiry (`approval_expired`).
-- **Standard-mode Delete buttons run with network restrictions.** A button that is consequential only because of the words "Delete", "Remove" or "削除" (links are not included) now runs with the network restricted until your next action and returns the `contained_action` warning. See "Delete buttons and network restrictions" below.
-- **204 / 205 responses no longer end the session.** When a navigation, form or link response arrives with 204 or 205 and no content, the current page normally stays and the response is `ok: true` with the warning `no_content`. A redirect that sets cookies can replace it with an empty page; navigate again in that case. Cookies set by a redirect are retained, and 301 / 302 / 303 responses to a POST are followed as GET. In Standard and Ask modes, 307 / 308 redirects that would forward a write beyond the approved URL are refused.
-- **Navigation to allowed origins for SSO sign-ins.** A read-only navigation now follows a redirect to an origin granted in `browserOrigins`. An origin without a grant stops with `redirect_origin_not_allowed`, so not every SSO flow works.
-- **Improved Linux desktop control.** Improved post-action changes reported through AT-SPI and fixed duplicate labels on GTK 4 buttons.
-- **Improved observations and actions.** Added clicks on links that span several lines, values and diffs for `contenteditable`, min / max / step for sliders and spin buttons, and page scrolling without an element ID. Observations and tool definitions now omit fields left at their default value.
-- **Improved the settings panel and first setup.** Added a summary of the current permissions, a getting-started checklist and collapsible advanced settings.
+- **Approve the requests web apps send to save data.** Ask mode holds fetch / XHR writes started during an action before sending them. Review the method, URL and body (with secrets masked), then send only the approved requests. The AI waits with `adl_approvals` and does not need to repeat the action.
+- **Allow writes to a site for a limited time.** “Allow further writes to this site” in the approval dialog grants eligible requests from the AI server in the same VS Code window to the same destination origin for up to 30 minutes. The grant applies across chats and can be viewed and revoked in the settings panel. Requests carrying credentials and actions classified as purchases or payments are excluded. See the details below.
+- **Identify changes that were not saved.** An action whose writes were blocked returns `write_blocked: true`. Standard mode continues to block write requests, so a change visible on screen may not have been saved.
+- **Read clearer changes and warnings after an action.** The server waits up to 400 ms for requests started by the action and page changes to settle before returning the diff. Warnings are reported once, and action responses include warnings belonging to that action.
+- **Use GET search forms without approval.** Recognised GET search forms work in Standard and Ask modes without approval. POST forms, forms carrying credentials and consequential actions such as deletion are excluded from this exception.
+- **Simpler approval for Delete buttons.** Buttons classified as consequential only because of “Delete”, “Remove” or “削除” also run with network restrictions in Ask mode, which asks about the write request when one occurs. Other consequential controls, such as purchase or send, still require approval for the button action itself.
+- **Read a selected area and get clearer scroll results.** Use `scope: "within:<element_id>"` in `adl_observe` to read inside an element. Reading main, article, named section and paragraph text containing links has improved. Scroll results distinguish a target that cannot scroll from one already at its edge.
+- **Better Linux tab switching and selection.** Switching GTK tabs keeps the session open with `focus_moved` when focus moves within the same window. Observe again before the next action. Use `select` with `value` to choose a named option in a combo box, list or tab list. Consequential options must be targeted directly.
 
-## Delete buttons and network restrictions
+## Save approvals and continued site permission
 
-In Standard mode, pressing a button that is consequential only because of the words "Delete", "Remove" or "削除" runs it with the network restricted until your next action, and the response carries the `contained_action` warning. Page scripts still run.
+Held writes cover POST, PUT, PATCH and DELETE requests from the main frame to the same origin or a granted origin. Bodies may be absent or contain up to 64 KiB of JSON, URL-encoded data or text/plain. Multipart, files, binary or streaming bodies, synchronous XHR, beacons and iframe writes cannot be held and are blocked. Writes started outside an action, such as timers and autosave, are also blocked. Start a save through an explicit action.
 
-- GET requests shaped like those the page was already making before the click continue (query values containing digits are not distinguished). New data requests, navigations and new images, CSS, fonts and media are blocked.
-- A GET that starts after your next action is not stopped. Writes such as POST remain blocked.
-- A periodic request that starts for the first time right after the click cannot be told apart from the button's own and is reported as blocked; configure `consequentialAllowLabels` in that case.
-- Links (`<a href>`) with those words are not run. Ask mode still asks for approval.
+Approval sends the held requests. Denial, expiry, navigation, page-side cancellation and emergency stop discard them. Requests already sent cannot be undone. `ok: true` acknowledges input and does not guarantee that data was saved or a site operation completed.
 
-These restrictions do not undo page-script effects or side effects caused by existing GET requests.
+Continued site permission ends on a settings or workspace-trust change, emergency stop, extension reload, revocation or expiry. Approval before a consequential button action, GET form submissions that require approval, and sets of writes to multiple origins remain outside this grant. Exclusion of credentials, purchases and payments relies on best-effort classification of site labels and URLs. While the grant is active, the AI can write to the site without asking again; use it only for sites you trust.
+
+See [operation settings and approvals](OPERATIONS.md) and [known limitations](KNOWN_ISSUES_en.md) for the full scope and steps.
 
 ## Installation and updates
 
-Use VS Code 1.101 or newer and select “Extensions: Install from VSIX...” to install `agentdesklink-0.1.8.vsix`. The same VSIX supports macOS / Apple silicon, Windows x64 and Linux x64. It bundles Node.js, image-processing libraries and desktop helpers for each OS. The Linux helper also needs OS-provided Python 3 and AT-SPI2 packages. Reload the window after installation.
+Use VS Code 1.101 or newer and select “Extensions: Install from VSIX...” to install `agentdesklink-0.1.9.vsix`. The same VSIX supports macOS / Apple silicon, Windows x64 and Linux x64. It bundles Node.js, image-processing libraries and desktop helpers for each OS. The Linux helper also needs OS-provided Python 3 and AT-SPI2 packages. Reload the window after installation.
 
-The updaters in 0.1.3 through 0.1.7 support this release. Automatic updates may arrive in stages. For manual installation, download the VSIX and `SHA256SUMS`, verify the hash and install. Updating from 0.1.2 or earlier requires manual installation.
+The updaters in 0.1.3 through 0.1.8 support this release. Automatic updates may arrive in stages. For manual installation, download the VSIX and `SHA256SUMS`, verify the hash and install. Updating from 0.1.2 or earlier requires manual installation.
 
-**An existing `agentdesklink.allowAllOperations: true` still takes precedence after updating.** To use a permission tier, select Read only, Standard or Ask each time in the panel. Enabling MCP alone grants no target access.
+**An existing `agentdesklink.allowAllOperations: true` still takes precedence after updating.** To use a permission tier, select Read only, Standard or Ask in the panel. Enabling MCP alone grants no target access.
 
-Register other AI clients with **AI Clients → Enable all**. They share the selected workspace's permissions, including from other projects in those clients. Reconnect when needed after updating, changing permissions or restarting VS Code. Other servers and manual entries with the same name are preserved.
+Register other AI clients with **AI Clients → Enable all**. They share the selected workspace's permissions, including from other projects in those clients. Reconnect when needed after updating, changing permissions or restarting VS Code.
 
-See the [installation guide](INSTALL_en.md), [operation settings and approvals](OPERATIONS.md) and [update guide](UPDATES_en.md).
+See the [installation guide](INSTALL_en.md) and [update guide](UPDATES_en.md).
 
 ## Usage notes
 
-- Only read-only navigation to an origin granted in `browserOrigins` (excluding those classified `SECRET` / `UNKNOWN`) is followed. `browserOrigins` also lists the origins a session's scripts may navigate to. Per-target controls, image capture and gestures do not apply on the destination origin, and the manual-login grant stays origin-scoped. Cross-origin writes (cross-origin POST), iframe and subresource redirects, and SAML form POST remain unsupported.
-- Browser one-shot approval covers inspected controls in the main document, open Shadow DOM and same-origin iframes. Closed shadow roots and out-of-process iframe proofs remain unsupported. Network permits cover one inspected URL-encoded form POST; multipart, files and generic AJAX/DELETE remain unsupported.
-- Approval binds the target, input and observed state. Reobserve when the screen changes. Approval is unavailable without a connection to VS Code, or when the granted desktop app could operate the approval dialog.
-- On Linux, available AT-SPI2 features depend on the app and desktop environment. See [known limitations](KNOWN_ISSUES_en.md) for GTK 4 check boxes, Qt 5 discovery and Wayland geometry restrictions.
-- During a manual handoff network grant, website scripts may send, change or delete before a human click. Resume, expiry and emergency stop cannot undo requests already dispatched.
+- Individual approvals need a connection to VS Code. Observe again when the target, input or observed state changes. Closed shadow roots and out-of-process iframe approvals remain unsupported.
+- Available Linux actions depend on the app and desktop environment. Window capture, physical input and application launch/quit are unsupported. When a different window or app becomes active, the session closes with `desktop_focus_changed`.
+- During a manual-login network grant, site scripts may send, change or delete data. Resume, expiry and emergency stop cannot undo requests already sent.
 - Physical input and unredacted native images default to off. `interactive_desktop` uses the real mouse and keyboard; do not use it while someone is interacting with the desktop.
 - Unknown secrets in images or text cannot be detected completely. Captured information is passed to the connected AI host.
 - macOS desktop control requires Accessibility permission; capture requires Screen Recording. The Windows helper is unsigned and the macOS helper is ad-hoc signed.

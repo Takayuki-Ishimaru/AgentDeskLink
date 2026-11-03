@@ -5,6 +5,7 @@ import { dirname } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import {
   AdlError,
+  HeldWritesError,
   NativeError,
   safeError,
   type Action,
@@ -12,16 +13,20 @@ import {
   type AdapterActResult,
   type AdapterSession,
   type AdapterWarning,
+  type ApprovalGrantedBy,
   type Condition,
   type ErrorReason,
+  type GrantedApprovalResult,
+  type HeldWriteAbortOutcome,
   type Mode,
   type NetworkWarning,
   type PolicyConfig,
   type RawSnapshot,
+  type SiteWriteGrant,
   type Target,
   type BrowserTargetConfig,
 } from './types.js';
-import { isActionNetworkBlock } from './network-warnings.js';
+import { isActionNetworkBlock, isWriteBlock } from './network-warnings.js';
 import { assertUrlAllowed, authorizeAction, isNativeConsequential, redactElement, redactString } from './policy.js';
 import { SnapshotStore, type ObserveOptions, type ObserveResult } from './snapshot.js';
 import { VisualStore } from './visual.js';
@@ -39,7 +44,8 @@ import {
   commitInputSchema,
 } from './interaction-request.js';
 import { InputProofStore } from './input-proof-store.js';
-import { ApprovalClient, type ApprovalSummary } from './approval-client.js';
+import { ApprovalClient, type ApprovalReply, type ApprovalStatus, type ApprovalSummary } from './approval-client.js';
+import { isMoneyLike, isMoneyLikeUrl } from './action-classifier.js';
 import { describeApprovalValue } from './approval-summary.js';
 import type {
   PrepareInputRequest,
@@ -59,6 +65,8 @@ type Session = {
   revision: number;
   raw: RawSnapshot;
   expires: number;
+  /** The session is kept alive until then whatever its idle time-to-live says (held writes wait for a human decision). */
+  keepUntil?: number;
   latestFrame?: string;
   paused?: boolean;
   actionEpoch: number;
@@ -81,6 +89,10 @@ type ApprovalProof = {
   origin?: string;
   application?: string;
   details?: string[];
+  /** Every label the activation can carry, as the adapter reports them (siteGrantFor checks them for money-like words). */
+  labels?: string[];
+  /** The standing site grant a human may give with this request (siteGrantFor); never set for credentials, label-gated clicks or desktop controls. */
+  grant?: SiteWriteGrant;
 };
 type TerminalApproval = 'denied' | 'consumed' | 'invalidated' | 'expired';
 /** A human's rejection is final (approval_denied); an expiry asks to observe again; everything else was withdrawn or already used. */
@@ -89,6 +101,14 @@ function approvalRefusal(status: TerminalApproval) {
     ? new AdlError('E_STALE_STATE', 'approval_expired')
     : new AdlError('E_POLICY_DENIED', status === 'denied' ? 'approval_denied' : 'approval_invalidated');
 }
+/** The write requests the page's action left held unsent in the adapter: the approval releases or aborts exactly this set, once. */
+type HeldWriteSet = {
+  id: string;
+  adapter: AdapterSession;
+  settling?: Promise<void>;
+  /** The action that left the set held, by its dispatch-relevant fields only (requestKeyFor with dispatchOnly): the identical action is not dispatched again. */
+  dispatchKey: string;
+};
 type PendingApproval = {
   request_id: string;
   binding: string;
@@ -97,7 +117,47 @@ type PendingApproval = {
   session_id: string;
   summary: ApprovalSummary;
   baselineRevision?: number;
+  hold?: HeldWriteSet;
+  /** The broker approved the request through a standing site grant (summary.grant): it is consumed like any approval, never twice. */
+  granted?: ApprovalGrantedBy;
 };
+/** How a request ended, by request id (until it would have expired): what adl_approvals reports for an explicit request_id. */
+type EndedApproval = {
+  expires: number;
+  status: TerminalApproval;
+  summary: ApprovalSummary;
+  /** Held writes only: true when the requests were released into the network. */
+  sent?: boolean;
+  sentAt?: number;
+  response_status?: number;
+  hold?: { id: string; adapter: AdapterSession };
+  /** The adapter reported how the released set ended: sent is final (true only when every request reached the network fetch). */
+  outcomeKnown?: boolean;
+  granted?: ApprovalGrantedBy;
+};
+type ApprovalRow = {
+  request_id: string;
+  status: ApprovalStatus;
+  expires_at: number;
+  summary: ApprovalSummary;
+  sent?: boolean;
+  response_status?: number;
+  /** Decided by a standing site grant instead of an individual answer. */
+  granted?: ApprovalGrantedBy;
+};
+/** The agent's error for write requests held for a human: the handler has run, the request id is the way forward (never an identical retry). */
+function heldRequestError(requestId: string) {
+  const error = new AdlError('E_APPROVAL_REQUIRED', 'request_requires_approval', { page_script_ran: true });
+  error.requestId = requestId;
+  return error;
+}
+const HELD_DETAIL_LINES = 25;
+const HELD_DETAIL_BYTES = 8192;
+/** adl_approvals waits at most this long for a released request's answer, so that the observation that follows sees the page's reaction. */
+const HELD_RESPONSE_WAIT_MS = 1500;
+const HELD_WATCH_MS = 500;
+/** After a site grant released an action's writes, the act waits this long (the adapter's settle quiet window) before it observes the page's reaction. */
+const HELD_SETTLE_MS = 60;
 function canonical(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(canonical);
   if (value && typeof value === 'object')
@@ -125,19 +185,30 @@ function submissionRequest(error: AdlError, revision: number) {
   if (error.requestId) next.requestId = error.requestId;
   return next;
 }
+/** The origin of an http(s) URL, or undefined when it does not parse. */
+function originOf(url: string): string | undefined {
+  try {
+    return new URL(url).origin;
+  } catch {
+    return undefined;
+  }
+}
 function badArgument(error: { issues: readonly { path: readonly PropertyKey[] }[] }, known: readonly string[]) {
   const key = error.issues[0]?.path[0];
   return invalid(typeof key === 'string' && known.includes(key) ? key : 'request');
 }
-// Blocked-request totals split by who caused them: the action's own work (navigation, fetch/XHR, writes) versus unrelated subresources.
-function tallyBlocks(warnings: NetworkWarning[] | undefined) {
-  let action = 0,
-    subresource = 0;
-  for (const w of warnings ?? []) {
-    if (isActionNetworkBlock(w)) action += w.count;
-    else subresource += w.count;
+// Adapters that do not scope blocks to the action (no AdapterActResult.blocks) are reported by the growth of their snapshot warnings: the counts
+// that are new since before the action, per warning class.
+function newBlocks(before: NetworkWarning[] | undefined, after: NetworkWarning[] | undefined): NetworkWarning[] {
+  const keyOf = (w: NetworkWarning) => JSON.stringify([w.code, w.resource_type, w.method, w.origin]);
+  const seen = new Map<string, number>();
+  for (const w of before ?? []) seen.set(keyOf(w), (seen.get(keyOf(w)) ?? 0) + w.count);
+  const fresh: NetworkWarning[] = [];
+  for (const w of after ?? []) {
+    const grown = w.count - (seen.get(keyOf(w)) ?? 0);
+    if (grown > 0) fresh.push({ ...w, count: grown });
   }
-  return { action, subresource };
+  return fresh;
 }
 // URL-opened targets live in a bounded per-process registry; policy.browserTargets (trusted configuration) is never mutated by them.
 const URL_TARGET_LIMIT = 64;
@@ -159,6 +230,10 @@ export class Engine {
   private readonly approvalPending = new Map<string, PendingApproval>();
   /** Bindings whose request ended (until it would have expired): what ended it decides the refusal an identical retry gets. */
   private readonly approvalTerminal = new Map<string, { expires: number; status: TerminalApproval }>();
+  /** The same endings by request id, with the summary and (held writes) whether the requests were sent: adl_approvals reports them for an explicit request_id. */
+  private readonly approvalEnded = new Map<string, EndedApproval>();
+  /** Held-writes settlements in progress, by request id: a report of the request waits for its ending to be complete. */
+  private readonly heldSettlements = new Map<string, Promise<void>>();
   private queue: Promise<unknown> = Promise.resolve();
   private readonly sessionQueues = new Map<string, Promise<unknown>>();
   private desktopLane: Promise<unknown> | undefined;
@@ -300,7 +375,7 @@ export class Engine {
         same_origin_iframe: true,
         cross_origin_iframe_approval: false,
       },
-      version: '0.1.8',
+      version: '0.1.9',
       transport: 'stdio',
       modes: [
         'strict_isolated',
@@ -559,12 +634,20 @@ export class Engine {
   private get(id: string): Session {
     const s = this.sessions.get(id);
     if (!s || s.expires <= Date.now()) throw new AdlError('E_TARGET_NOT_FOUND');
-    s.expires = Date.now() + this.policy.sessionTtlMs;
+    // An access renews the idle time-to-live, but never takes back the time a pending hold needs the session for.
+    s.expires = Math.max(Date.now() + this.policy.sessionTtlMs, s.keepUntil ?? 0);
     return s;
   }
   private async audit(
     event: string,
-    fields: { session_id?: string; task_id?: string; action?: string; code?: string } = {},
+    fields: {
+      session_id?: string;
+      task_id?: string;
+      action?: string;
+      code?: string;
+      request_id?: string;
+      origin?: string;
+    } = {},
   ) {
     const audit_id = `a_${randomUUID()}`;
     if (this.policy.auditPath) {
@@ -590,9 +673,176 @@ export class Engine {
   private async invalidateApproval(sessionId: string) {
     const entry = this.approvalPending.get(sessionId);
     if (!entry) return;
+    // Held writes are aborted with the approval (and a decision already being carried out is awaited, not raced).
+    if (entry.hold) return this.settleHold(entry, 'invalidated', true);
     this.approvalPending.delete(sessionId);
     this.approvalTerminal.set(entry.binding, { expires: entry.expires_at, status: 'invalidated' });
+    this.recordEnded(entry, 'invalidated');
     await this.approval?.request('DELETE', `/v1/requests/${entry.request_id}`, entry).catch(() => undefined);
+  }
+  /** Remembers how a request ended, by request id, until it would have expired (bounded; the oldest endings go first). */
+  private recordEnded(
+    entry: PendingApproval,
+    status: TerminalApproval,
+    extra: {
+      sent?: boolean;
+      sentAt?: number;
+      hold?: { id: string; adapter: AdapterSession };
+      granted?: ApprovalGrantedBy;
+    } = {},
+  ) {
+    for (const [id, ended] of this.approvalEnded) if (ended.expires <= Date.now()) this.approvalEnded.delete(id);
+    while (this.approvalEnded.size >= 128) this.approvalEnded.delete(this.approvalEnded.keys().next().value!);
+    this.approvalEnded.set(entry.request_id, { expires: entry.expires_at, status, summary: entry.summary, ...extra });
+  }
+  /** Whether the broker approved this request through a standing site grant: only a request the engine itself offered the grant for (summary.grant) can be. */
+  private grantedBy(entry: PendingApproval, reply: ApprovalReply): ApprovalGrantedBy | undefined {
+    return reply.granted === 'site_writes' && reply.status !== 'pending' && entry.summary.grant
+      ? 'site_writes'
+      : undefined;
+  }
+  /**
+   * The standing-grant scope a human may give for a write to `origin`, or undefined when it must be asked every time: credentials, money-like
+   * labels or URLs, origins outside the grants, anything but ask mode with a broker. Page text can only remove eligibility, never add it.
+   */
+  private siteGrantFor(origin: string, labels: string[], urls: string[], secret: boolean): SiteWriteGrant | undefined {
+    if (secret || !this.approval || this.policy.operationMode !== 'ask' || this.policy.allowAllOperations)
+      return undefined;
+    try {
+      const url = new URL(origin);
+      if (!['http:', 'https:'].includes(url.protocol) || url.origin !== origin) return undefined;
+    } catch {
+      return undefined;
+    }
+    if (!this.policy.allowedOrigins.includes(origin)) return undefined;
+    if (labels.some(isMoneyLike) || urls.some(isMoneyLikeUrl)) return undefined;
+    return { scope: 'site_writes', origin };
+  }
+  /**
+   * Ends the approval of held writes exactly once (concurrent callers share the same settlement): an approved request is consumed at the broker and
+   * its requests released only if the consumption was ours, the operation is still allowed and it has not expired; every other ending aborts them.
+   * withdraw=true also withdraws the request at the broker (the ending did not come from the broker).
+   */
+  private settleHold(entry: PendingApproval, status: ApprovalStatus | 'abandoned', withdraw = false): Promise<void> {
+    const hold = entry.hold!;
+    if (!hold.settling) {
+      const settling = this.performSettle(entry, hold, status, withdraw);
+      hold.settling = settling;
+      this.heldSettlements.set(entry.request_id, settling);
+      const done = () => {
+        if (this.heldSettlements.get(entry.request_id) === settling) this.heldSettlements.delete(entry.request_id);
+      };
+      settling.then(done, done);
+    }
+    return hold.settling;
+  }
+  private async performSettle(
+    entry: PendingApproval,
+    hold: HeldWriteSet,
+    status: ApprovalStatus | 'abandoned',
+    withdraw: boolean,
+  ) {
+    // The entry stays pending until the ending is complete: the identical action keeps getting this request, and closing the session awaits a release in flight.
+    try {
+      await this.endHold(entry, hold, status, withdraw);
+    } finally {
+      if (this.approvalPending.get(entry.session_id) === entry) this.approvalPending.delete(entry.session_id);
+      // The session no longer has to outlive the request: its idle time-to-live applies again from now.
+      const s = this.sessions.get(entry.session_id);
+      if (s?.keepUntil !== undefined && s.keepUntil === entry.expires_at + 30000) {
+        s.keepUntil = undefined;
+        s.expires = Math.min(s.expires, Date.now() + this.policy.sessionTtlMs);
+      }
+    }
+  }
+  private async endHold(
+    entry: PendingApproval,
+    hold: HeldWriteSet,
+    status: ApprovalStatus | 'abandoned',
+    withdraw: boolean,
+  ) {
+    let abort: HeldWriteAbortOutcome =
+      status === 'denied'
+        ? 'denied'
+        : status === 'expired' || entry.expires_at <= Date.now()
+          ? 'expired'
+          : 'invalidated';
+    let release = false;
+    if (status === 'approved') {
+      try {
+        const consumed = await this.approval!.request('DELETE', `/v1/requests/${entry.request_id}`, entry);
+        release =
+          consumed.status === 'consumed' &&
+          consumed.consumed_now === true &&
+          this.operationAllowed() &&
+          !this.stopped &&
+          entry.expires_at > Date.now();
+      } catch {
+        release = false;
+      }
+      abort = entry.expires_at <= Date.now() ? 'expired' : 'invalidated';
+    }
+    let sent = false;
+    if (release) {
+      try {
+        await hold.adapter.releaseHeldWrites!(hold.id, entry.expires_at);
+        sent = true;
+      } catch {
+        // The page abandoned its requests (or the set is gone) before they could leave: nothing was sent, and a spent approval is not restored.
+        abort = 'invalidated';
+      }
+    }
+    if (!sent) await Promise.resolve(hold.adapter.abortHeldWrites?.(hold.id, abort)).catch(() => undefined);
+    const ended: TerminalApproval = sent
+      ? 'consumed'
+      : abort === 'denied'
+        ? 'denied'
+        : abort === 'expired'
+          ? 'expired'
+          : 'invalidated';
+    this.approvalTerminal.set(entry.binding, { expires: entry.expires_at, status: ended });
+    this.recordEnded(entry, ended, {
+      sent,
+      ...(sent ? { sentAt: Date.now() } : {}),
+      hold: { id: hold.id, adapter: hold.adapter },
+      ...(entry.granted ? { granted: entry.granted } : {}),
+    });
+    if (withdraw && !sent && status !== 'approved')
+      await this.approval?.request('DELETE', `/v1/requests/${entry.request_id}`, entry).catch(() => undefined);
+    await this.audit(sent ? 'held_request_released' : 'held_request_aborted', {
+      session_id: entry.session_id,
+      ...(sent ? {} : { code: abort }),
+    }).catch(() => undefined);
+  }
+  /** One look at a pending held-writes request: settles it when the page abandoned the requests, the request expired or the broker decided it. */
+  private async checkHold(entry: PendingApproval) {
+    const hold = entry.hold!;
+    if (hold.settling) return hold.settling;
+    if (!this.operationAllowed() || this.stopped) return this.settleHold(entry, 'invalidated', true);
+    if (hold.adapter.heldWritesAlive?.(hold.id) === false) return this.settleHold(entry, 'abandoned', true);
+    if (entry.expires_at <= Date.now()) return this.settleHold(entry, 'expired', true);
+    let reply: ApprovalReply;
+    try {
+      reply = await this.approval!.request('GET', `/v1/requests/${entry.request_id}`, entry);
+    } catch {
+      return this.settleHold(entry, 'invalidated', true);
+    }
+    if (reply.status === 'pending') return;
+    // A site grant approved a request that was queued behind the modal: the same release as after an individual approval.
+    entry.granted ??= this.grantedBy(entry, reply);
+    return this.settleHold(entry, reply.status);
+  }
+  /** Learns of the human's decision on held writes without anyone polling adl_approvals, and notices requests the page abandoned. Never takes a session lane. */
+  private async watchHold(entry: PendingApproval) {
+    try {
+      while (this.approvalPending.get(entry.session_id) === entry && !entry.hold!.settling) {
+        await delay(HELD_WATCH_MS, undefined, { signal: this.master.signal, ref: false });
+        if (this.approvalPending.get(entry.session_id) !== entry) return;
+        await this.checkHold(entry);
+      }
+    } catch {
+      // The engine is shutting down: destroying the session aborts the held requests.
+    }
   }
   private stopAdapter(adapter: AdapterSession): Promise<void> {
     const current = this.closures.get(adapter);
@@ -840,6 +1090,10 @@ export class Engine {
         },
         this.policy.actionTimeoutMs,
         cancel,
+      );
+      // Ask mode with an approver: writes the page sends during an action are held for a human instead of blocked (adapters without holding ignore it).
+      instance.setWriteHolding?.(
+        this.policy.operationMode === 'ask' && !!this.approval && !this.policy.allowAllOperations,
       );
       const raw = this.boundSnapshot(
         await this.deadline(sig => instance!.snapshot(sig), this.policy.actionTimeoutMs, cancel),
@@ -1270,6 +1524,7 @@ export class Engine {
               content,
               total_length: read.total_length,
               next_offset: next,
+              ...(read.hidden_text ? { hidden_text: true as const } : {}),
             },
           };
         };
@@ -1283,17 +1538,27 @@ export class Engine {
         if (!lo && chars.length) throw new AdlError('E_RESOURCE_LIMIT');
         return make(lo);
       }
-      return this.snapshots.observe(s.id, s.revision, {
+      const result = this.snapshots.observe(s.id, s.revision, {
         ...options,
         token_budget: options.token_budget ?? this.policy.defaultTokenBudget,
         element_limit: this.policy.maxElements,
       });
+      // Warnings are reported once: the first page of an observation delivers them, later pages and observations of the same revision do not repeat
+      // them, and the adapter forgets the blocks up to this snapshot (a block that happens later still makes a new revision).
+      if (options.cursor === undefined && result.warnings?.length) {
+        this.snapshots.markWarningsDelivered(s.id, s.revision);
+        s.adapter.acknowledgeWarnings?.(s.raw.warningSeq ?? Number.MAX_SAFE_INTEGER);
+      }
+      return result;
     });
   }
   /**
    * Reports this engine's own approval requests. With waitMs (0-30000) it polls the broker every 500 ms until a request is decided, withdrawn or
-   * expired, the wait ends, or the caller / engine cancels: timed_out:true means every request it reported is still pending. It only reads: it never
-   * decides, consumes or withdraws a request, and it holds no session lane.
+   * expired, the wait ends, or the caller / engine cancels: timed_out:true means every request it reported is still pending. For ordinary requests
+   * it only reads: it never decides, consumes or withdraws one, and it holds no session lane. Held writes are the exception: learning of their
+   * decision (or that the page abandoned them) carries it out, as the engine's own watcher does, and the settled row is reported at once.
+   * Requests that already ended are listed only for an explicit request_id (with sent / response_status for held writes); without one only pending
+   * requests are listed.
    */
   async approvals(requestId?: string, waitMs = 0, cancel?: AbortSignal) {
     if (!Number.isInteger(waitMs) || waitMs < 0 || waitMs > 30000) throw invalid('wait_ms');
@@ -1305,16 +1570,45 @@ export class Engine {
     let waited = false;
     for (;;) {
       if (signal.aborted) throw cancelled();
-      const requests = [];
-      if (this.approval)
+      const requests: ApprovalRow[] = [];
+      if (this.approval) {
+        // A request that is being settled (by the watcher, another report or the session closing) is reported when its ending is complete.
+        for (const [id, settling] of [...this.heldSettlements])
+          if (!requestId || id === requestId) await settling.catch(() => undefined);
         for (const entry of [...this.approvalPending.values()].filter(p => !requestId || p.request_id === requestId)) {
+          if (entry.hold) {
+            await this.checkHold(entry);
+            const ended = this.approvalEnded.get(entry.request_id);
+            requests.push(
+              ended && entry.hold.settling
+                ? await this.endedRow(entry.request_id, ended, signal)
+                : {
+                    request_id: entry.request_id,
+                    status: 'pending',
+                    expires_at: entry.expires_at,
+                    summary: entry.summary,
+                  },
+            );
+            continue;
+          }
           // The broker forgets a request once it has expired, so one past its expiry is reported without asking.
-          const status =
+          const reply =
             entry.expires_at <= Date.now()
-              ? ('expired' as const)
-              : (await this.approval.request('GET', `/v1/requests/${entry.request_id}`, entry)).status;
-          requests.push({ request_id: entry.request_id, status, expires_at: entry.expires_at, summary: entry.summary });
+              ? undefined
+              : await this.approval.request('GET', `/v1/requests/${entry.request_id}`, entry);
+          const granted = entry.granted ?? (reply && this.grantedBy(entry, reply));
+          requests.push({
+            request_id: entry.request_id,
+            status: reply?.status ?? 'expired',
+            expires_at: entry.expires_at,
+            summary: entry.summary,
+            ...(granted ? { granted } : {}),
+          });
         }
+        const ended = requestId ? this.approvalEnded.get(requestId) : undefined;
+        if (requestId && ended && ended.expires > Date.now() && !requests.some(r => r.request_id === requestId))
+          requests.push(await this.endedRow(requestId, ended, signal));
+      }
       const pending = requests.length > 0 && requests.every(r => r.status === 'pending');
       if (!pending || Date.now() >= deadline)
         return {
@@ -1331,6 +1625,33 @@ export class Engine {
       }
     }
   }
+  /** The row of a request that ended. Released held writes also report the page request's answer, waiting briefly for one that is still on its way. */
+  private async endedRow(requestId: string, ended: EndedApproval, signal?: AbortSignal): Promise<ApprovalRow> {
+    const adapter = ended.hold?.adapter;
+    const outcome = () => (ended.hold ? adapter?.heldWriteOutcome?.(ended.hold.id) : undefined);
+    if (ended.sent && !ended.outcomeKnown && adapter?.heldWriteOutcome) {
+      // Only for a short while after the release: a request that is never answered does not slow every later report.
+      const until = (ended.sentAt ?? 0) + HELD_RESPONSE_WAIT_MS;
+      while (!outcome() && Date.now() < until && !signal?.aborted)
+        await delay(25, undefined, signal ? { signal } : undefined).catch(() => undefined);
+      const result = outcome();
+      if (result) {
+        ended.outcomeKnown = true;
+        if (result.response_status !== undefined) ended.response_status = result.response_status;
+        // Released is not sent: a request refused at dispatch (guard, DNS, the expiry re-check) never left, and a set is sent whole or not at all.
+        if ((result.refused ?? 0) > 0) ended.sent = false;
+      }
+    }
+    return {
+      request_id: requestId,
+      status: ended.status,
+      expires_at: ended.expires,
+      summary: ended.summary,
+      ...(ended.sent !== undefined ? { sent: ended.sent } : {}),
+      ...(ended.response_status !== undefined ? { response_status: ended.response_status } : {}),
+      ...(ended.granted ? { granted: ended.granted } : {}),
+    };
+  }
   /** Creates (or resolves) the approval for an action: always throws E_APPROVAL_REQUIRED with the new request id, or returns the expiry of the approval it consumed. */
   private async approvalFor(
     s: Session,
@@ -1338,8 +1659,20 @@ export class Engine {
     expected: number,
     proof: ApprovalProof,
     actionEvidence?: { navigation: string; element?: string },
+    holdId?: string,
   ): Promise<number> {
-    return (await this.resolveApproval(s, action, expected, proof, actionEvidence, true))!;
+    return (await this.resolveApproval(s, action, expected, proof, actionEvidence, true, holdId))!;
+  }
+  /**
+   * Identifies the request a human approves independent of response shaping: the same action on the same session and target.
+   * dispatchOnly also leaves out expected_target, an extra check that changes nothing about what is dispatched: the key of "this is the same click".
+   */
+  private requestKeyFor(s: Session, action: Omit<Action, 'action'> & { action: string }, dispatchOnly = false): string {
+    const { include_diff: _format, timeout_ms: _deadline, expected_target: check, ...rest } = action as Action;
+    const request = dispatchOnly ? rest : { ...rest, ...(check !== undefined ? { expected_target: check } : {}) };
+    return createHmac('sha256', this.approvalKey)
+      .update(JSON.stringify(canonical({ request, session: s.id, target: s.target.target_id })))
+      .digest('hex');
   }
   /**
    * Resolves the pending approval for this session's identical action: pending -> E_APPROVAL_REQUIRED with the same request id, denied, expired or
@@ -1353,21 +1686,25 @@ export class Engine {
     proof: ApprovalProof,
     actionEvidence: { navigation: string; element?: string } | undefined,
     create: boolean,
+    holdId?: string,
   ): Promise<number | undefined> {
     if (!this.operationAllowed()) throw new AdlError('E_CANCELLED', 'emergency_stop');
     if (!this.approval) {
       if (!create) return undefined;
       throw new AdlError('E_APPROVAL_REQUIRED', 'approval_unavailable');
     }
-    const existing = this.approvalPending.get(s.id);
+    let existing = this.approvalPending.get(s.id);
+    // Held writes of an expired request must be aborted, not forgotten.
+    if (existing?.hold && existing.expires_at <= Date.now()) {
+      await this.settleHold(existing, 'expired', true);
+      existing = undefined;
+    }
     const freshness = actionEvidence
       ? { actionEvidence, actionEpoch: s.actionEpoch }
       : { revision: expected, fingerprint: s.raw.fingerprint };
     // Response shaping and client deadlines do not change what a human approves.
     const { include_diff: _format, timeout_ms: _deadline, ...request } = action as Action;
-    const requestKey = createHmac('sha256', this.approvalKey)
-      .update(JSON.stringify(canonical({ request, session: s.id, target: s.target.target_id })))
-      .digest('hex');
+    const requestKey = this.requestKeyFor(s, action);
     const binding = createHmac('sha256', this.approvalKey)
       .update(
         JSON.stringify(
@@ -1392,12 +1729,14 @@ export class Engine {
       if (existing.binding !== binding && existing.requestKey !== requestKey && existing.expires_at > Date.now())
         throw new AdlError('E_APPROVAL_REQUIRED', 'approval_pending_other_action');
       if (existing.binding !== binding || existing.expires_at <= Date.now()) {
-        this.approvalPending.delete(s.id);
-        await this.approval.request('DELETE', `/v1/requests/${existing.request_id}`, existing).catch(() => undefined);
-        throw new AdlError(
-          'E_STALE_STATE',
-          existing.expires_at <= Date.now() ? 'approval_expired' : 'approval_target_changed',
-        );
+        const expired = existing.expires_at <= Date.now();
+        if (existing.hold) await this.settleHold(existing, expired ? 'expired' : 'invalidated', true);
+        else {
+          this.approvalPending.delete(s.id);
+          this.recordEnded(existing, expired ? 'expired' : 'invalidated');
+          await this.approval.request('DELETE', `/v1/requests/${existing.request_id}`, existing).catch(() => undefined);
+        }
+        throw new AdlError('E_STALE_STATE', expired ? 'approval_expired' : 'approval_target_changed');
       }
       const reply = await this.approval.request('GET', `/v1/requests/${existing.request_id}`, existing);
       if (reply.status === 'pending') {
@@ -1411,6 +1750,12 @@ export class Engine {
         expires: existing.expires_at,
         status: reply.status === 'approved' ? 'consumed' : (reply.status as TerminalApproval),
       });
+      const granted = existing.granted ?? this.grantedBy(existing, reply);
+      this.recordEnded(
+        existing,
+        reply.status === 'approved' ? 'consumed' : (reply.status as TerminalApproval),
+        granted ? { granted } : {},
+      );
       if (reply.status === 'denied' || reply.status === 'expired') throw approvalRefusal(reply.status);
       if (reply.status !== 'approved' || !this.operationAllowed()) throw approvalRefusal('invalidated');
       const consumed = await this.approval.request('DELETE', `/v1/requests/${existing.request_id}`, existing);
@@ -1424,15 +1769,19 @@ export class Engine {
       return existing.expires_at;
     }
     if (!create) return undefined;
-    for (const entry of this.approvalPending.values())
-      if (entry.expires_at <= Date.now()) this.approvalPending.delete(entry.session_id);
+    for (const entry of [...this.approvalPending.values()])
+      if (entry.expires_at <= Date.now()) {
+        if (entry.hold) await this.settleHold(entry, 'expired', true);
+        else this.approvalPending.delete(entry.session_id);
+      }
     if (this.approvalPending.size >= 8 || this.approvalTerminal.size + this.approvalPending.size >= 128)
       throw new AdlError('E_RESOURCE_LIMIT');
     const raw = action.value,
       value = typeof raw === 'string' ? describeApprovalValue(raw, proof.risk === 'credential') : undefined;
     // Browser summaries name the http origin; desktop summaries name the configured application (the window title is the untrusted target label).
     const summary: ApprovalSummary = {
-      action: action.action,
+      // Held writes: the control already ran; what the human approves is the request it left waiting.
+      action: holdId ? 'send_request' : action.action,
       surface: s.target.surface,
       target: redactString(s.target.label).slice(0, 128),
       ...(proof.origin !== undefined ? { origin: proof.origin } : {}),
@@ -1442,6 +1791,8 @@ export class Engine {
       risk: value?.kind === 'secret' || proof.risk === 'credential' ? 'credential' : 'consequential',
       ...(proof.details ? { details: proof.details } : {}),
       ...(value ? { value } : {}),
+      // Only a request that carries no credential can offer the human the standing site grant.
+      ...(proof.grant && value?.kind !== 'secret' && proof.risk !== 'credential' ? { grant: proof.grant } : {}),
     };
     const entry: PendingApproval = {
       request_id: randomUUID(),
@@ -1451,6 +1802,9 @@ export class Engine {
       session_id: s.id,
       summary,
       ...(actionEvidence ? { baselineRevision: expected } : {}),
+      ...(holdId !== undefined
+        ? { hold: { id: holdId, adapter: s.adapter, dispatchKey: this.requestKeyFor(s, action, true) } }
+        : {}),
     };
     this.approvalPending.set(s.id, entry);
     try {
@@ -1463,12 +1817,24 @@ export class Engine {
         expires_at: entry.expires_at,
         summary,
       });
-      if (reply.status !== 'pending') throw approvalRefusal(reply.status === 'approved' ? 'invalidated' : reply.status);
+      // Nothing but a standing site grant (offered in summary.grant) may approve a request before a human has seen it.
+      if (reply.status === 'approved' && reply.granted === 'site_writes' && summary.grant)
+        entry.granted = 'site_writes';
+      else if (reply.status !== 'pending')
+        throw approvalRefusal(reply.status === 'approved' ? 'invalidated' : reply.status);
     } catch (error) {
       this.approvalPending.delete(s.id);
       throw error;
     }
-    const error = new AdlError('E_APPROVAL_REQUIRED');
+    if (entry.granted)
+      await this.audit('approval_granted_by_site', {
+        session_id: s.id,
+        action: summary.action,
+        request_id: entry.request_id,
+        origin: summary.grant!.origin,
+      }).catch(() => undefined);
+    // Granted: a form retries at once and consumes it; held writes are released inside the same act (requestHeldWrites).
+    const error = new AdlError('E_APPROVAL_REQUIRED', undefined, entry.granted ? { approved: true } : {});
     error.requestId = entry.request_id;
     throw error;
   }
@@ -1528,12 +1894,17 @@ export class Engine {
     }
     const again = await s.adapter.prepareAction!(action, signal ?? this.master.signal);
     if (again.submission !== 'plain') throw new AdlError('E_STALE_STATE');
+    // A urlencoded same-origin POST is a write the human may grant for the site; a GET form (no network facts) is asked every time.
+    const grant =
+      again.network && originOf(again.network.url) === again.origin
+        ? this.siteGrantFor(again.origin, again.labels ?? [again.name], [again.network.url], false)
+        : undefined;
     try {
       await this.approvalFor(
         s,
         action,
         revision,
-        { ...again, risk: 'consequential' },
+        { ...again, risk: 'consequential', ...(grant ? { grant } : {}) },
         this.freshnessFor(s, revision, action),
       );
     } catch (created) {
@@ -1543,6 +1914,131 @@ export class Engine {
     }
     // approvalFor consumed an approval instead of opening one: the form has not been sent, so report the cancelled submission.
     throw blocked;
+  }
+  /**
+   * Ask mode: the action's handler sent write requests (fetch/XHR POST, PUT, PATCH, DELETE) and the adapter holds them unsent. Open one approval
+   * for the whole set from the exact request descriptions (the bodies never leave the adapter), bound to the hold: approving releases exactly those
+   * requests, once (settleHold). Throws: the request id for the agent to wait on, or the reason none could be made (the requests are aborted
+   * then). The dispatched action has run its handler, so the identical action is not the way to finish and is never dispatched again.
+   * Returns only when a standing site grant approved the set at the broker: it is then consumed and released inside this call (releaseGranted).
+   */
+  private async requestHeldWrites(
+    s: Session,
+    action: Action,
+    liveProof: ApprovalProof | undefined,
+    error: HeldWritesError,
+    signal?: AbortSignal,
+  ): Promise<GrantedApprovalResult> {
+    const { id, requests } = error.hold;
+    const abort = (outcome: HeldWriteAbortOutcome) =>
+      Promise.resolve(s.adapter.abortHeldWrites?.(id, outcome)).catch(() => undefined);
+    try {
+      // The dispatched action moved the page on: the revision the agent observes next already includes its reaction.
+      await this.refresh(s, signal);
+    } catch (refreshError) {
+      await abort('invalidated');
+      throw refreshError;
+    }
+    const details = requests.flatMap(request => request.details);
+    if (
+      !requests.length ||
+      details.length > HELD_DETAIL_LINES ||
+      details.some(line => typeof line !== 'string' || line.length > 8192 || line.includes('\0')) ||
+      Buffer.byteLength(JSON.stringify({ details }), 'utf8') > HELD_DETAIL_BYTES
+    ) {
+      // The broker shows at most 25 lines in all: a set that cannot be described completely is never approved on a shortened description.
+      await abort('not_approvable');
+      throw new AdlError('E_APPROVAL_REQUIRED', 'request_not_approvable', { page_script_ran: true });
+    }
+    // One destination origin for the whole set, no credential, no money-like control or URL: the human may grant further writes to that site.
+    const origins = new Set(requests.map(request => originOf(request.url)));
+    const destination = origins.size === 1 ? [...origins][0] : undefined;
+    const secret = requests.some(request => request.secret);
+    const grant =
+      destination !== undefined
+        ? this.siteGrantFor(
+            destination,
+            liveProof?.labels ?? [liveProof?.name ?? ''],
+            requests.map(request => request.url),
+            secret || liveProof?.risk === 'credential',
+          )
+        : undefined;
+    const proof: ApprovalProof = {
+      proof: createHash('sha256')
+        .update(
+          JSON.stringify(
+            canonical({
+              element: liveProof?.proof ?? null,
+              hold: id,
+              requests: requests.map(r => [r.method, r.url, r.content_type, r.body_sha256, r.body_length]),
+            }),
+          ),
+        )
+        .digest('hex'),
+      risk: secret ? 'credential' : 'consequential',
+      role: liveProof?.role ?? 'page',
+      name: liveProof?.name ?? '',
+      ...(liveProof?.origin !== undefined ? { origin: liveProof.origin } : {}),
+      details,
+      ...(grant ? { grant } : {}),
+    };
+    try {
+      await this.approvalFor(s, action, s.revision, proof, undefined, id);
+    } catch (created) {
+      const entry = this.approvalPending.get(s.id);
+      if (
+        created instanceof AdlError &&
+        created.code === 'E_APPROVAL_REQUIRED' &&
+        created.requestId &&
+        entry?.request_id === created.requestId &&
+        entry.hold?.id === id
+      ) {
+        // A standing site grant approved it at the broker: consume and release inside this act (the same settlement as after an individual approval).
+        if (entry.granted) return this.releaseGranted(entry, signal);
+        try {
+          // The requests stay held up to the approval's expiry, so the session must outlive it.
+          s.keepUntil = entry.expires_at + 30000;
+          s.expires = Math.max(s.expires, s.keepUntil);
+          void this.watchHold(entry);
+          await this.audit('held_request_pending', { session_id: s.id, action: action.action }).catch(() => undefined);
+        } catch (unexpected) {
+          await this.settleHold(entry, 'invalidated', true);
+          throw unexpected;
+        }
+        throw heldRequestError(entry.request_id);
+      }
+      await abort('invalidated');
+      // The handler has run even though no request could be opened (another approval is pending, a limit, the broker): say so.
+      if (created instanceof AdlError) created.detail.page_script_ran = true;
+      throw created;
+    }
+    // Unreachable: the hold id makes the binding unique, so approvalFor always opens a request. Never leave requests held without one.
+    await abort('invalidated');
+    throw new AdlError('E_INTERNAL');
+  }
+  /**
+   * The broker approved held writes through a standing site grant: consume the approval and release exactly those requests now, by the same
+   * settlement as an individual approval (consumed once, operations still allowed, not expired). Returns the sent set with the page's answer, or
+   * throws the refusal when nothing (or not the whole set) left: the handler has run either way.
+   */
+  private async releaseGranted(entry: PendingApproval, signal?: AbortSignal): Promise<GrantedApprovalResult> {
+    await this.settleHold(entry, 'approved');
+    const ended = this.approvalEnded.get(entry.request_id);
+    if (ended?.sent) {
+      // Waits briefly for the page request's answer, and learns whether a request was refused at dispatch (then the set was not sent).
+      await this.endedRow(entry.request_id, ended, signal);
+      if (ended.sent)
+        return {
+          request_id: entry.request_id,
+          status: 'consumed',
+          sent: true,
+          granted: 'site_writes',
+          ...(ended.response_status !== undefined ? { response_status: ended.response_status } : {}),
+        };
+    }
+    const refusal = approvalRefusal(ended && ended.status !== 'consumed' ? ended.status : 'invalidated');
+    refusal.detail.page_script_ran = true;
+    throw refusal;
   }
   private async action(s: Session, action: Action, expected: number, signal?: AbortSignal) {
     action = {
@@ -1578,7 +2074,9 @@ export class Engine {
     if (!['read_state', 'wait_for'].includes(action.action) && expected > s.revision)
       throw new AdlError('E_STALE_STATE', 'revision_ahead', { argument: 'expected_revision' });
     if (!['read_state', 'wait_for'].includes(action.action) && s.revision !== expected && !actionEvidence) {
-      await this.invalidateApproval(s.id);
+      // Held writes are bound to the exact bytes of the page's requests, not to the DOM revision: an agent that acts on an old revision must not
+      // abort the save a human is looking at.
+      if (!this.approvalPending.get(s.id)?.hold) await this.invalidateApproval(s.id);
       throw new AdlError('E_STALE_STATE');
     }
     if (action.action === 'read_state') return { ok: true, revision: s.revision };
@@ -1652,12 +2150,21 @@ export class Engine {
     if (modern) {
       if (!s.adapter.prepareAction) throw new AdlError('E_POLICY_DENIED');
       authorizeAction(action, element, true);
+      // The identical action while its writes are held for a human: the same request, nothing is dispatched again (the page's handler has run).
+      const holding = this.approvalPending.get(s.id);
+      if (holding?.hold && holding.hold.dispatchKey === this.requestKeyFor(s, action, true))
+        throw heldRequestError(holding.request_id);
       liveProof = await s.adapter.prepareAction(action, signal ?? this.master.signal);
       if (element?.sensitive) liveProof = { ...liveProof, risk: 'credential' };
       const sensitiveValue = typeof action.value === 'string' && describeApprovalValue(action.value).kind === 'secret';
-      // Standard mode has nobody to ask: a verb that may stay in the session is dispatched with the network closed (see armContainment).
+      // A verb that may stay in the session ("Delete") is dispatched with the network closed to new requests (see armContainment): standard mode
+      // has nobody to ask, and in ask mode (with an adapter that can hold writes) the only effect that can leave, a write request, is held for the
+      // human with its exact content; an adapter that cannot hold them keeps the approval before dispatch.
       const contained =
-        liveProof.contained && liveProof.risk === 'consequential' && this.policy.operationMode === 'standard';
+        liveProof.contained &&
+        liveProof.risk === 'consequential' &&
+        (this.policy.operationMode === 'standard' ||
+          (this.policy.operationMode === 'ask' && !!this.approval && typeof s.adapter.setWriteHolding === 'function'));
       if (sensitiveValue || (liveProof.risk !== 'ordinary' && !contained)) {
         if (this.policy.operationMode !== 'ask') throw new AdlError('E_APPROVAL_REQUIRED', 'requires_ask_mode');
         approvalExpires = await this.approvalFor(s, action, expected, liveProof, actionEvidence);
@@ -1740,7 +2247,9 @@ export class Engine {
     let acknowledged = false,
       dispatched = false;
     const beforeRevision = s.revision,
-      beforeBlocks = tallyBlocks(s.raw.warnings);
+      beforeWarnings = s.raw.warnings;
+    // Ask mode with an approver: a write the page sends during this action is held for a human instead of blocked.
+    const holdWrites = modern && this.policy.operationMode === 'ask' && !!this.approval;
     try {
       const outcome = await this.deadline(
         sig => {
@@ -1768,6 +2277,7 @@ export class Engine {
                         approvalProof: liveProof.proof,
                         approved,
                         ...(approvalExpires !== undefined ? { expires_at: approvalExpires } : {}),
+                        ...(holdWrites ? { holdWrites: true } : {}),
                       }
                     : {}),
                   ...(pointReference ? { pointReference } : {}),
@@ -1780,52 +2290,14 @@ export class Engine {
         signal,
       );
       acknowledged = true;
-      delete s.latestFrame;
-      await this.refresh(s, signal);
-      const audit_id = await this.audit('action_completed', { session_id: s.id, action: action.action });
-      // network_blocked reports only blocks the action itself caused (navigation, fetch/XHR, writes); unrelated blocked subresources are counted apart. Adapter notices (target_replaced) lead the list.
-      const blocks = tallyBlocks(s.raw.warnings),
-        networkBlocked = blocks.action > beforeBlocks.action,
-        subresourcesBlocked = blocks.subresource - beforeBlocks.subresource;
-      const warnings: (AdapterWarning | NetworkWarning)[] = [
-        ...((outcome as AdapterActResult | undefined)?.warnings ?? []),
-        ...(s.raw.warnings ?? []),
-      ];
-      let observation: Omit<ObserveResult, 'ok' | 'revision' | 'warnings'> | undefined,
-        observation_error: ReturnType<typeof safeError> | undefined;
-      if (action.include_diff) {
-        try {
-          // The outer result already carries ok, revision and warnings.
-          const {
-            ok: _ok,
-            revision: _revision,
-            warnings: _warnings,
-            ...nested
-          } = this.snapshots.observe(s.id, s.revision, {
-            token_budget: this.policy.defaultTokenBudget,
-            since_revision: beforeRevision,
-            element_limit: this.policy.maxElements,
-            representation: 'auto',
-          });
-          observation = nested;
-        } catch (error) {
-          observation_error = safeError(error);
-        }
-      }
-      return {
-        ok: true,
-        revision: s.revision,
-        audit_id,
-        // A navigation that landed on an error page (400 or higher) says so; observations carry the same field.
-        ...((action.action === 'navigate' || action.action === 'back') && s.raw.http_status !== undefined
-          ? { http_status: s.raw.http_status }
-          : {}),
-        ...(networkBlocked ? { network_blocked: true } : {}),
-        ...(subresourcesBlocked > 0 ? { subresources_blocked: subresourcesBlocked } : {}),
-        ...(warnings.length ? { warnings } : {}),
-        ...(observation ? { observation } : {}),
-        ...(observation_error ? { observation_error } : {}),
-      };
+      return await this.completeAction(
+        s,
+        action,
+        outcome as AdapterActResult | undefined,
+        beforeRevision,
+        beforeWarnings,
+        signal,
+      );
     } catch (error) {
       const safe = error instanceof AdlError ? error : new AdlError('E_INTERNAL');
       if (
@@ -1836,6 +2308,20 @@ export class Engine {
       )
         safe.mayHaveExecuted = true;
       if (safe.mayHaveExecuted) await this.destroy(s);
+      // The action left write requests held unsent in the browser: a human is asked for their exact content (throws), unless a standing site grant
+      // already approved them, in which case they have been sent and the action completes like any other.
+      if (error instanceof HeldWritesError && !safe.mayHaveExecuted) {
+        const released = await this.requestHeldWrites(s, action, liveProof, error, signal);
+        try {
+          return await this.completeAction(s, action, undefined, beforeRevision, beforeWarnings, signal, released);
+        } catch (completion) {
+          // The writes are out: failing to observe their effect may not be reported as a clean refusal.
+          const failed = completion instanceof AdlError ? completion : new AdlError('E_INTERNAL');
+          failed.mayHaveExecuted = true;
+          await this.destroy(s);
+          throw failed;
+        }
+      }
       if (
         plainAsk &&
         !approved &&
@@ -1846,6 +2332,75 @@ export class Engine {
         await this.requestBlockedSubmission(s, action, safe, signal);
       throw safe;
     }
+  }
+  /**
+   * The result of an action that was carried out: the page refreshed, the audit written, the blocks of its window and (include_diff) what changed.
+   * released is set when a standing site grant sent the action's held writes inside the act (the result then carries the approval and no blocks).
+   */
+  private async completeAction(
+    s: Session,
+    action: Action,
+    adapterResult: AdapterActResult | undefined,
+    beforeRevision: number,
+    beforeWarnings: NetworkWarning[] | undefined,
+    signal?: AbortSignal,
+    released?: GrantedApprovalResult,
+  ) {
+    // The page reacts to the answer of a released write after it was handed over: give it the adapter's quiet window before looking (timing only).
+    if (released) await delay(HELD_SETTLE_MS, undefined, signal ? { signal } : undefined).catch(() => undefined);
+    delete s.latestFrame;
+    await this.refresh(s, signal);
+    const audit_id = await this.audit('action_completed', { session_id: s.id, action: action.action });
+    // An action result carries exactly the blocks recorded between its dispatch and the end of its window (adapters without them: what is new in the
+    // snapshot warnings); anything older or later is reported once by the next observation. network_blocked reports only blocks the action itself
+    // caused (navigation, fetch/XHR, writes); unrelated blocked subresources are counted apart; write_blocked says a write (POST, PUT, PATCH, DELETE)
+    // was blocked, so the page's state was not saved. Adapter notices (target_replaced) lead the list.
+    // A set a site grant released had its window blocks adopted by the document when the act ended: the next observation reports them once.
+    const blocks = released ? [] : (adapterResult?.blocks ?? newBlocks(beforeWarnings, s.raw.warnings)),
+      networkBlocked = blocks.some(isActionNetworkBlock),
+      writeBlocked = blocks.some(isWriteBlock),
+      subresourcesBlocked = blocks
+        .filter(block => !isActionNetworkBlock(block))
+        .reduce((total, block) => total + block.count, 0);
+    const warnings: (AdapterWarning | NetworkWarning)[] = [...(adapterResult?.warnings ?? []), ...blocks];
+    let observation: Omit<ObserveResult, 'ok' | 'revision' | 'warnings'> | undefined,
+      observation_error: ReturnType<typeof safeError> | undefined;
+    if (action.include_diff) {
+      try {
+        // The outer result already carries ok, revision and warnings.
+        const {
+          ok: _ok,
+          revision: _revision,
+          warnings: _warnings,
+          ...nested
+        } = this.snapshots.observe(s.id, s.revision, {
+          token_budget: this.policy.defaultTokenBudget,
+          since_revision: beforeRevision,
+          element_limit: this.policy.maxElements,
+          representation: 'auto',
+        });
+        observation = nested;
+      } catch (error) {
+        observation_error = safeError(error);
+      }
+    }
+    return {
+      ok: true,
+      revision: s.revision,
+      audit_id,
+      // The held writes of this action were sent by a standing site grant: nothing is left to wait for (adl_approvals only reports it).
+      ...(released ? { approval: released } : {}),
+      // A navigation that landed on an error page (400 or higher) says so; observations carry the same field.
+      ...((action.action === 'navigate' || action.action === 'back') && s.raw.http_status !== undefined
+        ? { http_status: s.raw.http_status }
+        : {}),
+      ...(networkBlocked ? { network_blocked: true } : {}),
+      ...(subresourcesBlocked > 0 ? { subresources_blocked: subresourcesBlocked } : {}),
+      ...(writeBlocked ? { write_blocked: true } : {}),
+      ...(warnings.length ? { warnings } : {}),
+      ...(observation ? { observation } : {}),
+      ...(observation_error ? { observation_error } : {}),
+    };
   }
   act(session_id: string, action: Action, expected_revision: number, cancel?: AbortSignal) {
     const captured = {

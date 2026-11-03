@@ -50,8 +50,15 @@ export type LabelVerdict = {
 };
 
 // Tier vocabularies (flags 'iu'), matched against normalizeLabel output.
-const EN_WORDS_SOURCE =
-  '\\b(?:delete|remove(?!\\s+(?:filters?|sorting|selection)\\b)|upload|send|purchase|buy(?=$|\\s+(?:now|it|again|this|these|all|tickets?)\\b)|checkout|pay|subscribe|unsubscribe|opt\\s*out|register|sign\\s*up|login|log\\s*in|sign\\s*in|logout|log\\s*out|sign\\s*out|withdraw|transfer|archive|unarchive|publish|unpublish|approve|revoke|deactivate|reset(?!\\s+(?:filters?|search|selection|sort|form|view|zoom|layout)\\b)|clear(?!\\s+(?:all\\s+)?(?:filters?|search|selection|sort|form|fields?|input)\\b)|cancel)\\b|\\b(?:place|complete|submit|finish|finali[sz]e|confirm)\\s+(?:(?:your|my|the|an?|this)\\s+)?order\\b|\\border\\s+now\\b|^order$|\\bre-?order\\b|\\b(?:make|submit|confirm|complete)\\s+(?:a\\s+|the\\s+)?payment\\b';
+// Fragments shared with the money-like vocabulary below, so "buy" and "order" cannot drift apart between the two.
+export const BUY_SOURCE = 'buy(?=$|\\s+(?:now|it|again|this|these|all|tickets?)\\b)';
+export const ORDER_IDIOMS_SOURCE =
+  '\\b(?:place|complete|submit|finish|finali[sz]e|confirm)\\s+(?:(?:your|my|the|an?|this)\\s+)?order\\b|\\border\\s+now\\b|^order$|\\bre-?order\\b|\\b(?:make|submit|confirm|complete)\\s+(?:a\\s+|the\\s+)?payment\\b';
+export const EN_WORDS_SOURCE =
+  '\\b(?:delete|remove(?!\\s+(?:filters?|sorting|selection)\\b)|upload|send|purchase|' +
+  BUY_SOURCE +
+  '|checkout|pay|subscribe|unsubscribe|opt\\s*out|register|sign\\s*up|login|log\\s*in|sign\\s*in|logout|log\\s*out|sign\\s*out|withdraw|transfer|archive|unarchive|publish|unpublish|approve|revoke|deactivate|reset(?!\\s+(?:filters?|search|selection|sort|form|view|zoom|layout)\\b)|clear(?!\\s+(?:all\\s+)?(?:filters?|search|selection|sort|form|fields?|input)\\b)|cancel)\\b|' +
+  ORDER_IDIOMS_SOURCE;
 const JA_WORDS_SOURCE =
   '削除|購入|買う|決済(?!方法|情報|履歴)|支払(?!方法|い方法|情報|履歴|明細)|送信|振込|送金|転送|申込|申し込|解約|退会|配信停止|(?:登録|配信|購読|契約|会員)を?解除|(?<!に)登録(?!済|情報|内容|日|番号)|注文(?!履歴|詳細|一覧|番号|状況|情報|日|メモ|方法|内容)|ログイン|ログアウト|アーカイブ|公開(?!設定|範囲)|承認|購読(?!解除)|アップロード|(?<!(?:フィルター|フィルタ|検索|選択|条件|入力|表示)を)(?:リセット|クリア)|キャンセル|取消|取り消';
 
@@ -254,4 +261,85 @@ export function classifyLabel(facts: ActionFacts, action: Action, lists: LabelLi
     return { consequential: true, reason: 'dialog' };
 
   return { consequential: false, reason: null };
+}
+
+// Money-like operations (site-write grant design D): purchases, payments and transfers never ride a standing site grant.
+// The English vocabulary reuses the buy / order fragments of the tier vocabulary above; "Sort order", "Order history" and
+// "Buy milk" stay ordinary, and a false positive only costs one more dialog. No allow list relaxes this.
+export const MONEY_EN_SOURCE =
+  '\\b(?:purchase|' +
+  BUY_SOURCE +
+  '|checkout|check\\s*out|pay|payment|payments|subscribe|transfer|withdraw|deposit|donate|donation|billing|invoice)\\b|' +
+  ORDER_IDIOMS_SOURCE;
+export const MONEY_JA_SOURCE =
+  '購入|買う|決済(?!方法|情報|履歴)|支払(?!方法|い方法|情報|履歴|明細)|振込|送金|申込|申し込|契約(?!内容|情報|書)|入金|出金|寄付|課金|チャージ|請求|注文(?!履歴|詳細|一覧|番号|状況|情報|日|メモ|方法|内容)';
+const MONEY_EN = new RegExp(MONEY_EN_SOURCE, 'iu');
+const MONEY_JA = new RegExp(MONEY_JA_SOURCE, 'iu');
+
+export function isMoneyLike(label: string): boolean {
+  const n = normalizeLabel(label);
+  return n !== '' && (MONEY_EN.test(n) || MONEY_JA.test(n));
+}
+
+const MONEY_URL_WORDS = new Set([
+  'purchase',
+  'purchases',
+  'buy',
+  'checkout',
+  'pay',
+  'payment',
+  'payments',
+  'order',
+  'orders',
+  'subscribe',
+  'subscription',
+  'subscriptions',
+  'transfer',
+  'transfers',
+  'withdraw',
+  'withdrawal',
+  'withdrawals',
+  'deposit',
+  'deposits',
+  'donate',
+  'donation',
+  'donations',
+  'billing',
+  'invoice',
+  'invoices',
+  'charge',
+  'charges',
+  'refund',
+  'refunds',
+]);
+// Action-style query keys, as the link facts of browser-approval.ts read them.
+const URL_ACTION_KEY = /^(?:action|act|cmd|op|do|_method|method|task)$/i;
+// One path segment or query value, percent-decoded and split into words at separators, extensions and camelCase
+// ("place-order", "pay.php", "placeOrder"): any word of the set makes it money-like.
+function moneyUrlPart(part: string): boolean {
+  try {
+    part = decodeURIComponent(part);
+  } catch {
+    /* keep the raw part */
+  }
+  // No length cap: a word cannot hide behind padding.
+  return part
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .some(word => MONEY_URL_WORDS.has(word));
+}
+
+/** Whether a request URL names a purchase / payment-like operation in its path or its action-style query values. An unparsable URL counts as money-like. */
+export function isMoneyLikeUrl(url: string): boolean {
+  let u: URL;
+  try {
+    u = new URL(url);
+  } catch {
+    return true;
+  }
+  return (
+    u.pathname.split('/').some(moneyUrlPart) ||
+    [...u.searchParams].some(([key, value]) => URL_ACTION_KEY.test(key) && moneyUrlPart(value))
+  );
 }

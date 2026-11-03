@@ -65,7 +65,7 @@
     browserInstalled: $('browser-installed'), browserInstalledEmpty: $('browser-installed-empty'), browserCompat: $('browser-compat'), browserUseAuto: $('browser-use-auto'),
     desktopOsHint: $('desktop-os-hint'), desktopAppId: $('desktop-app-id'), desktopAppPath: $('desktop-app-path'), desktopBrowse: $('desktop-browse'), desktopSave: $('desktop-save'),
     desktopClear: $('desktop-clear'), desktopNotice: $('desktop-notice'), desktopError: $('desktop-error'), allowPhysicalInput: $('allow-physical-input'), allowUnredactedImages: $('allow-unredacted-images'),
-    aiSummary: $('ai-summary'), aiSummaryExtra: $('ai-summary-extra'),
+    aiSummary: $('ai-summary'), aiSummaryExtra: $('ai-summary-extra'), siteGrants: $('site-grants'),
     setupChecklist: $('setup-checklist'), setupProgress: $('setup-progress'), setupDismiss: $('setup-dismiss'), setupReopen: $('setup-reopen'),
     grantsDetails: $('grants-details'), permissionsDetails: $('permissions-details'), advancedDetails: $('advanced-details'), desktopDetails: $('desktop-details'),
     clientsDetails: $('clients-details'), desktopState: $('desktop-state'), clientsState: $('clients-state')
@@ -101,6 +101,10 @@
   const setBusy = (el, busy) => { if (el) { el.disabled = busy || el.dataset.locked === 'true'; el.setAttribute('aria-busy', busy ? 'true' : 'false'); } };
 
   let busy = {};
+  // Revoke buttons of the standing-grant list currently on screen, and the localized nodes created with them.
+  let grantButtons = [];
+  let grantNodes = [];
+  let grantTick = null;
   let currentOrigins = [];
   let currentResourceOrigins = [];
   // Desktop inputs are only overwritten from saved state while the user has no unsaved edit.
@@ -109,8 +113,9 @@
   let hostDesktopNotice = '';
   function markBusy(key, on) {
     busy[key] = on;
-    const map = { enabled: ['enabled'], auto: ['autoUpdate'], check: ['checkUpdates'], checkNow: ['checkNow'], resume: ['resumeOperations'], clients: ['clientsEnable', 'clientsRefresh'], origins: ['originAdd'], runtime: ['sessionIdleMinutes','browserHeadless','browserProxyServer','browserProxyConnectHostname'], operationMode:['operationMode'], desktop: DESKTOP_CONTROLS, browser: ['browserRetry','browserUseAuto'] };
+    const map = { enabled: ['enabled'], auto: ['autoUpdate'], check: ['checkUpdates'], checkNow: ['checkNow'], resume: ['resumeOperations'], clients: ['clientsEnable', 'clientsRefresh'], origins: ['originAdd'], runtime: ['sessionIdleMinutes','browserHeadless','browserProxyServer','browserProxyConnectHostname'], operationMode:['operationMode'], desktop: DESKTOP_CONTROLS, browser: ['browserRetry','browserUseAuto'], grants: [] };
     (map[key] || []).forEach((name) => setBusy(els[name], on));
+    if (key === 'grants') grantButtons.forEach((button) => setBusy(button, on));
     // Emergency stop must stay clickable even while the stop itself runs.
     if (key === 'stop' && els.emergencyStop) els.emergencyStop.setAttribute('aria-busy', on ? 'true' : 'false');
   }
@@ -363,7 +368,7 @@
   // Presentation only: both are derived from the state the host already posts and never change a setting.
   // Capabilities come from the effective permissions when present, so nothing is claimed that the state does not grant.
   const MODES = ['read_only', 'standard', 'ask', 'all'];
-  const model = { settings: null, perms: null, stopped: null, workspaceOk: null, mcpError: '', runtimeError: '', desktopError: '' };
+  const model = { settings: null, perms: null, stopped: null, workspaceOk: null, mcpError: '', runtimeError: '', desktopError: '', grants: [] };
   const uiState = (() => {
     try { const saved = vscode && typeof vscode.getState === 'function' ? vscode.getState() : null; return saved && typeof saved === 'object' ? { ...saved } : {}; }
     catch { return {}; }
@@ -393,6 +398,37 @@
     const names = origins.map(siteName), shown = names.slice(0, 2), more = names.length - shown.length;
     return { ja: shown.join('、') + (more > 0 ? ` ほか ${more} 件` : ''), en: shown.join(', ') + (more > 0 ? ` and ${more} more` : '') };
   }
+  // Standing site-write grants the host reports; the host drops them at the end, and the 30 s tick below hides one that ran out in between.
+  const liveGrants = () => model.grants.filter((grant) => grant.expires_at > Date.now());
+  const validGrant = (grant) => !!grant && typeof grant === 'object' && typeof grant.id === 'string' && typeof grant.origin === 'string' && grant.origin !== '' && Number.isFinite(grant.expires_at) && Number.isFinite(grant.uses);
+  function renderSiteGrants() {
+    if (!els.siteGrants) return;
+    if (grantTick !== null) { clearTimeout(grantTick); grantTick = null; }
+    // Every use of a grant republishes the list; keep keyboard focus on the same grant's button across the re-render.
+    const focused = document.activeElement && document.activeElement.dataset ? document.activeElement.dataset.grantId : undefined;
+    for (const node of grantNodes) { localizedNodes.delete(node); localizedAttributes.delete(node); }
+    grantNodes = []; grantButtons = [];
+    els.siteGrants.textContent = '';
+    const live = liveGrants();
+    for (const grant of live) {
+      const minutes = Math.max(0, Math.ceil((grant.expires_at - Date.now()) / 60000)), uses = Math.max(0, Math.trunc(grant.uses));
+      const li = document.createElement('li');
+      const name = document.createElement('span'); name.textContent = grant.origin;
+      const state = document.createElement('span'); setText(state, `残り ${minutes} 分・${uses} 回使用 / ${minutes} min left, used ${uses} times`);
+      const revoke = document.createElement('button'); revoke.type = 'button'; revoke.className = 'secondary'; revoke.dataset.grantId = grant.id;
+      setText(revoke, '取り消す / Revoke');
+      setLocalizedAttribute(revoke, 'aria-label', `書き込みの継続許可を取り消す / Revoke standing write grant ${grant.origin}`);
+      setBusy(revoke, busy.grants === true);
+      revoke.addEventListener('click', () => send({ type: 'revokeSiteGrant', id: grant.id }, 'grants'));
+      grantNodes.push(state, revoke); grantButtons.push(revoke);
+      li.appendChild(name); li.appendChild(state); li.appendChild(revoke); els.siteGrants.appendChild(li);
+    }
+    els.siteGrants.hidden = live.length === 0;
+    const again = focused ? grantButtons.find((button) => button.dataset.grantId === focused) : undefined;
+    if (again && typeof again.focus === 'function') again.focus();
+    // Remaining minutes are rounded up and refreshed every 30 s while a grant is listed (a chained timeout, so nothing keeps running once the list is empty).
+    if (live.length > 0) grantTick = setTimeout(() => { grantTick = null; renderSiteGrants(); renderSummary(); }, 30000);
+  }
   function summarize() {
     if (model.stopped === true) return { ja: '緊急停止中です。操作を再開するまで、AI は何も実行できません。', en: 'Emergency stop is active. The AI cannot do anything until you resume operations.' };
     const s = model.settings;
@@ -404,8 +440,17 @@
     if (!origins.length) return { ja: 'MCP は有効ですが、許可された Web サイトがないため、AI はブラウザーを操作できません。', en: 'MCP is on, but no websites are allowed, so the AI cannot use the browser.' };
     const sites = sitesText(origins), mode = currentMode();
     if (mode === 'all') return { ja: `AI は ${sites.ja} で、確認なしにあらゆる操作（送信・削除・購入・認証情報の入力を含む）を実行できます（すべて許可・旧設定）。`, en: `The AI can perform any action on ${sites.en} without asking, including submitting forms, deleting, buying and entering credentials (allow all, legacy).` };
-    if (mode === 'ask') return { ja: `AI は ${sites.ja} を閲覧し、通常のクリックや入力ができます。送信や削除などの重要な操作は、VS Code の確認画面で承認した場合のみ実行されます（都度承認）。`, en: `The AI can view ${sites.en} and click or type in ordinary controls. Consequential actions such as submitting or deleting run only after you approve each one in VS Code (ask each time).` };
-    if (mode === 'standard') return { ja: `AI は ${sites.ja} を閲覧し、通常のクリックや入力ができます。送信や削除などの重要な操作は拒否されます（標準）。`, en: `The AI can view ${sites.en} and click or type in ordinary controls. Consequential actions such as submitting or deleting are denied (standard).` };
+    if (mode === 'ask') {
+      const text = { ja: `AI は ${sites.ja} を閲覧し、通常のクリックや入力ができます。送信や削除などの重要な操作と、ページが保存のために送る通信は、VS Code の確認画面で内容を承認した場合のみ実行されます（都度承認）。`, en: `The AI can view ${sites.en} and click or type in ordinary controls. Consequential actions such as submitting or deleting, and the requests a page sends to save data, run only after you approve each one in VS Code (ask each time).` };
+      // A standing grant is only ever created by the host's approval dialog; it is named here so the sentence stays true while one is active.
+      const n = liveGrants().length;
+      if (n > 0) {
+        text.ja += ` いま ${n} 件のサイトで、書き込み通信を確認なしに送る継続許可が有効です（最長 30 分。認証情報を含む通信と購入・支払いに関わる操作は毎回確認）。`;
+        text.en += ` Standing write permission is active for ${n} ${n === 1 ? 'site' : 'sites'} (up to 30 minutes; credential and payment-like requests still ask).`;
+      }
+      return text;
+    }
+    if (mode === 'standard') return { ja: `AI は ${sites.ja} を閲覧し、通常のクリックや入力ができます。送信や削除などの重要な操作と、ページが保存のために送る通信は止められるため、多くのアプリではデータを保存できません（標準）。`, en: `The AI can view ${sites.en} and click or type in ordinary controls. Consequential actions such as submitting or deleting, and the requests a page sends to save data, are blocked, so most apps cannot save changes (standard).` };
     return { ja: `AI は ${sites.ja} を閲覧できます。クリックや入力はできません（読み取り専用）。`, en: `The AI can view ${sites.en}. It cannot click or type (read only).` };
   }
   // Grants outside the browser sentence that are on right now, so they stay visible while their toggles sit in collapsed groups.
@@ -546,6 +591,7 @@
     if (s.settings || typeof s.platform === 'string') renderDesktop(s.settings, s.platform);
     if (s.browser) renderBrowserSetup(s.browser);
     if (s.permissions) renderPermissions(s.permissions);
+    if (Array.isArray(s.grants)) { model.grants = s.grants.filter(validGrant); renderSiteGrants(); }
     if (s.clients) renderClients(s.clients);
     if (s.status) {
       set(els.version, s.status.version || '');

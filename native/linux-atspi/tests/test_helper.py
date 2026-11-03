@@ -327,6 +327,106 @@ class FixtureTest(unittest.TestCase):
         self.assertEqual(helper.ok('act', target_id=target_id, session_id=session_id, element_id=bar['id'], expected_revision=scrolled['revision'], action='scroll', direction='up'), {'applied': True})
         self.assertEqual(float(next(e for e in helper.ok('snapshot', target_id=target_id, session_id=session_id)['elements'] if e['id'] == bar['id'])['value']), 0)
 
+    def test_16_select_combobox_by_value(self):
+        helper = self.helper('--allow-all')
+        target_id, session_id, snapshot = self.session(helper)
+        combo = by(snapshot['elements'], role='combobox', name='Flavour')
+        self.assertEqual(helper.ok('act', target_id=target_id, session_id=session_id, element_id=combo['id'], expected_revision=snapshot['revision'], action='select', value='Gamma'), {'applied': True})
+        after = helper.ok('snapshot', target_id=target_id, session_id=session_id)
+        chosen = by(after['elements'], role='combobox', name='Flavour')
+        self.assertEqual(chosen['value'], 'Gamma', 'the combo box shows the chosen option')
+        self.assertNotEqual(chosen['value'], 'Beta')
+        self.assertEqual(helper.ok('act', target_id=target_id, session_id=session_id, element_id=chosen['id'], expected_revision=after['revision'], action='select', value=' beta '), {'applied': True}, 'a trimmed case-insensitive value matches')
+        self.assertEqual(by(helper.ok('snapshot', target_id=target_id, session_id=session_id)['elements'], role='combobox', name='Flavour')['value'], 'Beta')
+
+    def test_17_select_by_value_unknown_is_refused(self):
+        helper = self.helper('--allow-all')
+        target_id, session_id, snapshot = self.session(helper)
+        combo = by(snapshot['elements'], role='combobox', name='Flavour')
+        before = by(snapshot['elements'], role='combobox', name='Flavour')['value']
+        reply = helper.error('act', target_id=target_id, session_id=session_id, element_id=combo['id'], expected_revision=snapshot['revision'], action='select', value='Delta')
+        self.assertEqual(reply['error']['code'], 'E_NO_ELEMENT', reply)
+        self.assertIn('Delta', reply['error']['message'])
+        self.assertNotIn('may_have_executed', reply)
+        after = helper.ok('snapshot', target_id=target_id, session_id=session_id)
+        self.assertEqual(by(after['elements'], role='combobox', name='Flavour')['value'], before, 'nothing changed')
+
+    def test_18_select_by_value_ambiguous_is_refused(self):
+        helper = self.helper('--allow-all')
+        target_id, session_id, snapshot = self.session(helper)
+        colour = by(snapshot['elements'], role='combobox', name='Colour')
+        self.assertEqual(colour['value'], 'Red')
+        reply = helper.error('act', target_id=target_id, session_id=session_id, element_id=colour['id'], expected_revision=snapshot['revision'], action='select', value='Red')
+        self.assertEqual(reply['error']['code'], 'E_NO_ELEMENT', reply)
+        self.assertIn('Red', reply['error']['message'])
+        self.assertEqual(helper.ok('act', target_id=target_id, session_id=session_id, element_id=colour['id'], expected_revision=snapshot['revision'], action='select', value='Blue'), {'applied': True})
+        self.assertEqual(by(helper.ok('snapshot', target_id=target_id, session_id=session_id)['elements'], role='combobox', name='Colour')['value'], 'Blue')
+
+    def test_19_select_option_with_value_must_agree(self):
+        helper = self.helper('--allow-all')
+        target_id, session_id, snapshot = self.session(helper)
+        beta = by(snapshot['elements'], role='option', name='Beta')
+        reply = helper.error('act', target_id=target_id, session_id=session_id, element_id=beta['id'], expected_revision=snapshot['revision'], action='select', value='Alpha')
+        self.assertEqual(reply['error']['code'], 'E_BAD_REQUEST', reply)
+        self.assertEqual(helper.ok('act', target_id=target_id, session_id=session_id, element_id=beta['id'], expected_revision=snapshot['revision'], action='select', value='Beta'), {'applied': True})
+        self.assertEqual(by(helper.ok('snapshot', target_id=target_id, session_id=session_id)['elements'], role='combobox', name='Flavour')['value'], 'Beta')
+
+    def test_20_select_with_value_bad_requests(self):
+        helper = self.helper('--allow-all')
+        target_id, session_id, snapshot = self.session(helper)
+        button = by(snapshot['elements'], role='button', name='Run')
+        self.assertEqual(helper.error('act', target_id=target_id, session_id=session_id, element_id=button['id'], expected_revision=snapshot['revision'], action='select', value='Run')['error']['code'], 'E_UNSUPPORTED_ACTION')
+        for bad in ('', '   ', 7, None):
+            self.assertEqual(helper.error('act', target_id=target_id, session_id=session_id, element_id=button['id'], expected_revision=snapshot['revision'], action='select', value=bad)['error']['code'], 'E_BAD_REQUEST', bad)
+        self.assertEqual(helper.error('act', target_id=target_id, session_id=session_id, element_id=button['id'], expected_revision=snapshot['revision'], action='click', option='x')['error']['code'], 'E_BAD_REQUEST', 'unknown fields still fail')
+
+    def test_21_page_tab_click_switches_page(self):
+        helper = self.helper('--allow-all')
+        target_id, session_id, snapshot = self.session(helper)
+        names = [e['name'] for e in snapshot['elements'] if e['role'] == 'tab']
+        self.assertEqual(names[:2], ['First', 'Second'])
+        self.assertEqual([e['selected'] for e in snapshot['elements'] if e['role'] == 'tab'], [True, False])
+        self.assertIn('First Page Button', [e['name'] for e in snapshot['elements'] if e['role'] == 'button'])
+        tab = by(snapshot['elements'], role='tab', name='Second')
+        reply = helper.call('act', target_id=target_id, session_id=session_id, element_id=tab['id'], expected_revision=snapshot['revision'], action='click')
+        if not reply['ok'] and reply['error']['code'] in ('E_PATTERN_UNSUPPORTED', 'E_NOT_INTERACTABLE'):
+            reply = helper.call('act', target_id=target_id, session_id=session_id, element_id=tab['id'], expected_revision=snapshot['revision'], action='select')
+        self.assertTrue(reply['ok'], reply)
+        self.assertIs(reply['result']['applied'], True)
+        self.assertEqual(helper.ok('snapshot', target_id=target_id, session_id=session_id)['revision'] > 0, True, 'the session survives the tab switch')
+        if reply['result'].get('focus_moved') is True:
+            self.assertEqual(helper.error('act', target_id=target_id, session_id=session_id, element_id=tab['id'], expected_revision=snapshot['revision'], action='click')['error']['code'], 'E_STALE_REVISION')
+        after = helper.ok('snapshot', target_id=target_id, session_id=session_id)
+        self.assertEqual(by(after['elements'], role='tab', name='Second')['selected'], True)
+        page = by(after['elements'], role='button', name='Second Page Button')
+        self.assertTrue(helper.ok('act', target_id=target_id, session_id=session_id, element_id=page['id'], expected_revision=after['revision'], action='click')['applied'])
+        self.assertEqual(by(helper.ok('snapshot', target_id=target_id, session_id=session_id)['elements'], role='text', name_prefix='Status:')['name'], 'Status: page second')
+
+    def test_22_page_tab_select_switches_page(self):
+        helper = self.helper('--allow-all')
+        target_id, session_id, snapshot = self.session(helper)
+        tab = by(snapshot['elements'], role='tab', name='Second')
+        reply = helper.ok('act', target_id=target_id, session_id=session_id, element_id=tab['id'], expected_revision=snapshot['revision'], action='select')
+        self.assertIs(reply['applied'], True)
+        after = helper.ok('snapshot', target_id=target_id, session_id=session_id)
+        self.assertEqual(by(after['elements'], role='tab', name='Second')['selected'], True)
+        self.assertIn('Second Page Button', [e['name'] for e in after['elements'] if e['role'] == 'button'])
+        if reply.get('focus_moved') is True:
+            self.assertEqual(after['revision'], snapshot['revision'] + 1, 'a stale session always advances its next revision')
+
+    def test_23_select_by_value_keeps_the_consequential_gate_of_the_option(self):
+        for mode in ('standard', 'ask'):
+            helper = self.helper('--operation-mode', mode)
+            target_id, session_id, snapshot = self.session(helper)
+            colour = by(snapshot['elements'], role='combobox', name='Colour')
+            before = colour['value']  # the fixture is shared by the class: earlier tests may have chosen another colour
+            extra = {'approved': True} if mode == 'ask' else {}
+            reply = helper.error('act', target_id=target_id, session_id=session_id, element_id=colour['id'], expected_revision=snapshot['revision'], action='select', value='Delete all', **extra)
+            self.assertEqual(reply['error']['code'], 'E_APPROVAL_REQUIRED', (mode, reply))
+            self.assertNotIn('may_have_executed', reply)
+            self.assertEqual(by(helper.ok('snapshot', target_id=target_id, session_id=session_id)['elements'], role='combobox', name='Colour')['value'], before, mode)
+            self.assertEqual(helper.ok('act', target_id=target_id, session_id=session_id, element_id=colour['id'], expected_revision=snapshot['revision'], action='select', value='Blue'), {'applied': True}, mode)
+
     def test_12_closed_window_is_not_found(self):
         helper = self.helper('--allow-all')
         self.command('open-dialog')

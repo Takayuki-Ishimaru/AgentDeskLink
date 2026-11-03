@@ -457,6 +457,7 @@ const SAFE_ROLES = new Set([
   'list',
   'listbox',
   'listitem',
+  'main',
   'menu',
   'menuitem',
   'navigation',

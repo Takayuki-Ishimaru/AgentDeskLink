@@ -41,6 +41,9 @@ WINDOW_ROLES = ('frame', 'dialog', 'window', 'filler')
 CLICK_ROLES = ('button', 'link', 'menuitem', 'tab', 'option', 'listitem', 'treeitem', 'checkbox', 'radio')
 CHECK_ROLES = ('checkbox', 'radio', 'menuitem', 'button', 'switch')
 SELECT_ROLES = ('option', 'listitem', 'tab', 'treeitem', 'menuitem', 'row', 'cell')
+# Containers `select` with a value resolves an option in: the child option's accessible name must match.
+SELECT_CONTAINERS = ('combobox', 'list', 'listbox', 'tablist', 'menu', 'table', 'tree')
+OPTION_ATSPI_ROLES = ('menu item', 'list item', 'page tab', 'tree item', 'table row', 'list row')
 # Same vocabulary as the browser path (src/policy.ts + src/browser-approval.ts), including the Japanese terms.
 CONSEQUENTIAL = re.compile(
     r"\b(?:delete|remove(?!\s+filters?\b)|upload|send|submit|purchase|checkout|pay|payment|login|log\s*in|sign\s*in|sign\s*up|register|withdraw|transfer|confirm|cancel|order)\b"
@@ -738,9 +741,10 @@ class Backend:
 
         truncated = self.walk(target['window'], visit, deadline) or state['truncated']
         fingerprint = hashlib.sha256(json.dumps(elements, ensure_ascii=False, sort_keys=True).encode('utf-8')).hexdigest()
-        if fingerprint != session['fingerprint']:
+        if fingerprint != session['fingerprint'] or session.get('stale'):
             session['revision'] += 1
             session['fingerprint'] = fingerprint
+        session['stale'] = False
         session['handles'], session['ids'] = handles, ids
         return {'revision': session['revision'], 'truncated': truncated, 'elements': elements}
 
@@ -811,7 +815,7 @@ class Backend:
     def act(self, policy, request):
         self.pump()
         session, target = self.session(request['target_id'], request['session_id'])
-        if request['expected_revision'] != session['revision'] or session['revision'] == 0:
+        if session.get('stale') or request['expected_revision'] != session['revision'] or session['revision'] == 0:
             raise HelperError('E_STALE_REVISION', 'observe again before acting')
         handle = session['handles'].get(request['element_id'])
         if handle is None:
@@ -823,6 +827,8 @@ class Backend:
         if handle['sensitive']:
             raise HelperError('E_PRIVACY_BLOCKED', 'sensitive control')
         policy.authorize(handle, action, session, request.get('approved', False))
+        if action == 'select' and request.get('value') is not None and handle['role'] in SELECT_CONTAINERS:
+            policy.authorize_option(self.find_option(node, request['value'])[1]['name'])
         before = self.focus_signature(target)
         dispatched = False
         try:
@@ -833,7 +839,7 @@ class Backend:
             elif action == 'check':
                 dispatched = self.do_check(node, handle, request['checked'])
             elif action == 'select':
-                dispatched = self.do_select(node, handle)
+                dispatched = self.do_select(node, handle, request.get('value'))
             elif action == 'scroll':
                 dispatched = self.do_scroll(node, handle, request['direction'])
         except HelperError as error:
@@ -845,8 +851,13 @@ class Backend:
             self.wait_for_settle(target)
             after = self.focus_signature(target)
             if after != before:
-                self.sessions.pop(session['id'], None)
-                raise HelperError('E_FOCUS_CHANGED', 'focus or the active window changed during the action', may_have_executed=True)
+                # Safety rests on the ACTIVE windows: another window or application took over, so nothing further may run on this session.
+                if after[0] != before[0]:
+                    self.sessions.pop(session['id'], None)
+                    raise HelperError('E_FOCUS_CHANGED', 'another window or application became active during the action, so the session was closed; observe again', may_have_executed=True)
+                # Only the focused element inside the target window moved (a tab switch, for example): the action applied, but the observed tree is no longer trustworthy.
+                session['stale'], session['fingerprint'] = True, None  # every act fails with E_STALE_REVISION until a snapshot re-observes the window
+                return {'applied': True, 'focus_moved': True}
         return {'applied': True}
 
     def verify_live(self, node, handle, target):
@@ -893,6 +904,8 @@ class Backend:
         if handle['role'] not in CLICK_ROLES:
             raise HelperError('E_UNSUPPORTED_ACTION', 'click is only supported on buttons, links, menu items, tabs, options and toggles')
         index = self.pick_action(node, ('click', 'press', 'activate', 'jump'))
+        if index is None and handle['role'] == 'tab':
+            return self.do_select(node, handle)  # GTK 3 page tabs advertise no action: clicking one selects it, as a pointer click would
         if index is None:
             raise HelperError('E_PATTERN_UNSUPPORTED', 'the control advertises no click action')
         try:
@@ -937,8 +950,31 @@ class Backend:
             raise HelperError('E_INTERNAL', 'checked state readback does not match', may_have_executed=True)
         return True
 
-    def do_select(self, node, handle):
-        if handle['role'] not in SELECT_ROLES:
+    def find_option(self, node, value):
+        """The single child option of a container whose accessible name matches value (exact first, then one case-insensitive trimmed match)."""
+        options = []
+        for child in self.children(node):
+            options.extend(self.children(child) if self.role_name(child) == 'menu' else [child])
+        options = [o for o in options if self.role_name(o) in OPTION_ATSPI_ROLES]
+        wanted = value.strip()
+        matches = [o for o in options if self.name(o) == wanted] or [o for o in options if self.name(o).strip().lower() == wanted.lower()]
+        if len(matches) != 1:
+            offered = sorted({self.name(o) for o in options if self.name(o)})
+            raise HelperError('E_NO_ELEMENT', 'no single option %r in this container; it offers: %s' % (value, ', '.join(offered) or 'none'))
+        chosen = matches[0]
+        return chosen, {'role': ROLE_MAP.get(self.role_name(chosen), 'option'), 'name': self.name(chosen)}
+
+    def do_select(self, node, handle, value=None):
+        if value is not None:
+            # Browser parity: select may target the container and name the option; a value on an option must agree with it.
+            if handle['role'] in SELECT_ROLES:
+                if value.strip().lower() != handle['name'].strip().lower():
+                    raise HelperError('E_BAD_REQUEST', 'the value does not name this option')
+            elif handle['role'] in SELECT_CONTAINERS:
+                node, handle = self.find_option(node, value)
+            else:
+                raise HelperError('E_UNSUPPORTED_ACTION', 'select with a value needs a combo box, list, list box, tab list or menu')
+        elif handle['role'] not in SELECT_ROLES:
             raise HelperError('E_UNSUPPORTED_ACTION', 'select is only supported on options, list items, tabs and tree items')
         try:
             parent = node.get_parent()
@@ -1035,6 +1071,14 @@ class Policy:
             return
         raise HelperError('E_POLICY_DENIED', 'mutations are disabled without --allow-all, --controls-file or --operation-mode standard')
 
+    def authorize_option(self, name):
+        # A select by value is authorized on its container; the option it names gets the gate a directly targeted option gets,
+        # and an approval of the container never covers it: the agent selects such an option element itself.
+        if self.allow_all or self.controls is not None or not self.standard:
+            return
+        if consequential_label(name):
+            raise HelperError('E_APPROVAL_REQUIRED', 'the option this value names is consequential; select the option element itself' + (' with the one-shot host approval' if self.ask else ' (the standard tier refuses it)'))
+
 
 REQUEST_FIELDS = {
     'discover': set(), 'open': {'target_id', 'mode'}, 'snapshot': {'target_id', 'session_id'}, 'close': {'target_id', 'session_id'},
@@ -1064,6 +1108,10 @@ def validate(request):
         action = request['action']
         if action not in ('click', 'fill', 'check', 'select', 'scroll'):
             raise HelperError('E_UNSUPPORTED_ACTION', 'unsupported action')
+        if action == 'select' and 'value' in request:
+            value = request['value']
+            if not isinstance(value, str) or not value.strip() or len(value.encode('utf-8')) > MAX_TEXT:
+                raise HelperError('E_BAD_REQUEST', 'select needs a non-empty option value')
         if action == 'fill':
             value = request.get('value')
             if not isinstance(value, str) or len(value.encode('utf-8')) > MAX_FILL_BYTES or re.search(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', value):
@@ -1075,7 +1123,7 @@ def validate(request):
             if request.get('direction') not in ('up', 'down'):
                 raise HelperError('E_BAD_REQUEST', 'scroll needs direction up or down')
         for key in ('value', 'checked', 'direction'):
-            if key in request and key != {'fill': 'value', 'check': 'checked', 'scroll': 'direction'}.get(action):
+            if key in request and key not in {'fill': {'value'}, 'select': {'value'}, 'check': {'checked'}, 'scroll': {'direction'}}.get(action, set()):
                 raise HelperError('E_BAD_REQUEST', key + ' is not valid for ' + action)
         if 'approved' in request and request['approved'] is not True:
             raise HelperError('E_BAD_REQUEST', 'approved must be true when present')

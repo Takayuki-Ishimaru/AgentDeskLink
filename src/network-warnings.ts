@@ -38,8 +38,10 @@ export function networkMethod(method: string): string {
 export function isActionNetworkBlock(warning: Pick<NetworkWarning, 'resource_type' | 'method'>): boolean {
   // Warnings without classification (older adapters) stay conservative.
   if (warning.resource_type === undefined && warning.method === undefined) return true;
-  return (
-    ACTION_RESOURCE_TYPES.has(warning.resource_type ?? '') ||
-    (warning.method !== undefined && warning.method !== 'GET' && warning.method !== 'HEAD')
-  );
+  return ACTION_RESOURCE_TYPES.has(warning.resource_type ?? '') || isWriteBlock(warning);
+}
+
+/** True when a blocked request is a write (any method except GET/HEAD): the page's state was not saved. Independent of the resource type; warnings without a method are not writes. */
+export function isWriteBlock(warning: Partial<NetworkWarning>): boolean {
+  return warning.method !== undefined && warning.method !== 'GET' && warning.method !== 'HEAD';
 }

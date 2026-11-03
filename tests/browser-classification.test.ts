@@ -192,10 +192,8 @@ test(
       );
       assert.equal(f.page.url(), f.origin + '/');
       assert.deepEqual(f.counts(), { posts: 0, gets: 0 });
-      assert.deepEqual(guardBlocks(await f.engine.observe(f.id, { token_budget: 8000 })), [
-        'document GET 1',
-        'document POST 1',
-      ]);
+      // The POST block was reported by the earlier observation: a block is reported once.
+      assert.deepEqual(guardBlocks(await f.engine.observe(f.id, { token_budget: 8000 })), ['document GET 1']);
       // Script form.submit() from the submit handler is a form submission too.
       observed = await f.engine.observe(f.id, { token_budget: 8000 });
       await assert.rejects(
@@ -863,7 +861,7 @@ test(
 );
 
 test(
-  'ask mode asks before dispatching every gated control, and an allow-listed Delete needs no approval',
+  'ask mode asks before dispatching every gated control; a containable Delete (button or dialog confirm) and an allow-listed Delete need no approval',
   {
     timeout: 120000,
   },
@@ -896,13 +894,27 @@ test(
       await f.click('Sort order');
       await f.click('Cancel');
       assert.equal(broker.state.requests, 0);
-      await hits('OK', 1, 'ok-in');
       await hits('Unsubscribe', 0, 'unsub');
       await hits('Archive', 0, 'archive');
       await hits('Reset', 0, 'reset');
       await hits('Clear', 0, 'clear');
-      await hits('Delete Buy milk', 0, 'delete');
-      assert.equal(broker.state.requests, 6);
+      assert.equal(broker.state.requests, 4);
+      // A control that is consequential only through "Delete" (the item's own button, or the confirm button of a "Delete this item?" dialog) is
+      // not asked about before it runs: with an approver it is dispatched with the network closed (contained), and the only effect that could
+      // leave, a write request, is held and put to the human with its content (see browser-held-writes.test.ts).
+      for (const [name, nth, hit] of [
+        ['OK', 1, 'ok-in'],
+        ['Delete Buy milk', 0, 'delete'],
+      ] as const) {
+        const done = (await f.click(name, nth)) as { warnings?: { code: string }[] };
+        assert.ok(
+          done.warnings?.some(w => w.code === 'contained_action'),
+          `${name}: ${JSON.stringify(done)}`,
+        );
+        assert.ok((await f.fired()).includes(hit), `${name}: dispatched without an approval`);
+        assert.equal(broker.state.requests, 4, `${name}: no approval was requested for it`);
+      }
+      assert.equal(await f.page.locator('#todo li').count(), 0);
       // A log-out link is followed only after the approval.
       await hits('Log out', 0, undefined);
       assert.equal(f.page.url(), f.origin + '/logout');
@@ -911,7 +923,7 @@ test(
       await assert.rejects(f.engine.act(f.id, t.action, t.revision), (error: unknown) => {
         return error instanceof AdlError && error.code === 'E_APPROVAL_REQUIRED' && typeof error.requestId === 'string';
       });
-      assert.equal(broker.state.requests, 8);
+      assert.equal(broker.state.requests, 6);
     } finally {
       await f.close();
       await broker.close();

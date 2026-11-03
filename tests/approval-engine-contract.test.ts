@@ -2,9 +2,20 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { randomBytes, randomUUID } from 'node:crypto';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { Engine } from '../src/core.js';
 import { parsePolicy } from '../src/policy.js';
-import { AdlError, safeError, type Action, type ActionAuthorization, type Adapter } from '../src/types.js';
+import {
+  AdlError,
+  HeldWritesError,
+  safeError,
+  type Action,
+  type ActionAuthorization,
+  type Adapter,
+  type HeldWrite,
+} from '../src/types.js';
 import { stubBroker } from './approval-broker-stub.js';
 
 async function fixture(protectedRegion = false, visible = false) {
@@ -564,7 +575,17 @@ test('explicitly protected fields never create an approval request', async () =>
 
 // A browser-shaped adapter for ask-mode plain submissions: the first act dispatches and the submission guard stops it, as BrowserSession.act does.
 // The snapshot carries action evidence, so a dispatched action moves the session to a new revision exactly as it does in a real browser.
-async function submissionFixture(options: { broker?: boolean } = {}) {
+async function submissionFixture(
+  options: {
+    broker?: boolean;
+    /** A same-origin urlencoded POST form: the adapter reports the network facts of the request the guard stops. */
+    urlencoded?: boolean;
+    /** The URL of that request (default https://example.com/save). */
+    networkUrl?: string;
+    /** The labels the activation can carry (default: the control's own name). */
+    labels?: string[];
+  } = {},
+) {
   const broker = options.broker === false ? undefined : await stubBroker();
   const state = {
     version: 1,
@@ -590,6 +611,10 @@ async function submissionFixture(options: { broker?: boolean } = {}) {
         name: 'Save',
         origin: 'https://example.com',
         details: ['Form POST https://example.com/save', '"title": "t"'],
+        ...(options.labels ? { labels: options.labels } : {}),
+        ...(options.urlencoded
+          ? { network: { url: options.networkUrl ?? 'https://example.com/save', method: 'POST', body: 'title=t' } }
+          : {}),
         ...(state.acts > 0 && !state.plainAfterAttempt ? {} : { submission: 'plain' as const }),
       }),
       act: async (_action, _signal, dispatch, authorization) => {
@@ -763,5 +788,1060 @@ test('ask mode: a denied submission request is final and never dispatches again'
     assert.equal(f.broker!.state.posts, 1);
   } finally {
     await f.close();
+  }
+});
+
+// Held writes (ask mode): the page's action sent write requests, the adapter holds them unsent and throws HeldWritesError. The fake adapter
+// records what the engine asks of it; the snapshot carries action evidence, so a dispatched action moves the session to a new revision.
+const heldRequest = (over: Partial<HeldWrite> = {}): HeldWrite => ({
+  method: 'POST',
+  url: 'https://example.com/api',
+  content_type: 'application/json',
+  body_sha256: 'a'.repeat(64),
+  body_length: 12,
+  details: ['Request POST https://example.com/api', '"title": "t"'],
+  secret: false,
+  ...over,
+});
+async function heldFixture(
+  options: {
+    broker?: boolean;
+    operationMode?: 'ask' | 'standard';
+    requests?: HeldWrite[];
+    /** The Buy control is a verb that may stay in the session (Delete): contained instead of approved before dispatch. */
+    containable?: boolean;
+    /** An adapter that cannot hold writes. */
+    noHolding?: boolean;
+    /** The name of the dialog the control sits in (one more label of the activation). */
+    dialog?: string;
+    /** The label of the ordinary control the tests click (default Save). */
+    saveName?: string;
+    /** Origins the policy allows besides https://example.com. */
+    allowedOrigins?: string[];
+    /** A policy audit file. */
+    auditPath?: string;
+  } = {},
+) {
+  const broker = options.broker === false ? undefined : await stubBroker();
+  const state = {
+    version: 1,
+    acts: 0,
+    holdsLeft: 1,
+    holdNumber: 0,
+    requests: options.requests ?? [heldRequest()],
+    alive: true,
+    releaseFails: false,
+    allowed: true,
+    writeHolding: [] as boolean[],
+    authorizations: [] as (ActionAuthorization | undefined)[],
+    released: [] as [string, number][],
+    aborted: [] as [string, string][],
+    outcome: undefined as { dispatched?: number; refused?: number; response_status?: number } | undefined,
+  };
+  const adapter: Adapter = {
+    open: async () => ({
+      tracksDispatch: true,
+      ...(options.noHolding
+        ? {}
+        : {
+            setWriteHolding: (enabled: boolean) => {
+              state.writeHolding.push(enabled);
+            },
+          }),
+      snapshot: async () => ({
+        fingerprint: `held-v${state.version}`,
+        truncated: false,
+        elements: [
+          { id: 'save', role: 'button', name: 'Save', enabled: true },
+          { id: 'buy', role: 'button', name: 'Buy', enabled: true },
+        ],
+        actionEvidence: { navigation: 'document-1', elements: { save: `save-v${state.version}`, buy: 'buy' } },
+      }),
+      prepareAction: async (action: Action) => ({
+        proof: `proof-${action.element_id}`,
+        risk: action.element_id === 'buy' ? ('consequential' as const) : ('ordinary' as const),
+        role: 'button',
+        name: action.element_id === 'buy' ? 'Buy' : (options.saveName ?? 'Save'),
+        labels: [
+          action.element_id === 'buy' ? 'Buy' : (options.saveName ?? 'Save'),
+          ...(options.dialog ? [options.dialog] : []),
+        ],
+        origin: 'https://example.com',
+        ...(options.containable && action.element_id === 'buy' ? { contained: true } : {}),
+      }),
+      act: async (_action, _signal, dispatch, authorization) => {
+        dispatch?.();
+        state.acts++;
+        state.authorizations.push(authorization);
+        if (state.holdsLeft > 0 && authorization?.holdWrites) {
+          state.holdsLeft--;
+          state.alive = true;
+          throw new HeldWritesError({ id: `h${++state.holdNumber}`, requests: state.requests });
+        }
+      },
+      releaseHeldWrites: async (holdId: string, expiresAt: number) => {
+        if (state.releaseFails) throw new AdlError('E_STALE_STATE');
+        state.released.push([holdId, expiresAt]);
+      },
+      abortHeldWrites: async (holdId: string, outcome: string) => {
+        state.aborted.push([holdId, outcome]);
+      },
+      heldWritesAlive: () => state.alive,
+      heldWriteOutcome: () => state.outcome,
+      close: async () => {},
+    }),
+    close: async () => {},
+  };
+  const policy = parsePolicy({
+    operationMode: options.operationMode ?? 'ask',
+    allowedOrigins: ['https://example.com', ...(options.allowedOrigins ?? [])],
+    browserTargets: [{ id: 'fixture', label: 'Example', url: 'https://example.com', classification: 'PUBLIC' }],
+    ...(options.auditPath ? { auditPath: options.auditPath } : {}),
+  });
+  const engine = new Engine(policy, { browser: adapter }, process.platform, () => state.allowed);
+  const session = await engine.open((await engine.listTargets()).targets[0]!.target_id);
+  const action: Action = { action: 'click', element_id: 'e1' };
+  const other: Action = { action: 'click', element_id: 'e2' };
+  /** The first act, which the page's handler answers with held writes: returns the error the caller sees. */
+  const attempt = async (revision = 1) => {
+    const error = await engine.act(session.session_id, action, revision).then(
+      () => undefined,
+      (e: unknown) => e,
+    );
+    assert.ok(error instanceof AdlError, String(error));
+    return error;
+  };
+  return {
+    engine,
+    session,
+    action,
+    other,
+    state,
+    broker,
+    attempt,
+    /** Polls until the condition holds (the engine's watcher acts on its own clock). */
+    until: async (condition: () => boolean, ms = 3000) => {
+      for (const started = Date.now(); !condition(); await new Promise(resolve => setTimeout(resolve, 20)))
+        if (Date.now() - started > ms) assert.fail('condition not reached in ' + ms + ' ms');
+    },
+    close: async () => {
+      await engine.shutdown();
+      await broker?.close();
+    },
+  };
+}
+const rows = (result: { requests: { request_id: string; status: string; sent?: boolean }[] }) =>
+  result.requests.map(r => [r.status, r.sent]);
+
+test('held writes: the first act opens one approval from the described requests; the agent gets a request id and is told not to retry', async () => {
+  const f = await heldFixture();
+  try {
+    const error = await f.attempt();
+    assert.equal(error.code, 'E_APPROVAL_REQUIRED');
+    assert.equal(error.reason, 'request_requires_approval');
+    assert.ok(error.requestId);
+    const safe = safeError(error);
+    assert.equal(safe.request_id, error.requestId);
+    assert.equal(safe.retryable, false);
+    assert.equal(safe.page_script_ran, true);
+    assert.equal(safe.may_have_executed, undefined);
+    assert.equal(safe.revision, undefined);
+    assert.equal(f.broker!.state.posts, 1);
+    const request = f.broker!.byId(error.requestId!)!;
+    assert.equal(request.summary.risk, 'consequential');
+    assert.equal(
+      request.summary.action,
+      'send_request',
+      'the control already ran: the human approves the request it left waiting',
+    );
+    assert.equal(request.summary.name, 'Save');
+    assert.deepEqual(request.summary.details, ['Request POST https://example.com/api', '"title": "t"']);
+    assert.equal(f.state.authorizations[0]?.holdWrites, true);
+    assert.equal(f.state.authorizations[0]?.approved, false);
+    assert.deepEqual(f.state.released, []);
+    assert.deepEqual(f.state.aborted, []);
+    // The session survives and sits on the revision after the dispatched action.
+    assert.equal((await f.engine.observe(f.session.session_id)).revision, 2);
+    const pending = await f.engine.approvals(error.requestId);
+    assert.deepEqual(rows(pending), [['pending', undefined]]);
+  } finally {
+    await f.close();
+  }
+});
+
+test('held writes: approval releases the requests once; adl_approvals reports sent and the answer, and keeps the row only for its request id', async () => {
+  const f = await heldFixture();
+  try {
+    const error = await f.attempt();
+    const id = error.requestId!;
+    // The answer arrives after the release: adl_approvals waits briefly for it.
+    setTimeout(() => (f.state.outcome = { response_status: 200 }), 300);
+    f.broker!.byId(id)!.status = 'approved';
+    const started = Date.now();
+    const result = await f.engine.approvals(id, 30000);
+    assert.ok(Date.now() - started < 2500, String(Date.now() - started));
+    assert.equal(result.requests.length, 1);
+    assert.deepEqual(
+      { ...result.requests[0], summary: undefined, expires_at: undefined },
+      {
+        request_id: id,
+        status: 'consumed',
+        expires_at: undefined,
+        summary: undefined,
+        sent: true,
+        response_status: 200,
+      },
+    );
+    assert.equal(f.state.released.length, 1);
+    assert.equal(f.state.released[0]![0], 'h1');
+    assert.equal(f.state.released[0]![1], f.broker!.byId(id)!.expires_at);
+    assert.deepEqual(f.state.aborted, []);
+    assert.equal(f.broker!.state.consumes, 1);
+    assert.equal(f.state.acts, 1);
+    // Only pending requests are listed without an id; the explicit id still finds the ended one (with the same answer).
+    assert.deepEqual((await f.engine.approvals()).requests, []);
+    const again = await f.engine.approvals(id);
+    assert.deepEqual(
+      again.requests.map(r => [r.request_id, r.status, r.sent, r.response_status]),
+      [[id, 'consumed', true, 200]],
+    );
+    assert.deepEqual((await f.engine.approvals(randomUUID())).requests, []);
+    assert.equal(f.state.released.length, 1, 'looking again releases nothing');
+  } finally {
+    await f.close();
+  }
+});
+
+test('held writes: the engine learns of the approval by itself, within one poll, when nobody calls adl_approvals', async () => {
+  const f = await heldFixture();
+  try {
+    const error = await f.attempt();
+    f.broker!.byId(error.requestId!)!.status = 'approved';
+    const started = Date.now();
+    await f.until(() => f.state.released.length === 1, 1200);
+    assert.ok(Date.now() - started < 1200);
+    assert.equal(f.broker!.state.consumes, 1);
+    const [row] = (await f.engine.approvals(error.requestId)).requests;
+    assert.deepEqual([row?.status, row?.sent], ['consumed', true]);
+    assert.equal(row?.response_status, undefined);
+  } finally {
+    await f.close();
+  }
+});
+
+// Whatever ends the request ends the held writes with the matching outcome, and nothing is sent.
+for (const status of ['denied', 'expired', 'invalidated'] as const)
+  test(`held writes: a request the broker reports as ${status} aborts the requests as ${status} and sends nothing`, async () => {
+    const f = await heldFixture();
+    try {
+      const error = await f.attempt();
+      f.broker!.byId(error.requestId!)!.status = status;
+      const result = await f.engine.approvals(error.requestId, 30000);
+      assert.deepEqual(rows(result), [[status, false]]);
+      assert.deepEqual(f.state.aborted, [['h1', status]]);
+      assert.deepEqual(f.state.released, []);
+      assert.equal(f.broker!.state.consumes, 0);
+      assert.deepEqual((await f.engine.approvals()).requests, []);
+    } finally {
+      await f.close();
+    }
+  });
+
+test('held writes: expiry by the clock is expired, and an approval that arrives afterwards sends nothing', async () => {
+  const f = await heldFixture();
+  const clock = Date.now;
+  try {
+    const error = await f.attempt();
+    const request = f.broker!.byId(error.requestId!)!;
+    request.status = 'approved';
+    Date.now = () => request.expires_at + 1;
+    const result = await f.engine.approvals(error.requestId);
+    assert.deepEqual(rows(result), [['expired', false]]);
+    assert.deepEqual(f.state.aborted, [['h1', 'expired']]);
+    assert.deepEqual(f.state.released, []);
+  } finally {
+    Date.now = clock;
+    await f.close();
+  }
+});
+
+test('held writes: the identical action returns the same request without dispatching; other actions and stale revisions leave the hold alone', async () => {
+  const f = await heldFixture();
+  try {
+    const error = await f.attempt();
+    const id = error.requestId!;
+    for (let i = 0; i < 2; i++) {
+      const again: unknown = await f.engine.act(f.session.session_id, f.action, 2).then(
+        () => undefined,
+        (e: unknown) => e,
+      );
+      assert.ok(again instanceof AdlError);
+      assert.equal(again.reason, 'request_requires_approval');
+      assert.equal(again.requestId, id);
+      assert.equal(safeError(again).retryable, false);
+    }
+    assert.equal(f.state.acts, 1);
+    assert.equal(f.broker!.state.posts, 1);
+    // A different consequential action must not replace a decision in progress.
+    await assert.rejects(f.engine.act(f.session.session_id, f.other, 2), {
+      code: 'E_APPROVAL_REQUIRED',
+      reason: 'approval_pending_other_action',
+    });
+    // An agent on an old revision is stale, but a hold is bound to the page's request, not to the revision.
+    await assert.rejects(f.engine.act(f.session.session_id, f.action, 1), { code: 'E_STALE_STATE' });
+    await assert.rejects(f.engine.act(f.session.session_id, f.other, 1), { code: 'E_STALE_STATE' });
+    assert.equal(f.broker!.byId(id)!.status, 'pending');
+    assert.equal(f.broker!.state.deletes, 0);
+    assert.deepEqual(f.state.aborted, []);
+    assert.deepEqual(rows(await f.engine.approvals(id)), [['pending', undefined]]);
+    // Still approvable afterwards.
+    f.broker!.byId(id)!.status = 'approved';
+    assert.deepEqual(rows(await f.engine.approvals(id, 30000)), [['consumed', true]]);
+    assert.equal(f.state.released.length, 1);
+    // The hold is over: the same action runs again (a new handler run) instead of returning the old request.
+    f.state.holdsLeft = 1;
+    const second = await f.attempt(2);
+    assert.notEqual(second.requestId, id);
+    assert.equal(f.state.acts, 2);
+  } finally {
+    await f.close();
+  }
+});
+
+test('held writes: closing the session withdraws the request at the broker and aborts the requests', async () => {
+  const f = await heldFixture();
+  try {
+    const error = await f.attempt();
+    await f.engine.close(f.session.session_id);
+    assert.equal(f.broker!.state.deletes, 1);
+    assert.equal(f.broker!.byId(error.requestId!)!.status, 'invalidated');
+    assert.deepEqual(f.state.aborted, [['h1', 'invalidated']]);
+    assert.deepEqual(f.state.released, []);
+    assert.deepEqual(rows(await f.engine.approvals(error.requestId)), [['invalidated', false]]);
+    assert.deepEqual((await f.engine.approvals()).requests, []);
+  } finally {
+    await f.close();
+  }
+});
+
+test('held writes: requests the page abandoned are withdrawn within one poll', async () => {
+  const f = await heldFixture();
+  try {
+    const error = await f.attempt();
+    f.state.alive = false;
+    await f.until(() => f.state.aborted.length === 1, 1500);
+    assert.deepEqual(f.state.aborted, [['h1', 'invalidated']]);
+    // A report of the request waits for its settlement to complete, including the withdrawal at the broker.
+    assert.deepEqual(rows(await f.engine.approvals(error.requestId)), [['invalidated', false]]);
+    assert.equal(f.broker!.byId(error.requestId!)!.status, 'invalidated');
+    assert.deepEqual(f.state.released, []);
+  } finally {
+    await f.close();
+  }
+});
+
+test('held writes: write holding is enabled only for ask mode with an approver', async () => {
+  const f = await heldFixture();
+  const standard = await heldFixture({ operationMode: 'standard' });
+  try {
+    assert.deepEqual(f.state.writeHolding, [true]);
+    assert.deepEqual(standard.state.writeHolding, [false]);
+    assert.equal(standard.state.authorizations.length, 0);
+    await standard.engine.act(standard.session.session_id, standard.action, 1);
+    assert.equal(standard.state.authorizations[0]?.holdWrites, undefined);
+  } finally {
+    // Each stub broker restores the environment it found: close them in reverse order.
+    await standard.close();
+    await f.close();
+  }
+  const saved = [process.env.ADL_APPROVAL_URL, process.env.ADL_APPROVAL_TOKEN, process.env.ADL_APPROVAL_EPOCH];
+  for (const key of ['ADL_APPROVAL_URL', 'ADL_APPROVAL_TOKEN', 'ADL_APPROVAL_EPOCH']) delete process.env[key];
+  const bare = await heldFixture({ broker: false });
+  try {
+    assert.deepEqual(bare.state.writeHolding, [false]);
+    await bare.engine.act(bare.session.session_id, bare.action, 1);
+    assert.equal(bare.state.authorizations[0]?.holdWrites, undefined, 'no approver, nothing to hold for');
+  } finally {
+    await bare.close();
+    for (const [key, value] of [
+      ['ADL_APPROVAL_URL', saved[0]],
+      ['ADL_APPROVAL_TOKEN', saved[1]],
+      ['ADL_APPROVAL_EPOCH', saved[2]],
+    ] as const)
+      if (value !== undefined) process.env[key] = value;
+  }
+});
+
+test('held writes: in ask mode a containable verb is dispatched contained when the adapter can hold writes, and approved first when it cannot', async () => {
+  const f = await heldFixture({ containable: true });
+  try {
+    f.state.holdsLeft = 0;
+    const result = await f.engine.act(f.session.session_id, f.other, 1);
+    assert.equal(result.ok, true);
+    assert.equal(f.broker!.state.posts, 0, 'no click approval: the request it may send is what a human approves');
+    assert.equal(f.state.acts, 1);
+    assert.equal(f.state.authorizations[0]?.approved, false);
+    assert.equal(f.state.authorizations[0]?.holdWrites, true);
+  } finally {
+    await f.close();
+  }
+  const bare = await heldFixture({ containable: true, noHolding: true });
+  try {
+    await assert.rejects(bare.engine.act(bare.session.session_id, bare.other, 1), { code: 'E_APPROVAL_REQUIRED' });
+    assert.equal(bare.broker!.state.posts, 1, 'an adapter that cannot hold writes keeps the approval before dispatch');
+    assert.equal(bare.state.acts, 0);
+  } finally {
+    await bare.close();
+  }
+  // Standard mode has nobody to ask and always contains.
+  const standard = await heldFixture({ containable: true, operationMode: 'standard' });
+  try {
+    standard.state.holdsLeft = 0;
+    assert.equal((await standard.engine.act(standard.session.session_id, standard.other, 1)).ok, true);
+    assert.equal(standard.state.acts, 1);
+  } finally {
+    await standard.close();
+  }
+});
+
+test('held writes: a set that cannot be shown completely is aborted as not approvable and never asked', async () => {
+  const lines = Array.from({ length: 26 }, (_, i) => `"field${i}": "v"`);
+  const f = await heldFixture({ requests: [heldRequest({ details: lines })] });
+  try {
+    const error = await f.attempt();
+    assert.equal(error.code, 'E_APPROVAL_REQUIRED');
+    assert.equal(error.reason, 'request_not_approvable');
+    assert.equal(error.requestId, undefined);
+    assert.equal(safeError(error).page_script_ran, true);
+    assert.equal(safeError(error).retryable, false);
+    assert.equal(f.broker!.state.posts, 0);
+    assert.deepEqual(f.state.aborted, [['h1', 'not_approvable']]);
+  } finally {
+    await f.close();
+  }
+  // Two requests of 13 lines each do not fit one dialog either, nor do details above 8192 bytes in all.
+  const two = await heldFixture({
+    requests: [heldRequest({ details: lines.slice(0, 13) }), heldRequest({ details: lines.slice(0, 13) })],
+  });
+  try {
+    assert.equal((await two.attempt()).reason, 'request_not_approvable');
+    assert.equal(two.broker!.state.posts, 0);
+  } finally {
+    await two.close();
+  }
+  const big = await heldFixture({
+    requests: [heldRequest({ details: Array.from({ length: 3 }, () => 'x'.repeat(3000)) })],
+  });
+  try {
+    assert.equal((await big.attempt()).reason, 'request_not_approvable');
+    assert.equal(big.broker!.state.posts, 0);
+    assert.deepEqual(big.state.aborted, [['h1', 'not_approvable']]);
+  } finally {
+    await big.close();
+  }
+});
+
+test('held writes: a secret value in any request makes the approval a credential request; several requests are one approval', async () => {
+  const f = await heldFixture({
+    requests: [
+      heldRequest({ details: ['Request POST https://example.com/a'] }),
+      heldRequest({
+        url: 'https://example.com/b',
+        details: ['Request POST https://example.com/b', '"password": [secret, 8 characters]'],
+        secret: true,
+      }),
+    ],
+  });
+  try {
+    const error = await f.attempt();
+    assert.equal(f.broker!.state.posts, 1);
+    const request = f.broker!.byId(error.requestId!)!;
+    assert.equal(request.summary.risk, 'credential');
+    assert.deepEqual(request.summary.details, [
+      'Request POST https://example.com/a',
+      'Request POST https://example.com/b',
+      '"password": [secret, 8 characters]',
+    ]);
+    request.status = 'approved';
+    assert.deepEqual(rows(await f.engine.approvals(error.requestId, 30000)), [['consumed', true]]);
+    assert.equal(f.broker!.state.consumes, 1, 'one approval for the whole set');
+    assert.equal(f.state.released.length, 1);
+  } finally {
+    await f.close();
+  }
+});
+
+test('held writes: the request cannot be opened while another approval is pending; the requests are aborted and the reason is reported', async () => {
+  const f = await heldFixture();
+  try {
+    // The Buy click needs its own approval first (a pending decision of another action).
+    await assert.rejects(f.engine.act(f.session.session_id, f.other, 1), {
+      code: 'E_APPROVAL_REQUIRED',
+      reason: undefined,
+    });
+    assert.equal(f.broker!.state.posts, 1);
+    const error = await f.attempt();
+    assert.equal(error.code, 'E_APPROVAL_REQUIRED');
+    assert.equal(error.reason, 'approval_pending_other_action');
+    assert.equal(error.requestId, undefined);
+    assert.equal(safeError(error).page_script_ran, true);
+    assert.deepEqual(f.state.aborted, [['h1', 'invalidated']]);
+    assert.equal(f.broker!.state.posts, 1);
+  } finally {
+    await f.close();
+  }
+});
+
+test('held writes: a release that fails (the page abandoned the requests meanwhile) reports sent:false, not a send', async () => {
+  const f = await heldFixture();
+  try {
+    const error = await f.attempt();
+    f.state.releaseFails = true;
+    f.broker!.byId(error.requestId!)!.status = 'approved';
+    assert.deepEqual(rows(await f.engine.approvals(error.requestId, 30000)), [['invalidated', false]]);
+    assert.deepEqual(f.state.released, []);
+    assert.deepEqual(f.state.aborted, [['h1', 'invalidated']]);
+  } finally {
+    await f.close();
+  }
+});
+
+test('held writes: an emergency stop between approval and release sends nothing', async () => {
+  const f = await heldFixture();
+  try {
+    const error = await f.attempt();
+    f.broker!.byId(error.requestId!)!.status = 'approved';
+    f.state.allowed = false;
+    await f.until(() => f.state.aborted.length === 1, 2000);
+    assert.deepEqual(f.state.aborted, [['h1', 'invalidated']]);
+    assert.deepEqual(f.state.released, []);
+  } finally {
+    f.state.allowed = true;
+    await f.close();
+  }
+});
+
+test('held writes: adl_execute stops at the step that held a write and leaves the rest unexecuted', async () => {
+  const f = await heldFixture();
+  try {
+    const started = f.engine.execute(
+      [
+        { session_id: f.session.session_id, ...f.action },
+        { session_id: f.session.session_id, ...f.other },
+      ],
+      { [f.session.session_id]: 1 },
+    );
+    let task = f.engine.task(started.task_id);
+    for (; task.status === 'queued' || task.status === 'running'; task = f.engine.task(started.task_id))
+      await new Promise(resolve => setTimeout(resolve, 20));
+    assert.equal(task.status, 'failed');
+    assert.deepEqual(
+      task.results.map(r => r.status),
+      ['failed', 'not_executed'],
+    );
+    assert.equal(task.error?.reason, 'request_requires_approval');
+    assert.equal(task.error?.retryable, false);
+    assert.equal(task.error?.request_id, f.broker!.latest()!.request_id);
+    assert.equal(f.state.acts, 1);
+  } finally {
+    await f.close();
+  }
+});
+
+// Concurrency crossings: the engine's watcher, adl_approvals and the session lifecycle all act on the same hold.
+test(
+  'held writes: an approval seen by the watcher and by several adl_approvals waits is released exactly once',
+  { timeout: 20000 },
+  async () => {
+    const f = await heldFixture();
+    try {
+      const error = await f.attempt();
+      const id = error.requestId!;
+      const waiting = [
+        f.engine.approvals(id, 30000),
+        f.engine.approvals(id, 30000),
+        f.engine.approvals(undefined, 30000),
+      ];
+      await new Promise(resolve => setTimeout(resolve, 150));
+      f.broker!.byId(id)!.status = 'approved';
+      const results = await Promise.all(waiting);
+      for (const result of results.slice(0, 2)) assert.deepEqual(rows(result), [['consumed', true]]);
+      // Without request_id only pending requests are listed: a wait that looks again after the ending completed sees none.
+      assert.ok([0, 1].includes(rows(results[2]!).length), JSON.stringify(rows(results[2]!)));
+      if (rows(results[2]!).length) assert.deepEqual(rows(results[2]!), [['consumed', true]]);
+      assert.equal(f.state.released.length, 1);
+      assert.equal(f.broker!.state.consumes, 1);
+      assert.equal(f.broker!.state.deletes, 1);
+      assert.deepEqual(f.state.aborted, []);
+      await new Promise(resolve => setTimeout(resolve, 700));
+      assert.equal(f.state.released.length, 1, 'the watcher does not release again');
+      assert.equal(f.broker!.state.consumes, 1);
+    } finally {
+      await f.close();
+    }
+  },
+);
+
+test('held writes: a denial racing with the session closing ends once and sends nothing', async () => {
+  const f = await heldFixture();
+  try {
+    const error = await f.attempt();
+    const id = error.requestId!;
+    f.broker!.byId(id)!.status = 'denied';
+    const waiting = f.engine.approvals(id, 30000);
+    await Promise.all([f.engine.close(f.session.session_id), waiting]);
+    assert.equal(f.state.aborted.length, 1);
+    assert.ok(['denied', 'invalidated'].includes(f.state.aborted[0]![1]), f.state.aborted[0]![1]);
+    assert.deepEqual(f.state.released, []);
+    const [row] = (await f.engine.approvals(id)).requests;
+    assert.equal(row?.sent, false);
+    assert.ok(['denied', 'invalidated'].includes(row!.status), row!.status);
+  } finally {
+    await f.close();
+  }
+});
+
+test('held writes: an approval racing with the session closing is released at most once and settled exactly once', async () => {
+  const f = await heldFixture();
+  try {
+    const error = await f.attempt();
+    const id = error.requestId!;
+    f.broker!.byId(id)!.status = 'approved';
+    await Promise.all([f.engine.close(f.session.session_id), f.engine.approvals(id, 30000)]);
+    assert.equal(f.state.released.length + f.state.aborted.length, 1, JSON.stringify(f.state));
+    assert.ok(f.broker!.state.consumes <= 1);
+    const [row] = (await f.engine.approvals(id)).requests;
+    assert.equal(row?.sent, f.state.released.length === 1);
+  } finally {
+    await f.close();
+  }
+});
+
+test('held writes: the clock passing the expiry while the approval is consumed sends nothing', async () => {
+  const f = await heldFixture();
+  const clock = Date.now;
+  try {
+    const error = await f.attempt();
+    const request = f.broker!.byId(error.requestId!)!;
+    request.status = 'approved';
+    // The broker consumed the approval in time; by the time the engine checks the expiry it has passed.
+    Date.now = () => (f.broker!.state.consumes > 0 ? request.expires_at + 1 : clock());
+    assert.deepEqual(rows(await f.engine.approvals(error.requestId, 30000)), [['expired', false]]);
+    assert.equal(f.broker!.state.consumes, 1, 'the approval was spent');
+    assert.deepEqual(f.state.released, []);
+    assert.deepEqual(f.state.aborted, [['h1', 'expired']]);
+  } finally {
+    Date.now = clock;
+    await f.close();
+  }
+});
+
+test(
+  'held writes: requests the page abandons while adl_approvals waits end the wait at once',
+  { timeout: 20000 },
+  async () => {
+    const f = await heldFixture();
+    try {
+      const error = await f.attempt();
+      const started = Date.now();
+      setTimeout(() => (f.state.alive = false), 200);
+      const result = await f.engine.approvals(error.requestId, 30000);
+      assert.deepEqual(rows(result), [['invalidated', false]]);
+      assert.ok(Date.now() - started < 1500, String(Date.now() - started));
+      assert.equal(f.broker!.byId(error.requestId!)!.status, 'invalidated');
+      assert.deepEqual(f.state.aborted, [['h1', 'invalidated']]);
+      assert.equal('timed_out' in result, false);
+    } finally {
+      await f.close();
+    }
+  },
+);
+
+test('ended ordinary approvals are listed by request id only, and never as sent', async () => {
+  const f = await fixture();
+  try {
+    const request = await f.request();
+    request.status = 'approved';
+    await f.engine.act(f.session.session_id, f.action, 1);
+    assert.equal(f.state.consumes, 1);
+    assert.deepEqual((await f.engine.approvals()).requests, []);
+    const [row] = (await f.engine.approvals(request.request_id)).requests;
+    assert.deepEqual([row?.request_id, row?.status], [request.request_id, 'consumed']);
+    assert.equal('sent' in row!, false);
+  } finally {
+    await f.close();
+  }
+});
+
+// Standing site grants (ask mode): the broker approves an eligible request at POST time and says so with granted: 'site_writes'. The engine only
+// offers the grant for writes without credentials or money-like controls and URLs, and only ever speeds up what the broker approved.
+const GRANT = { scope: 'site_writes', origin: 'https://example.com' } as const;
+type ActResult = { ok: boolean; revision: number; approval?: Record<string, unknown> };
+const events = async (path: string) =>
+  (await readFile(path, 'utf8'))
+    .trim()
+    .split('\n')
+    .map(line => (JSON.parse(line) as { event: string }).event);
+
+test('held writes: a set the broker approves by a site grant is consumed and released inside the act, and the act returns ok with approval.granted', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'adl-grant-'));
+  const auditPath = join(dir, 'audit.jsonl');
+  const f = await heldFixture({ auditPath });
+  try {
+    f.broker!.grant('https://example.com');
+    f.state.outcome = { response_status: 201 };
+    const result = (await f.engine.act(f.session.session_id, f.action, 1)) as ActResult;
+    const id = f.broker!.latest()!.request_id;
+    assert.equal(result.ok, true);
+    assert.deepEqual(result.approval, {
+      request_id: id,
+      status: 'consumed',
+      sent: true,
+      granted: 'site_writes',
+      response_status: 201,
+    });
+    assert.equal(result.revision, 2, 'the page was observed again after the requests were sent');
+    assert.equal(f.state.acts, 1);
+    assert.equal(f.state.released.length, 1);
+    assert.equal(f.state.released[0]![0], 'h1');
+    assert.deepEqual(f.state.aborted, []);
+    assert.deepEqual(
+      [f.broker!.state.posts, f.broker!.state.consumes, f.broker!.state.autoApproved],
+      [1, 1, 1],
+      'one request, consumed exactly once',
+    );
+    assert.deepEqual(f.broker!.latest()!.summary.grant, GRANT);
+    // Nothing is left to wait for; the explicit id still reports how it was decided.
+    assert.deepEqual((await f.engine.approvals()).requests, []);
+    const [row] = (await f.engine.approvals(id)).requests;
+    assert.deepEqual(
+      { status: row?.status, sent: row?.sent, response_status: row?.response_status, granted: row?.granted },
+      { status: 'consumed', sent: true, response_status: 201, granted: 'site_writes' },
+    );
+    const log = await events(auditPath);
+    assert.ok(log.indexOf('approval_granted_by_site') > log.indexOf('action_started'), log.join());
+    assert.ok(log.indexOf('held_request_released') > log.indexOf('approval_granted_by_site'), log.join());
+    assert.ok(log.indexOf('action_completed') > log.indexOf('held_request_released'), log.join());
+    assert.equal(log.includes('held_request_pending'), false);
+    // The next held write under the grant is released the same way (a new request, consumed once again).
+    f.state.holdsLeft = 1;
+    const second = (await f.engine.act(f.session.session_id, f.action, result.revision)) as ActResult;
+    assert.equal(second.approval?.granted, 'site_writes');
+    assert.notEqual(second.approval?.request_id, id);
+    assert.deepEqual([f.broker!.state.posts, f.broker!.state.consumes, f.state.released.length], [2, 2, 2]);
+  } finally {
+    await f.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('held writes: the grant field names the destination origin and is omitted for secrets, mixed origins, money-like labels or paths, and origins outside the grants', async () => {
+  const grantOf = async (options: Parameters<typeof heldFixture>[0]) => {
+    const f = await heldFixture(options);
+    try {
+      const error = await f.attempt();
+      assert.equal(error.reason, 'request_requires_approval');
+      assert.deepEqual(f.state.aborted, [], 'the hold itself is the same with or without the grant field');
+      const summary = f.broker!.latest()!.summary;
+      return { grant: summary.grant, risk: summary.risk };
+    } finally {
+      await f.close();
+    }
+  };
+  const api = 'https://api.example.com';
+  const to = (url: string, extra: Partial<HeldWrite> = {}) =>
+    heldRequest({ url, details: [`Request POST ${url}`], ...extra });
+  assert.deepEqual(await grantOf({}), { grant: GRANT, risk: 'consequential' });
+  // A credential in the body: asked every time, as a credential request.
+  assert.deepEqual(await grantOf({ requests: [to('https://example.com/a', { secret: true })] }), {
+    grant: undefined,
+    risk: 'credential',
+  });
+  // The write goes to another allowed origin: the grant is keyed on the destination, never on the page.
+  assert.deepEqual(await grantOf({ allowedOrigins: [api], requests: [to(`${api}/b`)] }), {
+    grant: { scope: 'site_writes', origin: api },
+    risk: 'consequential',
+  });
+  // Two origins in one set, an origin the policy does not allow, and a path that names a purchase.
+  assert.equal(
+    (await grantOf({ allowedOrigins: [api], requests: [to('https://example.com/a'), to(`${api}/b`)] })).grant,
+    undefined,
+  );
+  assert.equal((await grantOf({ requests: [to('https://other.example/a')] })).grant, undefined);
+  assert.equal((await grantOf({ requests: [to('https://example.com/api/orders')] })).grant, undefined);
+  assert.equal((await grantOf({ requests: [to('https://example.com/pay?x=1')] })).grant, undefined);
+  assert.equal((await grantOf({ requests: [to('https://example.com/api?action=purchase')] })).grant, undefined);
+  // A money-like control, or a dialog it confirms, even though its write looks ordinary.
+  assert.equal((await grantOf({ saveName: 'Checkout' })).grant, undefined);
+  assert.equal((await grantOf({ saveName: '注文を確定' })).grant, undefined);
+  assert.equal((await grantOf({ dialog: 'Place your order' })).grant, undefined);
+  // Harmless words stay eligible.
+  assert.deepEqual((await grantOf({ saveName: 'Sort order', dialog: 'Order history' })).grant, GRANT);
+});
+
+test('held writes: no grant is offered outside ask mode with a broker, and a money-like set under a live grant still waits for a human', async () => {
+  const standard = await heldFixture({ operationMode: 'standard' });
+  try {
+    standard.state.holdsLeft = 0;
+    assert.equal((await standard.engine.act(standard.session.session_id, standard.action, 1)).ok, true);
+    assert.equal(standard.broker!.state.posts, 0);
+  } finally {
+    await standard.close();
+  }
+  const f = await heldFixture({ saveName: 'Checkout' });
+  try {
+    f.broker!.grant('https://example.com');
+    const error = await f.attempt();
+    assert.equal(error.reason, 'request_requires_approval', 'a live grant does not cover a money-like control');
+    assert.equal(f.broker!.state.autoApproved, 0);
+    assert.deepEqual(rows(await f.engine.approvals(error.requestId)), [['pending', undefined]]);
+    assert.deepEqual(f.state.released, []);
+  } finally {
+    await f.close();
+  }
+});
+
+test('held writes: the grant can only speed up what the broker approved: approval without granted is invalidated, and a stop or a failed release between the reply and the consume sends nothing', async () => {
+  // An approval the broker did not attribute to a grant is not an approval the engine accepts at POST time.
+  const silent = await heldFixture();
+  try {
+    silent.broker!.grant('https://example.com', { reportGranted: false });
+    const error = await silent.attempt();
+    assert.equal(error.code, 'E_POLICY_DENIED');
+    assert.equal(error.reason, 'approval_invalidated');
+    assert.equal(safeError(error).page_script_ran, true);
+    assert.deepEqual(silent.state.aborted, [['h1', 'invalidated']]);
+    assert.deepEqual(silent.state.released, []);
+    assert.equal(silent.broker!.state.consumes, 0);
+    assert.deepEqual((await silent.engine.approvals()).requests, []);
+  } finally {
+    await silent.close();
+  }
+  // Operations already stopped: the act itself is refused before anything happens.
+  const stopped = await heldFixture();
+  try {
+    stopped.broker!.grant('https://example.com');
+    stopped.state.allowed = false;
+    await assert.rejects(stopped.engine.act(stopped.session.session_id, stopped.action, 1), {
+      code: 'E_CANCELLED',
+      reason: 'emergency_stop',
+    });
+    assert.equal(stopped.broker!.state.posts, 0);
+  } finally {
+    stopped.state.allowed = true;
+    await stopped.close();
+  }
+  // A stop that arrives after the broker approved (before the consume): approval_invalidated, nothing released, the row says not sent.
+  const between = await heldFixture();
+  try {
+    between.broker!.grant('https://example.com');
+    Object.defineProperty(between.state, 'allowed', { get: () => between.broker!.state.autoApproved === 0 });
+    const error = await between.attempt();
+    assert.equal(error.reason, 'approval_invalidated');
+    assert.equal(safeError(error).page_script_ran, true);
+    assert.deepEqual(between.state.released, []);
+    assert.deepEqual(between.state.aborted, [['h1', 'invalidated']]);
+    assert.deepEqual(rows(await between.engine.approvals(between.broker!.latest()!.request_id)), [
+      ['invalidated', false],
+    ]);
+  } finally {
+    await between.close();
+  }
+  // The page abandoned its requests meanwhile: the release fails, nothing was sent.
+  const abandoned = await heldFixture();
+  try {
+    abandoned.broker!.grant('https://example.com');
+    abandoned.state.releaseFails = true;
+    const error = await abandoned.attempt();
+    assert.equal(error.reason, 'approval_invalidated');
+    assert.deepEqual(abandoned.state.released, []);
+    assert.deepEqual(abandoned.state.aborted, [['h1', 'invalidated']]);
+    const [row] = (await abandoned.engine.approvals(abandoned.broker!.latest()!.request_id)).requests;
+    assert.deepEqual([row?.status, row?.sent, row?.granted], ['invalidated', false, 'site_writes']);
+  } finally {
+    await abandoned.close();
+  }
+  // The set was released but a request was refused at dispatch (guard, DNS): not sent, reported as such.
+  const refused = await heldFixture();
+  try {
+    refused.broker!.grant('https://example.com');
+    refused.state.outcome = { dispatched: 0, refused: 1 };
+    const error = await refused.attempt();
+    assert.equal(error.reason, 'approval_invalidated');
+    assert.equal(safeError(error).page_script_ran, true);
+    assert.equal(refused.state.released.length, 1);
+    assert.equal((await refused.engine.approvals(refused.broker!.latest()!.request_id)).requests[0]?.sent, false);
+  } finally {
+    await refused.close();
+  }
+});
+
+test('held writes: an expiry that passes between the grant and the consume sends nothing', async () => {
+  const f = await heldFixture();
+  const clock = Date.now;
+  try {
+    f.broker!.grant('https://example.com');
+    // The broker consumed the approval in time; by the time the engine checks the expiry it has passed.
+    Date.now = () => (f.broker!.state.consumes > 0 ? clock() + 121000 : clock());
+    const error = await f.attempt();
+    assert.equal(error.code, 'E_STALE_STATE');
+    assert.equal(error.reason, 'approval_expired');
+    assert.deepEqual(f.state.released, []);
+    assert.deepEqual(f.state.aborted, [['h1', 'expired']]);
+  } finally {
+    Date.now = clock;
+    await f.close();
+  }
+});
+
+test('ask mode: a submission the broker approves by a site grant is reported with approved:true and the identical retry consumes it and dispatches', async () => {
+  const f = await submissionFixture({ urlencoded: true });
+  try {
+    f.broker!.grant('https://example.com');
+    const error = await f.attempt();
+    const id = error.requestId!;
+    assert.equal(error.reason, 'form_submission_requires_approval');
+    const safe = safeError(error);
+    assert.equal(safe.approved, true);
+    assert.equal(safe.retryable, true);
+    assert.equal(safe.revision, 2);
+    assert.equal(safe.request_id, id);
+    const entry = f.broker!.latest()!;
+    assert.equal(entry.status, 'approved', 'approved at POST time, not consumed');
+    assert.deepEqual(entry.summary.grant, GRANT);
+    assert.equal(f.broker!.state.consumes, 0);
+    assert.equal(f.state.acts, 1);
+    // adl_approvals is optional: it reports the decision and who made it.
+    const [row] = (await f.engine.approvals(id)).requests;
+    assert.deepEqual([row?.status, row?.granted], ['approved', 'site_writes']);
+    // The identical retry consumes it, once, and dispatches with the body-bound approval.
+    const result = await f.engine.act(f.session.session_id, f.action, safe.revision!);
+    assert.equal(result.ok, true);
+    assert.equal(f.state.acts, 2);
+    assert.equal(f.broker!.state.consumes, 1);
+    assert.equal(f.state.authorizations[1]?.approved, true);
+    assert.equal(f.state.authorizations[1]?.approvalProof, 'plain-submit-v1');
+    const [ended] = (await f.engine.approvals(id)).requests;
+    assert.deepEqual([ended?.status, ended?.granted], ['consumed', 'site_writes']);
+    // The approval is spent: the same revision is not dispatched a second time.
+    await assert.rejects(f.engine.act(f.session.session_id, f.action, safe.revision!));
+    assert.equal(f.state.acts, 2);
+    assert.equal(f.broker!.state.consumes, 1);
+    assert.equal(f.broker!.state.posts, 1);
+  } finally {
+    await f.close();
+  }
+});
+
+test('ask mode: a form without network facts (a GET form), a money-like submitter or action URL, and a label-gated click never carry the grant field', async () => {
+  const get = await submissionFixture();
+  try {
+    get.broker!.grant('https://example.com');
+    const error = await get.attempt();
+    assert.equal(safeError(error).approved, undefined);
+    assert.equal(get.broker!.latest()!.summary.grant, undefined, 'no urlencoded POST facts: asked every time');
+    assert.equal(get.broker!.latest()!.status, 'pending');
+  } finally {
+    await get.close();
+  }
+  for (const options of [
+    { labels: ['Save', '注文を確定'] },
+    { labels: ['Place order'] },
+    { networkUrl: 'https://example.com/checkout' },
+    { networkUrl: 'https://example.com/save?action=purchase' },
+  ]) {
+    const f = await submissionFixture({ urlencoded: true, ...options });
+    try {
+      f.broker!.grant('https://example.com');
+      const error = await f.attempt();
+      assert.equal(safeError(error).approved, undefined, JSON.stringify(options));
+      assert.equal(f.broker!.latest()!.summary.grant, undefined, JSON.stringify(options));
+      assert.equal(f.broker!.latest()!.status, 'pending', JSON.stringify(options));
+    } finally {
+      await f.close();
+    }
+  }
+  // A cross-origin form action is not a same-origin urlencoded POST: the adapter reports no network facts for it, and the grant names the page's origin only.
+  const foreign = await submissionFixture({ urlencoded: true, networkUrl: 'https://other.example/save' });
+  try {
+    foreign.broker!.grant('https://example.com');
+    await foreign.attempt();
+    assert.equal(foreign.broker!.latest()!.summary.grant, undefined);
+  } finally {
+    await foreign.close();
+  }
+  // A click the label vocabulary gates is approved before dispatch, per action: never covered by a grant.
+  const f = await heldFixture();
+  try {
+    f.broker!.grant('https://example.com');
+    await assert.rejects(f.engine.act(f.session.session_id, f.other, 1), { code: 'E_APPROVAL_REQUIRED' });
+    assert.equal(f.broker!.latest()!.summary.grant, undefined);
+    assert.equal(f.broker!.latest()!.status, 'pending');
+    assert.equal(f.state.acts, 0);
+  } finally {
+    await f.close();
+  }
+});
+
+test('held writes: adl_execute continues past a step whose write a site grant released', async () => {
+  const f = await heldFixture();
+  try {
+    f.broker!.grant('https://example.com');
+    f.state.outcome = { response_status: 200 };
+    const started = f.engine.execute(
+      [
+        { session_id: f.session.session_id, ...f.action },
+        { session_id: f.session.session_id, ...f.action },
+      ],
+      { [f.session.session_id]: 1 },
+    );
+    let task = f.engine.task(started.task_id);
+    for (; task.status === 'queued' || task.status === 'running'; task = f.engine.task(started.task_id))
+      await new Promise(resolve => setTimeout(resolve, 20));
+    assert.equal(task.status, 'completed', JSON.stringify(task));
+    assert.deepEqual(
+      task.results.map(r => r.status),
+      ['completed', 'completed'],
+    );
+    assert.equal((task.results[0]!.approval as { granted?: string }).granted, 'site_writes');
+    assert.equal(task.results[1]!.approval, undefined, 'the second step sent nothing');
+    assert.equal(f.state.released.length, 1);
+  } finally {
+    await f.close();
+  }
+});
+
+test('held writes: a pending request that the broker approves by a grant afterwards is released by the watcher and reported as granted', async () => {
+  const f = await heldFixture();
+  try {
+    f.state.outcome = { response_status: 200 };
+    const error = await f.attempt();
+    const id = error.requestId!;
+    assert.deepEqual(f.broker!.byId(id)!.summary.grant, GRANT);
+    // The request was queued behind another modal; the human then granted the site on that one.
+    const entry = f.broker!.byId(id)!;
+    entry.status = 'approved';
+    entry.granted = 'site_writes';
+    await f.until(() => f.state.released.length === 1, 1200);
+    assert.equal(f.broker!.state.consumes, 1);
+    const [row] = (await f.engine.approvals(id)).requests;
+    assert.deepEqual([row?.status, row?.sent, row?.granted], ['consumed', true, 'site_writes']);
+  } finally {
+    await f.close();
+  }
+  // A request that was never offered the grant (a credential) takes the broker's word for nothing: an ordinary approval, no granted row.
+  const secret = await heldFixture({ requests: [heldRequest({ secret: true })] });
+  try {
+    secret.state.outcome = { response_status: 200 };
+    const error = await secret.attempt();
+    assert.equal(secret.broker!.byId(error.requestId!)!.summary.grant, undefined);
+    const entry = secret.broker!.byId(error.requestId!)!;
+    entry.status = 'approved';
+    entry.granted = 'site_writes';
+    await secret.until(() => secret.state.released.length === 1, 1200);
+    const [row] = (await secret.engine.approvals(error.requestId)).requests;
+    assert.deepEqual([row?.status, row?.sent, row?.granted], ['consumed', true, undefined]);
+  } finally {
+    await secret.close();
   }
 });

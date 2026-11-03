@@ -11,6 +11,7 @@ import {
 import type { OperationMode } from '../bundled-policy.js';
 import type { ClientRow } from './client-manager.js';
 import { resolveDesktopSelection, validateDesktopApp } from './desktop-app.js';
+import type { SiteGrantView } from './approval-broker.js';
 
 export interface BrowserSetupView {
   failed: boolean;
@@ -31,6 +32,8 @@ export interface PanelHooks {
   mcpStatus(): string;
   mcpError(): string | null;
   permissions(): PermissionSummary;
+  siteGrants(): SiteGrantView[];
+  revokeSiteGrant(id: string): Promise<void>;
   updateStatus(): string;
   version(): string;
   refreshMcp(): Promise<void>;
@@ -106,7 +109,7 @@ export class SettingsPanelProvider implements vscode.WebviewViewProvider {
   <h3 id="workspace-title">このワークスペース / Workspace</h3>
   <div class="actions emergency-row"><button id="emergency-stop" class="danger" title="実行中の操作をただちに停止します / Stop running operations immediately">緊急停止 / Emergency stop</button><button id="resume-operations" class="secondary" hidden>操作を再開 / Resume operations</button></div>
   <p class="status" id="stopped-status" role="status" hidden>緊急停止中です。再開するには「操作を再開」を押してください。 / Operations are stopped. Select Resume operations to continue.</p>
-  <div class="summary-card"><p class="summary-label" id="ai-summary-label">いまの AI の権限 / What the AI can do now</p><div id="ai-summary-box" role="status" aria-live="polite" aria-atomic="true" aria-labelledby="ai-summary-label"><p class="summary-text" id="ai-summary"></p><p class="summary-extra" id="ai-summary-extra" hidden></p></div></div>
+  <div class="summary-card"><p class="summary-label" id="ai-summary-label">いまの AI の権限 / What the AI can do now</p><div id="ai-summary-box" role="status" aria-live="polite" aria-atomic="true" aria-labelledby="ai-summary-label"><p class="summary-text" id="ai-summary"></p><p class="summary-extra" id="ai-summary-extra" hidden></p></div><ul class="client-list" id="site-grants" aria-label="書き込みの継続許可 / Standing write grants" hidden></ul></div>
   <button type="button" id="setup-reopen" class="link-button" hidden>セットアップの手順を表示 / Show setup steps</button>
   <div class="checklist" id="setup-checklist" role="group" aria-labelledby="setup-checklist-title" hidden>
     <div class="checklist-head"><h4 class="checklist-title" id="setup-checklist-title">はじめの設定 / First-time setup</h4><span class="checklist-progress" id="setup-progress"></span><button type="button" id="setup-dismiss" class="secondary compact" aria-label="セットアップの手順を閉じる / Dismiss the setup steps">閉じる / Dismiss</button></div>
@@ -302,6 +305,13 @@ export class SettingsPanelProvider implements vscode.WebviewViewProvider {
       case 'setOperationMode':
         if (m.mode === 'read_only' || m.mode === 'standard' || m.mode === 'ask' || m.mode === 'all')
           return this.saveOperationMode(m.mode);
+        return Promise.resolve();
+      case 'revokeSiteGrant':
+        // The webview can only name a grant it was shown; the broker alone decides whether it still exists.
+        if (typeof m.id === 'string' && /^[0-9a-f-]{36}$/i.test(m.id)) {
+          const id = m.id;
+          return this.runGuarded('grants', () => this.hooks.revokeSiteGrant(id));
+        }
         return Promise.resolve();
       case 'emergencyStop':
         return this.runGuarded('stop', () => this.hooks.emergencyStop());
@@ -709,6 +719,11 @@ export class SettingsPanelProvider implements vscode.WebviewViewProvider {
     void preparing.then(() => this.publishState()).catch(error => log.line(`MCP refresh failed: ${String(error)}`));
   }
 
+  /** Republish the state without re-resolving the MCP definition (used when a standing grant is created, used or ended). */
+  publish(): Promise<void> {
+    return this.publishState();
+  }
+
   private async publishState(): Promise<void> {
     if (!this.view) return;
     const settings = readSettings();
@@ -749,6 +764,7 @@ export class SettingsPanelProvider implements vscode.WebviewViewProvider {
       trusted: vscode.workspace.isTrusted,
       hasFolder,
       permissions: this.hooks.permissions(),
+      grants: this.hooks.siteGrants(),
       clients: this.hooks.clientState(),
       busy: Object.fromEntries(
         [
@@ -764,6 +780,7 @@ export class SettingsPanelProvider implements vscode.WebviewViewProvider {
           'operationMode',
           'desktop',
           'browser',
+          'grants',
         ].map(k => [k, this.busy.has(k)]),
       ),
       status: {
