@@ -183,7 +183,10 @@ const aliases: Record<string, ErrorCode> = {
   E_ATSPI_UNAVAILABLE: 'E_BACKEND_UNAVAILABLE',
 };
 // Helper codes that carry a specific public reason (the Linux helper reports missing python3-gi/Atspi or no accessibility bus).
-const reasonAliases: Record<string, ErrorReason> = { E_ATSPI_UNAVAILABLE: 'linux_accessibility_unavailable' };
+const reasonAliases: Record<string, ErrorReason> = {
+  E_ATSPI_UNAVAILABLE: 'linux_accessibility_unavailable',
+  E_FOCUS_CHANGED: 'desktop_focus_changed',
+};
 const applicationState = z
   .object({ running: z.boolean(), managed: z.boolean(), changed: z.boolean() })
   .strict()
@@ -882,6 +885,10 @@ export class NativeDesktopAdapter implements Adapter {
             action: action.action,
             element_id: action.element_id,
             ...(action.action === 'fill' ? { value: action.value } : {}),
+            // Only the Linux helper resolves select by option name; the macOS and Windows helpers reject an unknown field.
+            ...(action.action === 'select' && this.platform === 'linux' && typeof action.value === 'string'
+              ? { value: action.value }
+              : {}),
             ...(action.action === 'check' ? { checked: action.checked } : {}),
             ...(action.action === 'scroll' ? { direction: action.direction } : {}),
             ...(authorization?.approved === true && this.tier === 'ask' ? { approved: true } : {}),
@@ -892,6 +899,19 @@ export class NativeDesktopAdapter implements Adapter {
           await c.close();
           throw new NativeError('E_INTERNAL', true);
         }
+        // The helper kept the session but invalidated its revision: say so instead of leaving the caller to guess.
+        return applied.focus_moved === true
+          ? {
+              warnings: [
+                {
+                  code: 'focus_moved',
+                  count: 1,
+                  message:
+                    'Keyboard focus moved inside the window as a result of the action (for example a tab switch). Observe again before the next action.',
+                },
+              ],
+            }
+          : undefined;
       },
       close: () =>
         (closing ??= (async () => {

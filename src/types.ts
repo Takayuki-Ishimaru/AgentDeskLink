@@ -56,7 +56,7 @@ export interface Element {
   /** Step of a native range/number input; the keyword "any" is kept as is. */
   step?: number | 'any';
 }
-/** Blocked-request summary. code follows ErrorReason (origin_not_allowed, redirect_origin_not_allowed, method_requires_approval, request_denied, response_blocked, network_error); resource_type and method are bounded enums and origin is origin-only. */
+/** Blocked-request summary. code follows ErrorReason (method_requires_approval | request_not_approvable | background_write_blocked | approval_pending_other_action | approval_unavailable | approval_denied | approval_expired | approval_invalidated | contained_request_blocked | form_submission_requires_approval | origin_not_allowed | redirect_origin_not_allowed | request_denied | response_blocked | network_error); resource_type and method are bounded enums and origin is origin-only. A warning whose method is a write method means the page's state was not saved. */
 export interface NetworkWarning {
   code: string;
   count: number;
@@ -70,6 +70,8 @@ export interface AdapterWarning extends NetworkWarning {
 }
 export interface AdapterActResult {
   warnings?: AdapterWarning[];
+  /** Network blocks recorded between this action's dispatch and the end of its window; the engine reports exactly these (other adapters: count diff of the snapshot warnings). */
+  blocks?: NetworkWarning[];
 }
 /** Adapter-private hashes; never projected into public observations. */
 export interface ActionEvidence {
@@ -83,6 +85,8 @@ export interface RawSnapshot {
   url?: string;
   title?: string;
   warnings?: NetworkWarning[];
+  /** Monotonic sequence number of the latest recorded block; acknowledgeWarnings(upToSeq) marks the blocks up to it as reported. */
+  warningSeq?: number;
   actionEvidence?: ActionEvidence;
   /** Main-frame document response status of the latest navigation; set only when it is 400 or higher. */
   http_status?: number;
@@ -188,6 +192,25 @@ export interface ActionAuthorization {
   expires_at?: number;
   pointReference?: GestureReference;
   actionEvidence?: { navigation: string; element?: string };
+  /** Ask mode with an approver: a main-frame fetch/XHR write the page sends during this action is held unsent (HeldWritesError) instead of blocked. */
+  holdWrites?: boolean;
+}
+/** Why held writes are aborted: the human decision or lifecycle that ended the approval ('denied', 'expired', 'invalidated'), or 'not_approvable' when the engine cannot describe the set to a human. They block the page's requests with approval_denied / approval_expired / approval_invalidated / request_not_approvable. */
+export type HeldWriteAbortOutcome = 'denied' | 'expired' | 'invalidated' | 'not_approvable';
+/** The scope of a standing site grant (ask mode, VS Code approval modal, third choice): later eligible page writes to `origin` by this AI server are approved without a dialog for a limited time. Only the host broker creates one. */
+export interface SiteWriteGrant {
+  scope: 'site_writes';
+  origin: string;
+}
+/** How a write approval was decided when no human answered it individually. */
+export type ApprovalGrantedBy = 'site_writes';
+/** The approval a standing site grant released inside the same action: the request is consumed and already sent. */
+export interface GrantedApprovalResult {
+  request_id: string;
+  status: 'consumed';
+  sent: true;
+  granted: ApprovalGrantedBy;
+  response_status?: number;
 }
 export interface AdapterSession {
   capabilities?: string[];
@@ -215,7 +238,14 @@ export interface AdapterSession {
     offset: number,
     length: number,
     signal: AbortSignal,
-  ): Promise<{ text: string; total_length: number; next_offset: number | null; truncated: boolean }>;
+  ): Promise<{
+    text: string;
+    total_length: number;
+    next_offset: number | null;
+    truncated: boolean;
+    /** Text a human cannot see was left out of the read. */
+    hidden_text?: true;
+  }>;
   prepareAction?(
     action: Action,
     signal: AbortSignal,
@@ -229,6 +259,8 @@ export interface AdapterSession {
     /** Consequential only because it submits a form; ask mode dispatches it under the adapter's submission guard (risk is then 'ordinary'). */
     submission?: 'plain';
     network?: { url: string; method: string; body: string };
+    /** Every label the activation can carry (the control, its form's submitter, its dialog): the engine checks them for money-like words before it offers a standing site grant. */
+    labels?: string[];
   }>;
   act(
     action: Action,
@@ -236,6 +268,22 @@ export interface AdapterSession {
     onDispatch?: () => void,
     authorization?: ActionAuthorization,
   ): Promise<void | AdapterActResult>;
+  /** Enables holding of page writes during authorized actions (engine: operationMode ask with an approver). */
+  setWriteHolding?(enabled: boolean): void;
+  /** Sends the held requests of holdId exactly as paused; expiresAt is the approval's expiry, re-checked at dispatch. Throws E_STALE_STATE when holdId is not the pending set. */
+  releaseHeldWrites?(holdId: string, expiresAt: number): Promise<void>;
+  /** Aborts the held requests of holdId; unknown ids are a no-op. */
+  abortHeldWrites?(holdId: string, outcome: HeldWriteAbortOutcome): Promise<void>;
+  /** False once the page abandoned every held request (timeout, navigation) or the set is gone. */
+  heldWritesAlive?(holdId: string): boolean;
+  /**
+   * How a released set ended, once every request of it is done with the network route (undefined before that): `dispatched` counts the
+   * requests that reached the network fetch, `refused` those that were stopped before it (guard, DNS, expiry re-check), and
+   * `response_status` is the highest status answered. Adapters that cannot tell omit dispatched / refused (all counted as sent).
+   */
+  heldWriteOutcome?(holdId: string): { dispatched?: number; refused?: number; response_status?: number } | undefined;
+  /** Marks the blocks recorded up to RawSnapshot.warningSeq as reported. */
+  acknowledgeWarnings?(upToSeq: number): void;
   close(): Promise<void>;
 }
 export interface Adapter {
@@ -307,13 +355,21 @@ export type ErrorReason =
   | 'proxy_connect_refused'
   | 'proxy_unreachable'
   | 'invalid_scope'
+  | 'scope_element_not_found'
+  | 'scope_within_unsupported'
+  | 'not_scrollable'
   | 'revision_expired'
   | 'form_submission_requires_approval'
   | 'desktop_operation_not_granted'
   | 'linux_accessibility_unavailable'
+  | 'desktop_focus_changed'
   | 'platform_unsupported'
   | 'capture_not_enabled'
-  | 'browser_sandbox_unavailable';
+  | 'browser_sandbox_unavailable'
+  | 'request_requires_approval'
+  | 'request_not_approvable'
+  | 'background_write_blocked'
+  | 'contained_request_blocked';
 const ERROR_REASON_MESSAGES: Record<ErrorReason, string> = {
   occluded: 'The target is covered by another element. Remove the obstruction and observe again.',
   not_visible: 'The target is not visible at the intended input point. Observe again before acting.',
@@ -331,7 +387,7 @@ const ERROR_REASON_MESSAGES: Record<ErrorReason, string> = {
   redirect_origin_not_allowed:
     'A redirect tried to leave for an origin that is not granted, or as something other than a document read. Inspect the destination origin; a page redirected to a granted origin follows it.',
   requires_ask_mode:
-    'This action is classified as consequential (its label, link destination or dialog). It needs individual human approval: select agentdesklink.operationMode = ask, or list a label that is known to be harmless in this workspace in agentdesklink.consequentialAllowLabels.',
+    'This action is classified as consequential (its label, link destination or dialog), or it sent a write request. It needs individual human approval: select agentdesklink.operationMode = ask (the control is then dispatched and the human approves the click or the exact request), or list a label that is known to be harmless in this workspace in agentdesklink.consequentialAllowLabels.',
   approval_unavailable:
     'Individual approval is unavailable. Start this MCP server through the trusted VS Code host with operationMode = ask.',
   emergency_stop:
@@ -359,7 +415,7 @@ const ERROR_REASON_MESSAGES: Record<ErrorReason, string> = {
   sequence_span_too_long:
     'The sampled span exceeds 6000 ms. Reduce frame_count or interval_ms so that (frame_count - 1) * interval_ms <= 6000.',
   method_requires_approval:
-    'Only GET/HEAD requests are sent automatically. A write request (POST, PUT, PATCH, DELETE) needs a one-shot approval or a broader operation grant (agentdesklink.operationMode).',
+    'A write request (POST, PUT, PATCH or DELETE) the page sent during this action was blocked before it left: what the screen shows was not saved. In ask mode (agentdesklink.operationMode = ask, started from the VS Code host) the same request is held inside the browser and shown to a human for approval.',
   request_denied: 'The request was malformed, unsupported, oversized or its grant ended before it was sent.',
   response_blocked: 'A redirect chain or response exceeded the safety limits and was blocked.',
   network_error: 'The request failed the guard, DNS or transport checks and was blocked.',
@@ -379,11 +435,17 @@ const ERROR_REASON_MESSAGES: Record<ErrorReason, string> = {
   proxy_unreachable:
     'The configured proxy could not be reached. Check agentdesklink.browserProxyServer and the network.',
   invalid_scope:
-    'The scope expression is malformed. Use up to 8 comma-separated terms: role:button, name:Save, id:<element_id>, text:"v1.0: fixed" or plain text; quote a term that contains a comma and keep quotes balanced.',
+    'The scope expression is malformed. Use up to 8 comma-separated terms: role:button, name:Save, id:<element_id>, within:<element_id>, text:"v1.0: fixed" or plain text; quote a term that contains a comma and keep quotes balanced.',
+  scope_element_not_found:
+    'The element named by within:<element_id> is not in this observation (the id is unknown or the page changed). Observe again and use an element id from the latest revision.',
+  scope_within_unsupported:
+    'within:<element_id> needs the page structure of a browser observation; desktop observations are flat. Narrow the search with role:, name: or text: terms instead.',
+  not_scrollable:
+    'Nothing to scroll: the page (or the element and its ancestors) fits in the viewport and has no scrollable area, so everything is already in view. Use adl_observe to read it; scroll only a region that has more content than it shows.',
   revision_expired:
     'The since_revision baseline is no longer retained (only recent revisions are kept). Omit since_revision for a full observation.',
   form_submission_requires_approval:
-    'The page tried to submit a form; the submission was cancelled inside the browser before any request left (page scripts may have run). In ask mode an approval request was created: wait for the decision with adl_approvals (wait_ms) and retry the identical action with the returned revision. In standard mode form submissions need agentdesklink.operationMode = ask.',
+    'The page tried to submit a form; the submission was cancelled inside the browser before any request left (page scripts may have run). In ask mode an approval request was created: wait for the decision with adl_approvals (wait_ms) and retry the identical action with the returned revision. approved: true in this error means a standing site grant already approved it: retry the identical action with the returned revision at once. In standard mode form submissions need agentdesklink.operationMode = ask (a GET search form is sent without approval).',
   desktop_operation_not_granted:
     'Native desktop mutations are not granted for this application. Select agentdesklink.operationMode = standard for ordinary controls, grant allowAllOperations, or configure a trusted control allowlist (controlsPath) in the policy.',
   linux_accessibility_unavailable:
@@ -394,18 +456,53 @@ const ERROR_REASON_MESSAGES: Record<ErrorReason, string> = {
     'Image capture is not enabled for this target. Desktop apps: enable agentdesklink.allowUnredactedImages in the trusted workspace settings. Policy-file browser targets: set browserTargets[].visual.enabled.',
   browser_sandbox_unavailable:
     'Chromium could not start its sandbox. The MCP server log names the launch error and the remedy.',
+  desktop_focus_changed:
+    'Another window or application became active during the action, so the desktop session was closed. Check the screen, then open a new session with adl_open and observe.',
+  request_requires_approval:
+    "The page sent a write request (POST, PUT, PATCH or DELETE by fetch/XHR) during this action. It is held unsent inside the browser and a human was asked to approve its exact content. Wait with adl_approvals (request_id, wait_ms): status consumed with sent:true means every request was released and dispatched; sent:false (or any other status) means nothing, or not the whole set, was sent. Then observe again. Do not repeat the action: the page's handler has already run. When a standing site grant covers the request, the action instead returns ok with approval.granted = site_writes and the request already sent.",
+  request_not_approvable:
+    'The page sent a write request that cannot be shown to a human for approval (multipart or file upload, binary, streamed or oversized body, a synchronous XHR the page waits for, a beacon or embedded frame, or more than 4 requests from one action), so it was blocked before it left. There is no automatic way to send it; what the screen shows was not saved.',
+  background_write_blocked:
+    'A write request that started outside any action (a timer, autosave or beacon) was blocked before it left; only writes the page sends while an action runs can be held for approval. Trigger the save with an explicit control (for example its Save button) so that it belongs to an action.',
+  contained_request_blocked:
+    'This control ran with the network closed to new requests (Delete/Remove containment) and started a new read request or navigation that cannot be attributed to it, so it was stopped; its handler has run. Writes it sends are held for approval in ask mode. If the control is known to be harmless in this workspace, list its label in agentdesklink.consequentialAllowLabels.',
 };
 export class AdlError extends Error {
   mayHaveExecuted = false;
   requestId?: string;
-  /** detail.argument names a request argument (never page data); detail.limit is a configured numeric limit; detail.revision is the session revision the identical retry must use; detail.page_script_ran says a stopped action's page handler has run. */
+  /** detail.argument names a request argument (never page data); detail.limit is a configured numeric limit; detail.revision is the session revision the identical retry must use; detail.page_script_ran says a stopped action's page handler has run; detail.approved says a standing site grant already approved the request, so the identical retry goes through at once. */
   constructor(
     public readonly code: ErrorCode,
     public readonly reason?: ErrorReason,
-    public readonly detail: { argument?: string; limit?: number; revision?: number; page_script_ran?: boolean } = {},
+    public readonly detail: {
+      argument?: string;
+      limit?: number;
+      revision?: number;
+      page_script_ran?: boolean;
+      approved?: true;
+    } = {},
   ) {
     super(ERROR_MESSAGES[code]);
     this.name = 'AdlError';
+  }
+}
+/** One write request the page sent during an action and the adapter holds unsent; the engine describes it to a human. Bodies never leave the adapter: only the description lines and the body hash do. */
+export interface HeldWrite {
+  method: string;
+  url: string;
+  content_type: string;
+  body_sha256: string;
+  body_length: number;
+  /** describeHeldRequest lines for the approval dialog. */
+  details: string[];
+  /** A credential or secret value was masked in details. */
+  secret: boolean;
+}
+/** Thrown by act() when the action left write requests held unsent; the session stays usable (mayHaveExecuted is false) and the engine turns it into an approval. */
+export class HeldWritesError extends AdlError {
+  constructor(public readonly hold: { id: string; requests: HeldWrite[] }) {
+    super('E_APPROVAL_REQUIRED', 'request_requires_approval', { page_script_ran: true });
+    this.name = 'HeldWritesError';
   }
 }
 /** Native helper error; mayHaveExecuted is the helper's own verdict and must survive to safeError. */
@@ -428,6 +525,7 @@ const REASON_HINTS: Partial<Record<ErrorReason, { workspace_setting?: string; po
   loopback_not_allowed: { workspace_setting: 'agentdesklink.allowLoopback' },
   private_network_not_allowed: { workspace_setting: 'agentdesklink.allowPrivateNetwork' },
   requires_ask_mode: { workspace_setting: 'agentdesklink.operationMode', policy_setting: 'consequentialAllowLabels' },
+  contained_request_blocked: { policy_setting: 'consequentialAllowLabels' },
   read_only_mode: { workspace_setting: 'agentdesklink.operationMode' },
   approval_unavailable: { workspace_setting: 'agentdesklink.operationMode' },
   consequential_operation: { workspace_setting: 'agentdesklink.operationMode' },
@@ -448,7 +546,10 @@ export function safeError(error: unknown) {
   return {
     code,
     retryable:
-      (code === 'E_STALE_STATE' || (code === 'E_APPROVAL_REQUIRED' && !!(error as AdlError).requestId)) &&
+      (code === 'E_STALE_STATE' ||
+        (code === 'E_APPROVAL_REQUIRED' &&
+          !!(error as AdlError).requestId &&
+          reason !== 'request_requires_approval')) &&
       !mayHaveExecuted,
     safe_message: mayHaveExecuted
       ? 'The operation may have executed. Verify the result before retrying; previous session handles may be unavailable.'
@@ -460,6 +561,7 @@ export function safeError(error: unknown) {
     ...(detail?.limit !== undefined ? { limit: detail.limit } : {}),
     ...(detail?.revision !== undefined ? { revision: detail.revision } : {}),
     ...(detail?.page_script_ran ? { page_script_ran: true } : {}),
+    ...(detail?.approved ? { approved: true } : {}),
     ...(error instanceof AdlError && error.requestId ? { request_id: error.requestId } : {}),
     ...(hints?.policy_setting ? { policy_setting: hints.policy_setting } : {}),
     ...(hints?.workspace_setting ? { workspace_setting: hints.workspace_setting } : {}),

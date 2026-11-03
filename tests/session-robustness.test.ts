@@ -81,13 +81,14 @@ test(
         session.session_id,
         { action: 'check', element_id: checkbox.id, checked: true },
         observed.revision,
-      )) as { ok: boolean; warnings?: { code: string }[]; network_blocked?: boolean };
+      )) as { ok: boolean; warnings?: { code: string }[]; network_blocked?: boolean; write_blocked?: boolean };
       assert.equal(result.ok, true);
       assert.ok(
         result.warnings?.some(w => w.code === 'target_replaced'),
         JSON.stringify(result),
       );
       assert.equal(result.network_blocked, undefined);
+      assert.equal(result.write_blocked, undefined);
       assert.equal(f.engine.listSessions().sessions.length, 1, 'the session must survive');
       observed = await f.engine.observe(session.session_id);
       assert.equal(observed.elements!.find(e => e.name === 'Water plants')!.checked, true);

@@ -84,9 +84,14 @@ for (const mode of ['legacy', 'modern'] as const)
       assert.equal(new Set(tools.tools.map(t => t.name)).size, 13);
       for (const name of ['adl_prepare_input', 'adl_commit_input', 'adl_applications', 'adl_app'])
         assert.ok(!tools.tools.some(t => t.name === name));
-      // Size guard: tool definitions are re-sent to the model with every session.
+      // Size guard: tool definitions are re-sent to the model with every session. v0.1.8 stood at 8993 bytes; the adl_act text for write_blocked and
+      // held writes (request_requires_approval) adds about 180 even after dropping the scroll parenthetical, hence 9200.
       const definitionBytes = Buffer.byteLength(JSON.stringify(tools.tools));
-      assert.ok(definitionBytes <= 9000, `tool definitions take ${definitionBytes} bytes (limit 9000)`);
+      assert.ok(definitionBytes <= 9200, `tool definitions take ${definitionBytes} bytes (limit 9200)`);
+      // The search-within-an-element term and whole-region reads are advertised where a model looks for them.
+      const observe = tools.tools.find(t => t.name === 'adl_observe')!;
+      assert.ok(JSON.stringify(observe.inputSchema).includes('within:<element_id>'));
+      assert.match(observe.description ?? '', /main\/article\/region id reads all its text/);
       // The advertised schemas are lean; the server still validates every call against the full schema.
       for (const tool of tools.tools) {
         const advertised = JSON.stringify(tool.inputSchema);

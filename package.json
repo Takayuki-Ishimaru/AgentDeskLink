@@ -2,7 +2,7 @@
   "name": "agentdesklink",
   "displayName": "AgentDeskLink",
   "description": "Local-first semantic browser and desktop control over MCP, with a per-workspace AgentDeskLink sidebar for VS Code.",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "publisher": "agentdesklink",
   "license": "MIT",
   "private": true,

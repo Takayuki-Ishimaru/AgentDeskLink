@@ -17,6 +17,8 @@ export interface ActionProof {
   risk: ActionRisk;
   role: string;
   name: string;
+  /** Every label the activation can carry (control, form submitter, enclosing dialog), for the money-like check of a standing site grant. */
+  labels?: string[];
   origin: string;
   details?: string[];
   network?: { url: string; method: string; body: string };
@@ -627,10 +629,21 @@ export async function inspectBrowserAction(
         ));
     // Label risk is decided in Node by classifyLabel from these facts; only the form-submission and credential parts stay here.
     const submitRisk = submit && (method !== 'GET' || !searchForm);
+    // An input's role follows its type as the observation names it, so the approval dialog does not call a check box a textbox.
+    const inputRole: Record<string, string> = {
+      checkbox: 'checkbox',
+      radio: 'radio',
+      submit: 'button',
+      button: 'button',
+      reset: 'button',
+      image: 'button',
+      range: 'slider',
+      number: 'spinbutton',
+    };
     const role =
       attr(e, 'role') ||
       (tag === 'input'
-        ? 'textbox'
+        ? (inputRole[type] ?? 'textbox')
         : tag === 'button'
           ? 'button'
           : tag === 'a'
@@ -766,6 +779,7 @@ export async function inspectBrowserAction(
     risk,
     role: data.role,
     name: data.name,
+    labels: [data.facts.name, data.facts.submitterName, data.facts.dialog?.name ?? ''].filter(l => l !== ''),
     origin: data.origin,
     ...(details ? { details } : {}),
     ...(data.network ? { network: data.network } : {}),

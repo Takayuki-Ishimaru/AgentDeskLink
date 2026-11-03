@@ -1,9 +1,12 @@
 import * as http from 'node:http';
-import { randomBytes, timingSafeEqual } from 'node:crypto';
+import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import * as vscode from 'vscode';
 import { redactApprovalText } from '../approval-summary.js';
+import { log } from './shared.js';
 
 type Status = 'pending' | 'approved' | 'denied' | 'expired' | 'consumed' | 'invalidated';
+// The only standing scope: every write request this AI server sends to one destination origin. The Engine computes eligibility; only the host modal turns it into a grant.
+type GrantScope = { scope: 'site_writes'; origin: string };
 type Summary = {
   action: string;
   surface: 'browser' | 'desktop';
@@ -15,6 +18,7 @@ type Summary = {
   risk: 'consequential' | 'credential';
   value?: { kind: 'public' | 'secret'; preview?: string; length: number };
   details?: string[];
+  grant?: GrantScope;
 };
 type Entry = {
   id: string;
@@ -25,13 +29,41 @@ type Entry = {
   summary: Summary;
   status: Status;
   generation: number;
+  // The id of the site grant that approved this entry, or that the human created while approving it.
+  grantedBy?: string;
 };
+type SiteGrant = {
+  id: string;
+  serverId: string;
+  origin: string;
+  createdAt: number;
+  expiresAt: number;
+  generation: number;
+  epoch: string;
+  uses: number;
+  lastUsedAt?: number;
+  timer?: ReturnType<typeof setTimeout>;
+};
+export interface SiteGrantView {
+  id: string;
+  origin: string;
+  scope: 'site_writes';
+  created_at: number;
+  expires_at: number;
+  uses: number;
+}
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const BINDING = /^[0-9a-f]{64}$/i;
 const APPROVE_LABEL = 'Approve once / 今回のみ許可';
+const ALLOW_SITE_LABEL = 'Allow further writes to this site / このサイトへの書き込みを続けて許可';
 const DENY_LABEL = 'Deny (same as Cancel/Esc) / 拒否（キャンセル・Escも同じ）';
 const DIALOG_NOTE =
-  'Approve once allows only this single action. Deny, Cancel, closing this dialog and Esc all deny it, and nothing is sent. / 「今回のみ許可」はこの1回の操作だけを許可します。「拒否」・キャンセル・ダイアログを閉じる・Escはすべて拒否となり、何も送信されません。';
+  "Approve once allows only this single action. Deny, Cancel, closing this dialog and Esc all deny it, and nothing is sent. The third choice, when offered, covers this site's writes for up to 30 minutes. / 「今回のみ許可」はこの1回の操作だけを許可します。「拒否」・キャンセル・ダイアログを閉じる・Escはすべて拒否となり、何も送信されません。3 つ目の選択肢（表示される場合）は、このサイトへの書き込みを最長 30 分間許可します。";
+// A standing grant lasts at most 30 minutes from the human's choice and ends earlier with the permission generation (settings, trust, emergency stop, deactivation) or an explicit revoke.
+const SITE_GRANT_MS = 30 * 60_000;
+const MAX_SITE_GRANTS = 16;
+// The Engine may attach a grant scope only to these browser actions: the held request itself, and the click / key press of a real form submission.
+const GRANT_ACTIONS = ['send_request', 'click', 'press'];
 // Untrusted text is shown as-is, except characters that could fake dialog structure or reorder text (line breaks, C0/C1 controls, bidi marks, overrides and isolates), which become visible escapes.
 const UNSAFE_TEXT = /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]/g;
 export function visibleText(text: string): string {
@@ -52,6 +84,11 @@ export class ApprovalBroker implements vscode.Disposable {
   private token = randomBytes(32).toString('base64url');
   private readonly entries = new Map<string, Entry>();
   private readonly serverIds = new Set<string>();
+  private readonly siteGrants = new Map<string, SiteGrant>();
+  private readonly grantsChanged = new vscode.EventEmitter<void>();
+  private grantsNotify: ReturnType<typeof setTimeout> | undefined;
+  // Coalesced: one emission per macrotask, however many grants were created, used or ended meanwhile.
+  readonly onDidChangeGrants = this.grantsChanged.event;
   private decisionQueue = Promise.resolve();
   private port = 0;
   private generation = 0;
@@ -110,12 +147,44 @@ export class ApprovalBroker implements vscode.Disposable {
     for (const entry of this.entries.values())
       if (entry.status === 'pending' || entry.status === 'approved') entry.status = 'invalidated';
     this.prune();
+    this.clearGrants();
   }
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
     this.revoke();
     this.server.close();
+    if (this.grantsNotify) clearTimeout(this.grantsNotify);
+    this.grantsNotify = undefined;
+    this.grantsChanged.dispose();
+  }
+  /** The live standing grants of this window, oldest first. The panel lists them; it can revoke them but never create or widen one. */
+  grants(): SiteGrantView[] {
+    this.pruneGrants();
+    return [...this.siteGrants.values()]
+      .sort((a, b) => a.createdAt - b.createdAt)
+      .map(g => ({
+        id: g.id,
+        origin: g.origin,
+        scope: 'site_writes' as const,
+        created_at: g.createdAt,
+        expires_at: g.expiresAt,
+        uses: g.uses,
+      }));
+  }
+  /** Explicit revoke from the panel: the grant ends, and anything it approved that nobody has consumed yet can no longer be used. */
+  revokeGrant(id: string): boolean {
+    this.pruneGrants();
+    const grant = this.siteGrants.get(id);
+    if (!grant) return false;
+    this.dropGrant(grant);
+    for (const entry of this.entries.values())
+      if (entry.grantedBy === grant.id && entry.status === 'approved') entry.status = 'invalidated';
+    log.line(
+      `site grant revoked (panel): ${grant.origin} for server ${grant.serverId.slice(0, 8)} (${grant.uses} uses)`,
+    );
+    this.notifyGrants();
+    return true;
   }
 
   private async handle(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
@@ -151,6 +220,12 @@ export class ApprovalBroker implements vscode.Disposable {
       entry.generation = this.generation;
       this.serverIds.add(entry.serverId);
       this.entries.set(entry.id, entry);
+      // A live grant for this server and destination approves right here, before the reply: there is no await between the check and the approval.
+      const grant = this.grantFor(entry);
+      if (grant) {
+        this.useGrant(entry, grant);
+        return this.reply(res, 201, this.response(entry));
+      }
       this.reply(res, 201, this.response(entry));
       this.decisionQueue = this.decisionQueue
         .then(() => this.decide(entry))
@@ -254,6 +329,7 @@ export class ApprovalBroker implements vscode.Disposable {
         'risk',
         'value',
         'details',
+        'grant',
       ]) ||
       Buffer.byteLength(JSON.stringify(q), 'utf8') > 8192
     )
@@ -338,6 +414,40 @@ export class ApprovalBroker implements vscode.Disposable {
         ...(typeof preview === 'string' ? { preview: redactApprovalText(preview) } : {}),
       };
     }
+    // The standing-grant scope is only ever the Engine's description of a plain, non-credential browser write to one granted http(s) origin; anything else is refused like any other malformed summary field.
+    let grant: GrantScope | undefined;
+    if (Object.hasOwn(q, 'grant')) {
+      const g = q.grant;
+      if (!g || typeof g !== 'object' || Array.isArray(g)) return;
+      const scope = g as Record<string, unknown>;
+      if (
+        !this.onlyKeys(scope, ['scope', 'origin']) ||
+        !Object.hasOwn(scope, 'scope') ||
+        !Object.hasOwn(scope, 'origin') ||
+        scope.scope !== 'site_writes' ||
+        typeof scope.origin !== 'string' ||
+        scope.origin.length > 256 ||
+        desktop ||
+        q.risk !== 'consequential' ||
+        value?.kind === 'secret' ||
+        !GRANT_ACTIONS.includes(action)
+      )
+        return;
+      try {
+        const u = new URL(scope.origin);
+        if (
+          !['http:', 'https:'].includes(u.protocol) ||
+          u.origin !== scope.origin ||
+          u.username ||
+          u.password ||
+          !this.allowedOrigins().includes(scope.origin)
+        )
+          return;
+      } catch {
+        return;
+      }
+      grant = { scope: 'site_writes', origin: scope.origin };
+    }
     const safeDetails = Array.isArray(details) ? details.map(line => redactApprovalText(line, 8192)) : undefined;
     const summary: Summary = {
       action: redactApprovalText(action),
@@ -350,6 +460,7 @@ export class ApprovalBroker implements vscode.Disposable {
       ...(name ? { name: redactApprovalText(name, 128) } : {}),
       ...(value ? { value } : {}),
       ...(safeDetails ? { details: safeDetails } : {}),
+      ...(grant ? { grant } : {}),
     };
     if (Buffer.byteLength(JSON.stringify(summary), 'utf8') > 8_192) return;
     return {
@@ -380,7 +491,16 @@ export class ApprovalBroker implements vscode.Disposable {
       if (entry.status === 'pending') entry.status = 'invalidated';
       return;
     }
+    // Queued behind an earlier modal: a grant the human gave there covers this request too, so no second modal is shown.
+    const standing = this.grantFor(entry);
+    if (standing) {
+      this.useGrant(entry, standing);
+      return;
+    }
     const approve: vscode.MessageItem = { title: APPROVE_LABEL };
+    // The third item is offered only for a browser summary that carries a validated grant scope.
+    const scope = !desktop && entry.summary.risk === 'consequential' ? entry.summary.grant : undefined;
+    const allowSite: vscode.MessageItem = { title: ALLOW_SITE_LABEL };
     // VS Code adds its own Cancel to a modal unless an item is the close affordance; making Deny that item keeps one denying button and makes Esc/close explicit.
     const deny: vscode.MessageItem = { title: DENY_LABEL, isCloseAffordance: true };
     const summary = entry.summary;
@@ -388,8 +508,12 @@ export class ApprovalBroker implements vscode.Disposable {
         ? 'untrusted app data / 信頼できないアプリ由来データ'
         : 'untrusted page data / 信頼できないページ由来データ',
       short = desktop ? 'untrusted app data' : 'untrusted page data';
+    // A held write: the control already ran in the page, and approving sends only the request listed below.
+    const heldRequest = summary.action === 'send_request' && !desktop;
     const lines = [
-      `Action: ${visibleText(summary.action)}`,
+      heldRequest
+        ? 'Action: send the request below (the control was already used) / 操作: 下の通信を送信（ボタンなどの操作は実行済み）'
+        : `Action: ${visibleText(summary.action)}`,
       desktop
         ? `Desktop application (configured grant / 許可したデスクトップアプリ): ${visibleText(summary.application ?? '')}`
         : '',
@@ -406,6 +530,9 @@ export class ApprovalBroker implements vscode.Disposable {
       desktop
         ? 'The native control is operated through the accessibility API in the background; the application may act immediately and nothing is rolled back. / ネイティブコントロールはアクセシビリティAPIで背面操作されます。アプリは直ちに処理する場合があり、取り消しはできません。'
         : '',
+      scope
+        ? `Standing option / 継続許可: "Allow further writes to this site" also approves, without asking, every later write request this AI server sends to ${visibleText(scope.origin)} for 30 minutes (or until settings change, emergency stop or revoke). Requests with credentials and purchase/payment-like operations still ask every time. Revoke it any time in the AgentDeskLink panel. / 「このサイトへの書き込みを続けて許可」を選ぶと、この AI サーバーが ${visibleText(scope.origin)} へ送る書き込み通信を 30 分間（設定変更・緊急停止・取り消しまで）確認なしに許可します。認証情報を含む通信と購入・支払いに関わる操作は毎回確認します。AgentDeskLink パネルからいつでも取り消せます。`
+        : '',
       ...(summary.details?.length
         ? [
             desktop
@@ -421,29 +548,32 @@ export class ApprovalBroker implements vscode.Disposable {
           ? 'Allow manual browsing for up to 120 seconds? Website scripts and forms at this origin can send requests while AI automation is paused. / 最大120秒、手動操作へ引き継ぎますか？ AIの自動操作は停止し、このoriginのサイト処理・フォーム送信を一時的に許可します。'
           : desktop
             ? 'AgentDeskLink asks to approve this native desktop action once. / このデスクトップアプリの操作を今回のみ許可しますか？'
-            : 'AgentDeskLink asks to approve this browser action once. / このブラウザー操作を今回のみ許可しますか？';
+            : heldRequest
+              ? 'The page is waiting to send the request below. Send it once? / ページが下の通信を送ろうとしています。今回のみ送信しますか？'
+              : 'AgentDeskLink asks to approve this browser action once. / このブラウザー操作を今回のみ許可しますか？';
       const result = await vscode.window.showWarningMessage(
         `${title}\n\n${lines.join('\n')}`,
         {
           modal: true,
           detail: `Workspace: ${visibleText(this.ownerLabel())}\n${DIALOG_NOTE}\nAsk covers browser actions and consequential native actions in the granted desktop app. Sensitive native controls are never approved. / 都度承認はブラウザー操作と、許可したデスクトップアプリの重要なネイティブ操作に適用されます。機密コントロールは承認できません。`,
         },
-        approve,
-        deny,
+        ...(scope ? [approve, allowSite, deny] : [approve, deny]),
       );
       if (entry.status !== 'pending') return;
       this.expire(entry);
-      // Only the Approve item approves; Deny, Cancel, Esc and closing the dialog all resolve to anything else.
+      // Only the Approve item and, when offered, the Allow-site item approve; Deny, Cancel, Esc and closing the dialog all resolve to anything else.
       const picked = typeof result === 'string' ? result : result?.title;
-      if (
+      const current =
         entry.status === 'pending' &&
-        picked === APPROVE_LABEL &&
         entry.epoch === this.epoch &&
         entry.generation === this.generation &&
-        this.contextCurrent()
-      )
+        this.contextCurrent();
+      if (current && picked === APPROVE_LABEL) entry.status = 'approved';
+      else if (current && scope && picked === ALLOW_SITE_LABEL && this.allowedOrigins().includes(scope.origin)) {
+        // The human approves this request and creates the standing grant in one choice; this request counts as the grant's first use.
         entry.status = 'approved';
-      else if (entry.status === 'pending') entry.status = 'denied';
+        entry.grantedBy = this.createGrant(entry, scope.origin).id;
+      } else if (entry.status === 'pending') entry.status = 'denied';
     } catch {
       if (entry.status === 'pending') entry.status = 'denied';
     }
@@ -460,7 +590,124 @@ export class ApprovalBroker implements vscode.Disposable {
     }
   }
   private response(entry: Entry) {
-    return { v: 1, request_id: entry.id, binding: entry.binding, status: entry.status, expires_at: entry.expiresAt };
+    return {
+      v: 1,
+      request_id: entry.id,
+      binding: entry.binding,
+      status: entry.status,
+      expires_at: entry.expiresAt,
+      ...(entry.grantedBy ? { granted: 'site_writes' as const } : {}),
+    };
+  }
+  // The live grant that may approve this pending entry without a modal, or undefined. The entry's server and destination origin must equal the grant's, and everything the modal path checks must still hold.
+  private grantFor(entry: Entry): SiteGrant | undefined {
+    this.pruneGrants();
+    const scope = entry.summary.grant;
+    if (
+      !scope ||
+      !this.siteGrants.size ||
+      entry.status !== 'pending' ||
+      entry.summary.surface !== 'browser' ||
+      entry.summary.risk !== 'consequential' ||
+      entry.epoch !== this.epoch ||
+      entry.generation !== this.generation ||
+      entry.expiresAt <= Date.now() ||
+      !this.contextCurrent() ||
+      !this.allowedOrigins().includes(scope.origin)
+    )
+      return undefined;
+    // pruneGrants() just ended every grant that is not live, and nothing awaits in between.
+    for (const grant of this.siteGrants.values())
+      if (grant.serverId === entry.serverId && grant.origin === scope.origin) return grant;
+    return undefined;
+  }
+  private grantLive(grant: SiteGrant, current: boolean): boolean {
+    return (
+      current &&
+      grant.expiresAt > Date.now() &&
+      grant.generation === this.generation &&
+      grant.epoch === this.epoch &&
+      this.allowedOrigins().includes(grant.origin)
+    );
+  }
+  private useGrant(entry: Entry, grant: SiteGrant): void {
+    const now = Date.now();
+    entry.status = 'approved';
+    entry.grantedBy = grant.id;
+    grant.uses++;
+    grant.lastUsedAt = now;
+    log.line(
+      `approval ${entry.id} approved by site grant ${grant.origin} (${visibleText(entry.summary.action)}, server ${entry.serverId.slice(0, 8)}, use ${grant.uses}, ${Math.max(0, Math.ceil((grant.expiresAt - now) / 60_000))} min left)`,
+    );
+    this.notifyGrants();
+  }
+  // A new grant replaces one for the same server and origin; at the cap the oldest ends first. A use never extends the lifetime.
+  private createGrant(entry: Entry, origin: string): SiteGrant {
+    this.pruneGrants();
+    for (const old of [...this.siteGrants.values()])
+      if (old.serverId === entry.serverId && old.origin === origin) this.dropGrant(old);
+    while (this.siteGrants.size >= MAX_SITE_GRANTS) {
+      const oldest = [...this.siteGrants.values()].sort((a, b) => a.createdAt - b.createdAt)[0];
+      if (!oldest) break;
+      this.dropGrant(oldest);
+    }
+    const now = Date.now();
+    const grant: SiteGrant = {
+      id: randomUUID(),
+      serverId: entry.serverId,
+      origin,
+      createdAt: now,
+      expiresAt: now + SITE_GRANT_MS,
+      generation: this.generation,
+      epoch: this.epoch,
+      uses: 1,
+      lastUsedAt: now,
+    };
+    this.siteGrants.set(grant.id, grant);
+    // The timer only makes the panel notice the end; every use re-checks the clock itself.
+    grant.timer = setTimeout(() => {
+      grant.timer = undefined;
+      this.pruneGrants();
+    }, SITE_GRANT_MS + 50);
+    grant.timer.unref?.();
+    log.line(
+      `site grant created: ${origin} for server ${entry.serverId.slice(0, 8)} (30 min; ends with the permission generation)`,
+    );
+    this.notifyGrants();
+    return grant;
+  }
+  private dropGrant(grant: SiteGrant): void {
+    if (grant.timer) clearTimeout(grant.timer);
+    grant.timer = undefined;
+    this.siteGrants.delete(grant.id);
+  }
+  // Ends every grant that is expired, from an older permission generation or epoch, or whose origin is no longer allowed.
+  private pruneGrants(): void {
+    if (!this.siteGrants.size) return;
+    const current = this.contextCurrent();
+    let ended = 0;
+    for (const grant of [...this.siteGrants.values()]) {
+      if (this.grantLive(grant, current)) continue;
+      this.dropGrant(grant);
+      ended++;
+      log.line(`site grant ended: ${grant.origin} for server ${grant.serverId.slice(0, 8)} (${grant.uses} uses)`);
+    }
+    if (ended) this.notifyGrants();
+  }
+  private clearGrants(): void {
+    const count = this.siteGrants.size;
+    for (const grant of [...this.siteGrants.values()]) this.dropGrant(grant);
+    if (!count) return;
+    log.line(`site grants cleared (${count})`);
+    this.notifyGrants();
+  }
+  private notifyGrants(): void {
+    if (this.disposed || this.grantsNotify) return;
+    this.grantsNotify = setTimeout(() => {
+      this.grantsNotify = undefined;
+      if (!this.disposed) this.grantsChanged.fire();
+    }, 0);
+    this.grantsNotify.unref?.();
   }
   private onlyKeys(value: Record<string, unknown>, keys: string[]): boolean {
     return Object.keys(value).every(key => keys.includes(key));

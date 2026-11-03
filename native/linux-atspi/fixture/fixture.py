@@ -4,6 +4,9 @@
 The control directory (ADL_FIXTURE_CONTROL) is a test command channel: each file written there is read,
 deleted and interpreted as one command: open-dialog, close-dialog, hide, show, close-window, quit, activate-main,
 activate-other, close-other (a second top-level window 'ADL Other', created on first use).
+
+The window also holds a second combo box with a duplicated entry ('Colour': Red, Red, Blue, Delete all) so an ambiguous
+select value is testable, and a two-page Gtk.Notebook ('Pages': tabs First / Second, each page a labelled button).
 """
 import os
 import sys
@@ -87,6 +90,17 @@ for text in ('Alpha', 'Beta', 'Gamma'):
     combo.append_text(text)
 combo.set_active(0)
 box.pack_start(combo, False, False, 0)
+colour = accessible(Gtk.ComboBoxText(), 'FixtureColour', 'Colour')
+for text in ('Red', 'Red', 'Blue', 'Delete all'):
+    colour.append_text(text)
+colour.set_active(0)
+box.pack_start(colour, False, False, 0)
+notebook = accessible(Gtk.Notebook(), 'FixtureNotebook', 'Pages')
+for index, text in enumerate(('First', 'Second')):
+    page = accessible(Gtk.Button(label='%s Page Button' % text), 'FixturePage%d' % index)
+    page.connect('clicked', lambda _b, n=text: status.set_text('Status: page %s' % n.lower()))
+    notebook.append_page(page, Gtk.Label(label=text))
+box.pack_start(notebook, False, False, 0)
 listbox = accessible(Gtk.ListBox(), 'FixtureList', 'Items')
 for text in ('One', 'Two', 'Three'):
     row = Gtk.ListBoxRow()

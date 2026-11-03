@@ -1,5 +1,5 @@
 import * as http from 'node:http';
-import { AdlError } from './types.js';
+import { AdlError, type ApprovalGrantedBy, type SiteWriteGrant } from './types.js';
 
 export type ApprovalStatus = 'pending' | 'approved' | 'denied' | 'expired' | 'consumed' | 'invalidated';
 export interface ApprovalSummary {
@@ -13,6 +13,8 @@ export interface ApprovalSummary {
   risk: 'consequential' | 'credential';
   value?: { kind: 'public' | 'secret'; preview?: string; length: number };
   details?: string[];
+  /** Present only on a request the engine found eligible for a standing site grant (browser writes, never credentials); the broker validates it. */
+  grant?: SiteWriteGrant;
 }
 export interface ApprovalReply {
   v: 1;
@@ -21,6 +23,8 @@ export interface ApprovalReply {
   status: ApprovalStatus;
   expires_at: number;
   consumed_now?: boolean;
+  /** The broker approved the entry through a standing site grant instead of a per-request decision. */
+  granted?: ApprovalGrantedBy;
 }
 export class ApprovalClient {
   private constructor(
@@ -122,7 +126,8 @@ export class ApprovalClient {
       r.request_id !== expected.request_id ||
       r.binding !== expected.binding ||
       r.expires_at !== expected.expires_at ||
-      !['pending', 'approved', 'denied', 'expired', 'consumed', 'invalidated'].includes(r.status)
+      !['pending', 'approved', 'denied', 'expired', 'consumed', 'invalidated'].includes(r.status) ||
+      (r.granted !== undefined && r.granted !== 'site_writes')
     )
       throw new AdlError('E_POLICY_DENIED');
     return r;

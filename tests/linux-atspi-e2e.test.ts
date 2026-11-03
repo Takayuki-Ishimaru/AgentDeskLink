@@ -206,3 +206,89 @@ test(
     }
   },
 );
+
+test(
+  'select with a value chooses the option of the combo box itself',
+  { skip: !enabled, timeout: 120000 },
+  async () => {
+    const control = await mkdtemp(join(tmpdir(), 'adl-e2e-ctl-'));
+    const fixture = await startFixture(control);
+    const engine = engineFor('standard');
+    try {
+      const target = await waitForTarget(engine);
+      const opened = await engine.open(target.target_id, 'background_semantic');
+      let observed = await engine.observe(opened.session_id, { token_budget: 8000 });
+      const combo = observed.elements!.find(e => e.role === 'combobox' && e.name === 'Flavour')!;
+      assert.ok(combo, 'the fixture combo box is observable');
+      const chosen = await engine.act(
+        opened.session_id,
+        { action: 'select', element_id: combo.id, value: 'Gamma' },
+        observed.revision,
+      );
+      assert.equal(chosen.ok, true);
+      observed = await engine.observe(opened.session_id, { token_budget: 8000 });
+      assert.equal(
+        observed.elements!.find(e => e.role === 'combobox' && e.name === 'Flavour')?.value,
+        'Gamma',
+        'the combo box shows the chosen option',
+      );
+      const unknown = await fail(
+        engine.act(opened.session_id, { action: 'select', element_id: combo.id, value: 'Delta' }, observed.revision),
+      );
+      assert.equal(unknown?.code, 'E_TARGET_NOT_FOUND');
+      assert.equal(
+        (await engine.observe(opened.session_id, { token_budget: 8000 })).elements!.find(
+          e => e.role === 'combobox' && e.name === 'Flavour',
+        )?.value,
+        'Gamma',
+        'a refused select changed nothing',
+      );
+    } finally {
+      await engine.shutdown();
+      fixture.kill('SIGKILL');
+      await rm(control, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  'a page tab switch stays applied with a focus_moved notice and the session keeps working',
+  { skip: !enabled, timeout: 120000 },
+  async () => {
+    const control = await mkdtemp(join(tmpdir(), 'adl-e2e-ctl-'));
+    const fixture = await startFixture(control);
+    const engine = engineFor('standard');
+    try {
+      const target = await waitForTarget(engine);
+      const opened = await engine.open(target.target_id, 'background_semantic');
+      let observed = await engine.observe(opened.session_id, { token_budget: 8000 });
+      const tab = observed.elements!.find(e => e.role === 'tab' && e.name === 'Second')!;
+      assert.ok(tab, 'the fixture notebook exposes its page tabs');
+      const switched = await engine.act(opened.session_id, { action: 'click', element_id: tab.id }, observed.revision);
+      assert.equal(switched.ok, true);
+      const notice = ((switched as unknown as { warnings?: { code: string; message?: string }[] }).warnings ?? []).find(
+        w => w.code === 'focus_moved',
+      );
+      if (notice) assert.match(notice.message ?? '', /Observe again/);
+      observed = await engine.observe(opened.session_id, { token_budget: 8000 });
+      assert.equal(
+        observed.elements!.find(e => e.role === 'tab' && e.name === 'Second')?.selected,
+        true,
+        'the other page is now current',
+      );
+      const page = observed.elements!.find(e => e.role === 'button' && e.name === 'Second Page Button')!;
+      assert.ok(page, 'the new page is actionable');
+      const clicked = await engine.act(opened.session_id, { action: 'click', element_id: page.id }, observed.revision);
+      assert.equal(clicked.ok, true);
+      observed = await engine.observe(opened.session_id, { token_budget: 8000 });
+      assert.ok(
+        observed.elements!.some(e => e.role === 'text' && e.name === 'Status: page second'),
+        'the page button ran',
+      );
+    } finally {
+      await engine.shutdown();
+      fixture.kill('SIGKILL');
+      await rm(control, { recursive: true, force: true });
+    }
+  },
+);

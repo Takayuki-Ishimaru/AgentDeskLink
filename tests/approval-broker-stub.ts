@@ -14,6 +14,8 @@ export type StubEntry = {
  * A loopback stand-in for the VS Code approval broker (the ADL_APPROVAL_* contract of src/approval-client.ts). Requests stay pending until a test
  * sets their status; DELETE consumes an approved request, invalidates a pending one and leaves any other status as it is. Set the environment
  * before the Engine is constructed: the Engine reads it once.
+ * grant(origin) simulates a standing site grant: a POST whose summary.grant names that origin is approved at once, and every reply of that entry
+ * carries granted: 'site_writes' (the wire contract of the real broker). Without a grant the behaviour is unchanged.
  */
 export async function stubBroker() {
   const saved = {
@@ -23,7 +25,8 @@ export async function stubBroker() {
   };
   const token = randomBytes(32).toString('base64url');
   const entries = new Map<string, StubEntry>();
-  const state = { posts: 0, gets: 0, deletes: 0, consumes: 0 };
+  const state = { posts: 0, gets: 0, deletes: 0, consumes: 0, autoApproved: 0 };
+  const grants = new Map<string, { report: boolean }>();
   const server = createServer(async (req, res) => {
     try {
       if (req.headers.authorization !== `Bearer ${token}`) {
@@ -38,6 +41,13 @@ export async function stubBroker() {
         const body = JSON.parse(Buffer.concat(chunks).toString()) as StubEntry;
         state.posts++;
         entry = { ...body, status: 'pending' };
+        const grant = (body.summary as { grant?: { scope?: unknown; origin?: unknown } }).grant;
+        const live = grant?.scope === 'site_writes' && typeof grant.origin === 'string' && grants.get(grant.origin);
+        if (live) {
+          entry.status = 'approved';
+          if (live.report) entry.granted = 'site_writes';
+          state.autoApproved++;
+        }
         entries.set(entry.request_id, entry);
       } else entry = entries.get(req.url!.split('/').at(-1)!);
       if (!entry) {
@@ -64,6 +74,7 @@ export async function stubBroker() {
           expires_at: entry.expires_at,
           status: entry.status,
           ...(req.method === 'DELETE' ? { consumed_now: consumed } : {}),
+          ...(entry.granted ? { granted: entry.granted } : {}),
         }),
       );
     } catch {
@@ -81,6 +92,14 @@ export async function stubBroker() {
     /** The most recently created request. */
     latest: () => [...entries.values()].at(-1),
     byId: (id: string) => entries.get(id),
+    /**
+     * From now on, eligible requests for this origin are approved at POST time, as under a live site grant. reportGranted:false simulates a
+     * broker that approves without saying why (the engine must not treat that as a grant).
+     */
+    grant: (origin: string, options: { reportGranted?: boolean } = {}) =>
+      grants.set(origin, { report: options.reportGranted !== false }),
+    /** Ends every grant: later requests wait for a decision again. */
+    revokeGrants: () => grants.clear(),
     close: async () => {
       server.closeAllConnections();
       await new Promise<void>(resolve => server.close(() => resolve()));

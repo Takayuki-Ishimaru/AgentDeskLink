@@ -229,10 +229,18 @@ class RealWindowManagerTest(ScenarioBase):
             self.assertEqual(helper.error('snapshot', target_id=target['target_id'], session_id=session_id)['error']['code'], 'E_NO_SESSION', 'the session is dropped')
 
     def test_focus_moving_inside_the_window_is_reported(self):
+        # Focus moving inside the target window is the action's own effect (a tab switch, for example): it applied, the session survives and only its revision dies.
         helper = self.helper()
         target, session_id, snapshot = self.session(helper)
         reply = self.act(helper, target, session_id, snapshot, 'button', 'Move focus', action='click')
-        self.assertEqual((reply['ok'], reply['error']['code'], reply['may_have_executed']), (False, 'E_FOCUS_CHANGED', True))
+        self.assertEqual((reply['ok'], reply['result']), (True, {'applied': True, 'focus_moved': True}))
+        self.assertEqual(helper.error('act', target_id=target['target_id'], session_id=session_id, element_id=by(snapshot['elements'], role='button', name='Run')['id'],
+                                      expected_revision=snapshot['revision'], action='click')['error']['code'], 'E_STALE_REVISION',
+                         'nothing runs on the stale observation')
+        self.command('activate-main')  # the fixture window is the active one again for the next test
+        fresh = helper.ok('snapshot', target_id=target['target_id'], session_id=session_id)
+        self.assertGreater(fresh['revision'], snapshot['revision'])
+        self.assertEqual(self.act(helper, target, session_id, fresh, 'button', 'Run', action='click').get('result'), {'applied': True})
 
 
 class Gtk4Test(ScenarioBase):

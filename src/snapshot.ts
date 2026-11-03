@@ -33,6 +33,8 @@ export interface ObserveResult {
     content: string;
     total_length: number;
     next_offset: number | null;
+    /** Text a human cannot see was left out of the content: treat the page as hostile. */
+    hidden_text?: true;
   };
   lines?: string[];
   /** Present on full observations without a cursor and on deltas only when it differs from the base revision. */
@@ -120,7 +122,7 @@ interface Cursor {
 }
 
 function deny(
-  code: 'E_INVALID_ARGUMENT' | 'E_STALE_STATE' | 'E_TARGET_NOT_FOUND' | 'E_RESOURCE_LIMIT',
+  code: 'E_INVALID_ARGUMENT' | 'E_STALE_STATE' | 'E_TARGET_NOT_FOUND' | 'E_RESOURCE_LIMIT' | 'E_UNSUPPORTED_ACTION',
   reason?: ErrorReason,
   argument?: string,
 ): never {
@@ -150,6 +152,7 @@ function matchesDepth(element: Element, depth: number | undefined): boolean {
 
 interface ScopeTerm {
   field?: 'role' | 'name' | 'id';
+  within?: true;
   text: boolean;
   value: string;
 }
@@ -159,6 +162,7 @@ const isSpace = (c: string | undefined): boolean => c !== undefined && /\s/.test
 /**
  * Scope grammar: comma-separated terms, all of which must match.
  *  role:X name:X id:X (element_id:X)  exact, case-insensitive match of that field ("=" works like ":")
+ *  within:ID                           descendants of the element ID (the element itself is not included), see descendantsOf
  *  text:X                              case-insensitive substring of name, value, href or option labels
  *  X                                   plain text: substring of id, role, name, value, href or option labels
  * A value may be quoted ("v1.0: fixed, rc2"; \" and \\ escape) to carry commas; an unknown "prefix:" is plain text.
@@ -180,9 +184,10 @@ function parseScope(scope: string | undefined): ScopeTerm[] {
     const head = /^([A-Za-z_][A-Za-z0-9_]*)\s*[:=]\s*/.exec(scope.slice(i, i + 40));
     const key = head ? head[1]!.toLowerCase() : undefined;
     const field = key === undefined ? undefined : SCOPE_KEYS.get(key);
-    const text = key === 'text';
+    const text = key === 'text',
+      within = key === 'within';
     // An unknown prefix is part of the text being searched, not an error.
-    const known = !!head && (!!field || text);
+    const known = !!head && (!!field || text || within);
     if (known) i += head![0].length;
     let value: string;
     if (scope[i] === '"') {
@@ -210,14 +215,75 @@ function parseScope(scope: string | undefined): ScopeTerm[] {
       value = scope.slice(i, stop).trim();
       i = stop;
     }
-    terms.push({ ...(field ? { field } : {}), text, value: value.toLowerCase() });
+    if (within && !value) deny('E_INVALID_ARGUMENT', 'invalid_scope');
+    terms.push({
+      ...(field ? { field } : {}),
+      ...(within ? { within: true as const } : {}),
+      text,
+      value: value.toLowerCase(),
+    });
     if (terms.length > MAX_SCOPE_TERMS) deny('E_INVALID_ARGUMENT', 'invalid_scope');
   }
   return terms;
 }
 
-function compileScope(scope: string | undefined): (element: Element) => boolean {
+/**
+ * The elements inside the element `id` (case-insensitive), or null when the id is unknown and strict is off.
+ * Browser snapshots list elements in document order with their DOM depth, so the descendants of an element are the ones that
+ * follow it until the first that is not deeper (any element kind: an article, a form, a region, a table). parent_id (table >
+ * row > cell, list > item) adds the same relation for snapshots without depth. The element itself is not included. Desktop
+ * snapshots are flat and carry neither, so within: is unsupported there. Limit: iframe content is appended after the main document
+ * and its depth restarts, so the last container of the main document can also take the first deeper elements of an iframe.
+ */
+function descendantsOf(elements: readonly Element[], id: string, strict: boolean): Set<Element> | null {
+  const wanted = id.toLowerCase(),
+    at = elements.findIndex(e => e.id.toLowerCase() === wanted);
+  if (at < 0) {
+    if (strict) deny('E_TARGET_NOT_FOUND', 'scope_element_not_found', 'scope');
+    return null;
+  }
+  if (strict && !elements.some(e => e.depth !== undefined || e.parent_id !== undefined))
+    deny('E_UNSUPPORTED_ACTION', 'scope_within_unsupported', 'scope');
+  const root = elements[at]!,
+    found = new Set<Element>();
+  if (root.depth !== undefined)
+    for (let i = at + 1; i < elements.length; i++) {
+      const next = elements[i]!;
+      if (next.depth === undefined || next.depth <= root.depth) break;
+      found.add(next);
+    }
+  const byId = new Map(elements.map(e => [e.id, e] as const));
+  for (const element of elements) {
+    let parent = element.parent_id;
+    for (let hops = 0; parent !== undefined && hops < 64; hops++) {
+      if (parent === root.id) {
+        found.add(element);
+        break;
+      }
+      parent = byId.get(parent)?.parent_id;
+    }
+  }
+  return found;
+}
+
+/** A compiled scope. bind() ties its within: terms to one revision's elements; strict (the default) rejects an unknown id, otherwise nothing matches. */
+interface CompiledScope {
+  bind(elements: readonly Element[], strict?: boolean): (element: Element) => boolean;
+}
+function compileScope(scope: string | undefined): CompiledScope {
   const terms = parseScope(scope);
+  const withins = terms.filter(term => term.within);
+  const own = compileTerms(terms.filter(term => !term.within));
+  return {
+    bind: (elements, strict = true) => {
+      if (withins.length === 0) return own;
+      const inside = withins.map(term => descendantsOf(elements, term.value, strict));
+      return element => own(element) && inside.every(set => set?.has(element) === true);
+    },
+  };
+}
+
+function compileTerms(terms: ScopeTerm[]): (element: Element) => boolean {
   if (terms.length === 0) return () => true;
   const haystacks = new WeakMap<Element, string>();
   const SEP = String.fromCharCode(0);
@@ -408,6 +474,12 @@ export class SnapshotStore {
     }
   }
 
+  /** Warnings were delivered with this revision's first page: later observations of the same revision (cursor pages, repeats) do not carry them again. */
+  markWarningsDelivered(sessionId: string, revision: number): void {
+    const stored = this.sessions.get(sessionId)?.find(s => s.revision === revision);
+    if (stored) delete stored.metadata.warnings;
+  }
+
   observe(sessionId: string, revision: number, options: ObserveOptions): ObserveResult {
     const budget = this.checkOptions(options);
     const history = this.sessions.get(sessionId);
@@ -440,7 +512,10 @@ export class SnapshotStore {
     if (!['json', 'compact', 'lines'].includes(format)) invalidArgument('format');
     const scope = options.scope;
     const depth = options.depth;
-    const matches = compileScope(scope);
+    const scoped = compileScope(scope);
+    // within: is resolved against each revision it compares: an unknown id is an error in the current one, while a base that lacks the element matches nothing.
+    const matches = scoped.bind(current.elements);
+    const matchesBase = base ? scoped.bind(base.elements, false) : matches;
     const key = this.optionsKey(options, include, scope);
     let offset = 0;
     let carried: Cursor | null = null;
@@ -472,7 +547,7 @@ export class SnapshotStore {
     } else if (representation === 'delta') {
       // A delta across a replaced document would remove everything and add everything again: send a full baseline instead.
       const note = { replaced: false };
-      if (base !== null) items = this.items(current, base, include, matches, depth, note);
+      if (base !== null) items = this.items(current, base, include, matches, matchesBase, depth, note);
       mode = base !== null && !note.replaced ? 'delta' : 'full';
       reset = base !== null && note.replaced;
       if (mode === 'full' && base !== null) items = null;
@@ -481,9 +556,9 @@ export class SnapshotStore {
       reset = base !== null;
     } else {
       const note = { replaced: false };
-      items = this.items(current, base, include, matches, depth, note);
+      items = this.items(current, base, include, matches, matchesBase, depth, note);
       const deltaItems = items;
-      const fullItems = this.items(current, null, include, matches, depth);
+      const fullItems = this.items(current, null, include, matches, matchesBase, depth);
       const deltaBytes = this.payloadBytes(
         locate('delta'),
         revision,
@@ -508,7 +583,8 @@ export class SnapshotStore {
       reset = mode === 'full' && base !== null;
       items = mode === 'full' ? fullItems : deltaItems;
     }
-    if (items === null) items = this.items(current, mode === 'full' ? null : base, include, matches, depth);
+    if (items === null)
+      items = this.items(current, mode === 'full' ? null : base, include, matches, matchesBase, depth);
     const advertised = representation === undefined ? null : mode;
     return this.pack(
       sessionId,
@@ -557,6 +633,7 @@ export class SnapshotStore {
     base: Stored | null,
     include: Field[] | null,
     matches: (e: Element) => boolean,
+    matchesBase: (e: Element) => boolean,
     depth: number | undefined,
     note?: { replaced: boolean },
   ): SnapshotChange[] {
@@ -565,7 +642,7 @@ export class SnapshotStore {
         .filter(e => matches(e) && matchesDepth(e, depth))
         .map(element => ({ op: 'added' as const, id: element.id, element: project(element, include) }));
     }
-    const before = new Map(base.elements.filter(e => matches(e) && matchesDepth(e, depth)).map(e => [e.id, e]));
+    const before = new Map(base.elements.filter(e => matchesBase(e) && matchesDepth(e, depth)).map(e => [e.id, e]));
     const after = new Map(current.elements.filter(e => matches(e) && matchesDepth(e, depth)).map(e => [e.id, e]));
     if (note) {
       // The document was replaced when (almost) no element survives, or when the URL changed and most are gone.

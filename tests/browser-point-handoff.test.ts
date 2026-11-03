@@ -177,7 +177,8 @@ test(
           { action: 'click', point: { frame_id: frame.metadata.frame_id, x: 31, y: 29 } },
           frame.metadata.revision,
         ),
-        { code: 'E_APPROVAL_REQUIRED', reason: 'requires_ask_mode' },
+        // Its handler read /gone, which a contained control cannot be attributed: the read is what stops it.
+        { code: 'E_APPROVAL_REQUIRED', reason: 'contained_request_blocked' },
       );
     } finally {
       await contained.close();

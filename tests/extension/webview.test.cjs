@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 
-function panel(language = 'ja', savedWebviewState = {}) {
+function panel(language = 'ja', savedWebviewState = {}, timers = {}) {
   const elements = new Map(),
     messages = [],
     listeners = new Map(),
@@ -69,8 +69,8 @@ function panel(language = 'ja', savedWebviewState = {}) {
     window: { addEventListener: (type, listener) => listeners.set(type, listener) },
     URL,
     console,
-    setTimeout,
-    clearTimeout,
+    setTimeout: timers.setTimeout ?? setTimeout,
+    clearTimeout: timers.clearTimeout ?? clearTimeout,
   });
   return {
     get,
@@ -816,12 +816,12 @@ test('the summary states what the AI can do for read only, standard, ask and all
   p.state(hostState({ mode: 'standard' }));
   assert.equal(
     summaryOf(p),
-    'AI は example.com を閲覧し、通常のクリックや入力ができます。送信や削除などの重要な操作は拒否されます（標準）。',
+    'AI は example.com を閲覧し、通常のクリックや入力ができます。送信や削除などの重要な操作と、ページが保存のために送る通信は止められるため、多くのアプリではデータを保存できません（標準）。',
   );
   p.state(hostState({ mode: 'ask' }));
   assert.equal(
     summaryOf(p),
-    'AI は example.com を閲覧し、通常のクリックや入力ができます。送信や削除などの重要な操作は、VS Code の確認画面で承認した場合のみ実行されます（都度承認）。',
+    'AI は example.com を閲覧し、通常のクリックや入力ができます。送信や削除などの重要な操作と、ページが保存のために送る通信は、VS Code の確認画面で内容を承認した場合のみ実行されます（都度承認）。',
   );
   p.state(hostState({ mode: 'read_only', effectiveMode: 'all' }));
   assert.match(summaryOf(p), /^AI は example\.com で、確認なしにあらゆる操作.*（すべて許可・旧設定）。$/);
@@ -831,7 +831,7 @@ test('the summary states what the AI can do for read only, standard, ask and all
   en.state(hostState({ mode: 'standard' }));
   assert.match(
     summaryOf(en),
-    /^The AI can view example\.com and click or type in ordinary controls\..*denied \(standard\)\.$/,
+    /^The AI can view example\.com and click or type in ordinary controls\..*most apps cannot save changes \(standard\)\.$/,
   );
   en.state(hostState({ mode: 'ask' }));
   assert.match(summaryOf(en), /run only after you approve each one in VS Code \(ask each time\)\.$/);
@@ -921,6 +921,174 @@ test('the summary is re-rendered when the display language changes and posts not
   assert.match(summaryOf(p), /^The AI can view example\.com and click or type/);
   assert.equal(p.get('ai-summary-extra').textContent, 'Also on: desktop app app.id.');
   assert.equal(p.messages.length, messages);
+});
+
+// ---- Standing site-write grants: listed and revocable in the panel, never created there ----
+const GRANT_ID = '0123abcd-0123-4abc-8def-0123456789ab';
+const grantRow = (over = {}) => ({
+  id: GRANT_ID,
+  origin: 'https://example.com',
+  scope: 'site_writes',
+  created_at: Date.now() - 5 * 60_000,
+  expires_at: Date.now() + 25 * 60_000,
+  uses: 3,
+  ...over,
+});
+const ASK_SENTENCE =
+  'AI は example.com を閲覧し、通常のクリックや入力ができます。送信や削除などの重要な操作と、ページが保存のために送る通信は、VS Code の確認画面で内容を承認した場合のみ実行されます（都度承認）。';
+// A webview whose timers only record their callbacks, so the 30-second refresh can be run by hand and nothing stays pending.
+function timedPanel(language = 'ja') {
+  const scheduled = [];
+  const p = panel(
+    language,
+    {},
+    {
+      setTimeout: (fn, ms) => {
+        scheduled.push({ fn, ms, cancelled: false });
+        return scheduled.length;
+      },
+      clearTimeout: id => {
+        if (scheduled[id - 1]) scheduled[id - 1].cancelled = true;
+      },
+    },
+  );
+  return { p, scheduled };
+}
+const grantState = (grants, over = {}) => ({ ...hostState({ mode: 'ask', ...over }), grants });
+
+test('the summary mentions a standing site grant in ask mode, lists it with its remaining time and a revoke button that only posts revokeSiteGrant', async () => {
+  const { p, scheduled } = timedPanel('ja');
+  p.state(grantState([]));
+  assert.equal(summaryOf(p), ASK_SENTENCE, 'without a grant the pinned ask sentence is unchanged');
+  assert.equal(p.get('site-grants').hidden, true);
+  assert.equal(scheduled.length, 0, 'nothing is scheduled while no grant is listed');
+  p.state(grantState([grantRow()]));
+  assert.equal(
+    summaryOf(p),
+    `${ASK_SENTENCE} いま 1 件のサイトで、書き込み通信を確認なしに送る継続許可が有効です（最長 30 分。認証情報を含む通信と購入・支払いに関わる操作は毎回確認）。`,
+  );
+  assert.ok(summaryOf(p).endsWith('毎回確認）。'));
+  const list = p.get('site-grants');
+  assert.equal(list.hidden, false);
+  assert.equal(list.children.length, 1);
+  const [name, state, revoke] = list.children[0].children;
+  assert.equal(name.textContent, 'https://example.com');
+  assert.equal(state.textContent, '残り 25 分・3 回使用');
+  assert.equal(revoke.textContent, '取り消す');
+  assert.equal(revoke['aria-label'], '書き込みの継続許可を取り消す');
+  assert.equal(scheduled.at(-1).ms, 30_000, 'the remaining minutes are refreshed every 30 seconds');
+  // Revoking posts exactly the id and disables the buttons until the host answers.
+  const before = p.messages.length;
+  await revoke.trigger('click');
+  assert.deepEqual(plain(p.messages.slice(before)), [{ type: 'revokeSiteGrant', id: GRANT_ID }]);
+  assert.equal(revoke.disabled, true);
+  p.state({ ...grantState([grantRow()]), busy: { grants: true } });
+  assert.equal(p.get('site-grants').children[0].children[2].disabled, true, 'a busy host keeps the buttons off');
+  p.state({ ...grantState([grantRow()]), busy: { grants: false } });
+  assert.equal(p.get('site-grants').children[0].children[2].disabled, false);
+  // The host drops the grant: the list hides, the sentence returns to the pinned text and the refresh stops.
+  p.state(grantState([]));
+  assert.equal(p.get('site-grants').hidden, true);
+  assert.equal(p.get('site-grants').children.length, 0);
+  assert.equal(summaryOf(p), ASK_SENTENCE);
+  assert.equal(scheduled.at(-1).cancelled, true);
+  // The panel never sends anything but the revoke of a listed grant.
+  assert.deepEqual(
+    plain(p.messages.map(m => m.type)).filter(type => /grant/i.test(type)),
+    ['revokeSiteGrant'],
+  );
+});
+
+test('standing grants are named only in ask mode, counted per site, filtered when malformed, and shown in both languages', async () => {
+  const { p } = timedPanel('ja');
+  const second = grantRow({ id: 'fedcba98-0123-4abc-8def-0123456789ab', origin: 'https://other.example', uses: 0 });
+  p.state(
+    grantState([
+      null,
+      { id: GRANT_ID },
+      { id: 'x', origin: 'https://a.example', expires_at: 'soon', uses: 1 },
+      { id: 'y', origin: '', expires_at: Date.now() + 60_000, uses: 1 },
+      grantRow(),
+      second,
+    ]),
+  );
+  assert.equal(
+    p.get('site-grants').children.length,
+    2,
+    'rows without a usable id, origin, expiry or count are dropped',
+  );
+  assert.match(summaryOf(p), /いま 2 件のサイトで、書き込み通信を確認なしに送る継続許可が有効です/);
+  assert.equal(p.get('site-grants').children[1].children[1].textContent, '残り 25 分・0 回使用');
+  for (const mode of ['read_only', 'standard']) {
+    p.state(grantState([grantRow()], { mode }));
+    assert.doesNotMatch(summaryOf(p), /継続許可/, `${mode} never mentions a grant`);
+  }
+  p.state(grantState([grantRow()], { stopped: true }));
+  assert.match(summaryOf(p), /^緊急停止中です/);
+  assert.doesNotMatch(summaryOf(p), /継続許可/);
+  p.state(grantState([grantRow()]));
+  p.get('ui-language').value = 'en';
+  await p.get('ui-language').trigger('change');
+  assert.match(
+    summaryOf(p),
+    /\(ask each time\)\. Standing write permission is active for 1 site \(up to 30 minutes; credential and payment-like requests still ask\)\.$/,
+  );
+  const [, state, revoke] = p.get('site-grants').children[0].children;
+  assert.equal(state.textContent, '25 min left, used 3 times');
+  assert.equal(revoke.textContent, 'Revoke');
+  assert.equal(revoke['aria-label'], 'Revoke standing write grant https://example.com');
+  p.state(grantState([grantRow(), second]));
+  assert.match(summaryOf(p), /active for 2 sites/);
+  const en = panel('en');
+  en.state(grantState([grantRow()]));
+  assert.equal(en.get('site-grants').children[0].children[1].textContent, '25 min left, used 3 times');
+});
+
+test('hostile origin text in a grant stays text, and a grant that ran out locally disappears at the next refresh', async () => {
+  const { p, scheduled } = timedPanel('ja');
+  const hostile = '<img src=x onerror=alert(1)> / x';
+  p.state(grantState([grantRow({ origin: hostile })]));
+  const [name, , revoke] = p.get('site-grants').children[0].children;
+  assert.equal(name.textContent, hostile);
+  assert.equal(name.innerHTML, undefined, 'the origin never goes through innerHTML');
+  assert.equal(p.get('site-grants').innerHTML, undefined);
+  assert.ok(revoke['aria-label'].startsWith('書き込みの継続許可を取り消す'));
+  assert.equal(p.get('ai-summary').innerHTML, undefined);
+  // A grant whose time ran out between two host states is hidden by the 30-second refresh, without a host message.
+  p.state(grantState([grantRow({ expires_at: Date.now() + 40 })]));
+  assert.equal(p.get('site-grants').hidden, false);
+  assert.match(summaryOf(p), /継続許可/);
+  await new Promise(resolve => setTimeout(resolve, 80));
+  const messages = p.messages.length;
+  scheduled.at(-1).fn();
+  assert.equal(p.get('site-grants').hidden, true);
+  assert.equal(summaryOf(p), ASK_SENTENCE);
+  assert.equal(p.messages.length, messages, 'the refresh posts nothing');
+});
+
+test('republishing the grant list after a use keeps keyboard focus on the same revoke button', () => {
+  const { p } = timedPanel('ja');
+  const other = 'fedcba98-0123-4abc-8def-0123456789ab';
+  const focused = [];
+  const create = p.document.createElement;
+  p.document.createElement = tag => {
+    const el = create(tag);
+    el.focus = () => {
+      focused.push(el.dataset.grantId);
+      p.document.activeElement = el;
+    };
+    return el;
+  };
+  const rows = uses => [grantRow({ uses }), grantRow({ id: other, origin: 'https://other.example' })];
+  p.state(grantState(rows(3)));
+  assert.deepEqual(focused, [], 'nothing is focused when the user was not on a grant button');
+  p.document.activeElement = p.get('site-grants').children[1].children[2];
+  p.state(grantState(rows(4)));
+  assert.deepEqual(focused, [other], 'the re-created button of the same grant is focused again');
+  assert.equal(p.get('site-grants').children[0].children[1].textContent, '残り 25 分・4 回使用');
+  p.document.activeElement = p.get('site-grants').children[1].children[2];
+  p.state(grantState([grantRow({ uses: 4 })]));
+  assert.deepEqual(focused, [other], 'a grant that ended leaves no stale focus target');
 });
 
 test('the checklist is shown on a fresh install, states done and to-do in words, and hides itself when setup is complete', () => {
@@ -1134,6 +1302,7 @@ test('the emergency stop, the permission tier and the summary are never inside a
     'origin-input',
     'origins-error',
     'ai-summary',
+    'site-grants',
     'setup-checklist',
     'mcp-error',
     'enabled-error',
@@ -1195,5 +1364,9 @@ test('every new Japanese string has an English twin in the data-i18n pattern', a
   }
   const html = await panelHtml();
   assert.match(html, /<span data-i18n-ja>いまの AI の権限<\/span><span data-i18n-en>What the AI can do now<\/span>/);
+  assert.match(
+    html,
+    /<ul class="client-list" id="site-grants" aria-label="書き込みの継続許可 \/ Standing write grants" hidden><\/ul>/,
+  );
   assert.match(html, /<span data-i18n-ja>はじめの設定<\/span><span data-i18n-en>First-time setup<\/span>/);
 });

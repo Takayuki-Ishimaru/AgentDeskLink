@@ -316,6 +316,8 @@ export function activate(context: vscode.ExtensionContext): void {
   void approvalBroker.then(broker => {
     liveApprovalBroker = broker;
     context.subscriptions.push(broker);
+    // A grant was created, used or ended: republish the panel state (without re-resolving the MCP definition, since a grant is used on every auto-approved write).
+    context.subscriptions.push(broker.onDidChangeGrants(() => void panel?.publish()));
   });
   const provider = new McpProvider(
     path.join(root, 'dist', 'src', 'server.js'),
@@ -426,6 +428,11 @@ export function activate(context: vscode.ExtensionContext): void {
       const reason = askHostTargetConflict(readSettings());
       if (reason) summary.effective.reasons.push(reason);
       return summary;
+    },
+    siteGrants: () => liveApprovalBroker?.grants() ?? [],
+    revokeSiteGrant: async (id: string) => {
+      if (!liveApprovalBroker?.revokeGrant(id))
+        throw new Error('この許可はすでに終了しています。 / That grant has already ended.');
     },
     updateStatus: () => updater.status(),
     version: () => extVersion,

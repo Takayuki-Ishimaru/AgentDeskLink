@@ -71,10 +71,12 @@ test(
             );
             assert.ok('network_blocked' in result);
             assert.equal(result.network_blocked, true);
+            assert.equal(result.write_blocked, true, `${operationMode}: the page state was not saved`);
+            // Ask mode without an approver (this test starts none) cannot hold the write for a human; standard mode has no approver at all.
+            const code = operationMode === 'ask' ? 'approval_unavailable' : 'method_requires_approval';
             assert.ok(
-              result.warnings?.some(
-                w => w.code === 'method_requires_approval' && w.method === 'POST' && w.resource_type === 'fetch',
-              ),
+              result.warnings?.some(w => w.code === code && w.method === 'POST' && w.resource_type === 'fetch'),
+              `${operationMode}: ${JSON.stringify(result.warnings)}`,
             );
           }
           assert.equal(posts, 0);
@@ -227,11 +229,17 @@ test(
       assert.equal(hits, 1);
       assert.ok(guards >= 2);
       permitted = false;
-      await engine.act(session.session_id, { action: 'navigate', url: origin }, observed.revision);
+      const navigated = (await engine.act(
+        session.session_id,
+        { action: 'navigate', url: origin },
+        observed.revision,
+      )) as { warnings?: NetworkWarning[] };
       observed = await engine.observe(session.session_id);
       assert.ok(observed.elements!.some(e => e.name === 'Loading'));
       assert.equal(hits, 1);
-      assert.ok(observed.warnings?.some(w => w.code === 'origin_not_allowed'));
+      // The script is blocked while the navigation loads the document, so the navigation reports it (once); the observation does not repeat it.
+      assert.ok(navigated.warnings?.some(w => w.code === 'origin_not_allowed'));
+      assert.equal(observed.warnings, undefined);
     } finally {
       await engine.shutdown();
       await close(app);

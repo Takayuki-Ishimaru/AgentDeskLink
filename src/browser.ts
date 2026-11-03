@@ -42,8 +42,11 @@ import { ensureBrowserPrivacySelectors } from './browser-privacy.js';
 import type { GesturePolicy, GesturePlan, GestureReference, GestureExecution } from './gesture-types.js';
 import type { CapturedImage, VisualPolicy } from './visual-types.js';
 import { networkResourceType, networkMethod, isActionNetworkBlock } from './network-warnings.js';
+import { describeHeldRequest, HELD_METHODS } from './approval-summary.js';
 import {
   AdlError,
+  HeldWritesError,
+  type HeldWriteAbortOutcome,
   type Action,
   type Adapter,
   type AdapterActResult,
@@ -99,8 +102,29 @@ function withoutBodyHeaders(headers: Record<string, string>): Record<string, str
   return Object.fromEntries(Object.entries(headers).filter(([name]) => !/^(content-|origin$)/i.test(name)));
 }
 
-// How long a contained action waits for a request that decides its result; a later one is stopped and shows in the next observation.
-const CONTAINMENT_REPORT_MS = 500;
+// How long a contained action waits for a request that decides its result, counted from its dispatch; a later one is stopped and shows in the next observation.
+export const CONTAINMENT_REPORT_MS = 500;
+// After an input action the page gets to react before the caller reads it: the action returns once no attributable request is in
+// flight and the document has been quiet for SETTLE_QUIET_MS, or SETTLE_MAX_MS after its dispatch. Timing only: no security decision reads it.
+export const SETTLE_QUIET_MS = 60;
+export const SETTLE_MAX_MS = 400;
+const SETTLED_ACTIONS = new Set(['click', 'press', 'fill', 'check', 'select', 'hover']);
+// Actions whose page writes may be held for approval (ask mode with an approver). Hover, scroll and navigation never open a hold.
+const HOLD_ACTIONS = new Set(['click', 'press', 'fill', 'check', 'select']);
+// A held request has to be described to a human completely: larger bodies, other body types and more than 4 requests per action are never held.
+const MAX_HELD_BODY = 65536;
+const MAX_HELD_PER_ACTION = 4;
+const HELD_CONTENT_TYPES = new Set(['application/json', 'application/x-www-form-urlencoded', 'text/plain']);
+// A set that nobody released or aborted is aborted by the adapter after this long (the engine's approvals expire within 120 s).
+const HELD_SET_LIFETIME_MS = 125000;
+const MAX_HELD_OUTCOMES = 16;
+// A request the page waits for synchronously (a synchronous XHR) blocks the thread that would return the action's dispatch: a hold
+// created while the dispatch has not returned for this long is aborted as not approvable, so that the handler can go on.
+const SYNC_GRACE_MS = 280;
+// Request headers a server may read as the real method; the human is shown them next to the request.
+const METHOD_OVERRIDE_HEADERS = ['x-http-method-override', 'x-method-override', 'x-http-method'];
+// The verdict of a held request whose document was replaced: it dies with the document, silently (no block to report for a page that is gone).
+const DOCUMENT_REPLACED = 'document_replaced';
 
 /** A request's identity for telling what a page already asks for: the values that vary between polls (those with digits) do not count. */
 function requestShape(url: string): string {
@@ -126,7 +150,68 @@ type Store = {
   prefix: string;
   seen: Set<string>;
   integrity: BrowserIntegrity;
+  /** Counts DOM mutations of the document (page-world MutationObserver); read by the post-action settle, timing only. */
+  activity: number;
 };
+
+type BlockEntry = NetworkWarning & { seq: number };
+
+/** A write request the network route keeps paused until a human decides on it (ask mode); bodies stay in the adapter. */
+type PausedWrite = {
+  setId: string;
+  request: Request;
+  method: string;
+  url: string;
+  contentType: string;
+  body: Buffer | undefined;
+  bodySha256: string;
+  details: string[];
+  secret: boolean;
+  decision: Promise<string>;
+  /** Resolves the route handler with 'release' or the code to block with; the first call wins. */
+  decide: (verdict: string) => void;
+  decided: boolean;
+  /** The page cancelled the request (timeout, abort) before anybody decided. */
+  abandoned: boolean;
+  releaseExpires?: number;
+  /** A released request reached the network fetch (it was not stopped by the guard, DNS or the expiry re-check first). */
+  dispatched?: boolean;
+};
+
+/** What happens between an action's dispatch and the end of its settle: the writes the page sends are attributed to it. */
+type WriteWindow = {
+  id: string;
+  open: boolean;
+  /** Writes sent while it is open may be held (ask mode with an approver, a click/press/fill/check/select). */
+  hold: boolean;
+  holds: PausedWrite[];
+  overflow: boolean;
+  /** Blocks recorded while the window lives; the action result carries exactly these. */
+  blocked: Map<string, BlockEntry>;
+  collected: boolean;
+  /** Attributable requests started since the dispatch and not finished yet. */
+  inflight: Set<Request>;
+  lastActivity: number;
+  dispatchedAt: number;
+  /** The document's mutation count read at the dispatch, to tell whether it changed since. */
+  baseline: Promise<number>;
+  /** The document replacements (main-frame navigations that fetched a document) counted when the window opened. */
+  replacements: number;
+  /** The action's dispatch (the page.click call) has returned; until then a held write may be a synchronous request the page's thread waits for. */
+  returned: boolean;
+  /** Fires when a hold has waited for the dispatch to return for SYNC_GRACE_MS. */
+  syncTimer?: ReturnType<typeof setTimeout>;
+  /** No further write of this window is held: one was a request the page waits for synchronously, or the page gave up on one of the set. */
+  refused: boolean;
+  /** The document was gone (or going) when the post-action settle tried to read it. */
+  documentGone: boolean;
+};
+
+/** The route's decision for a write: the code to block with (setId: the set whose hold ended, when there was one), or the permit to continue with. */
+type HoldVerdict = { block: string; setId?: string } | { expires: number | undefined; paused: PausedWrite };
+
+/** Request classes that carry an action's own effect: main-frame fetch/XHR/document requests the page was not already making. */
+const SETTLE_RESOURCE_TYPES = new Set(['fetch', 'xhr', 'document']);
 
 type PageSnapshot = {
   elements: ElementInfo[];
@@ -182,20 +267,6 @@ function snapshotPageFn(
       if (r(c, 'nodeType') === 3 && c.textContent) t += c.textContent.slice(0, cfg.fieldMax - t.length);
     }
     return t.trim();
-  };
-  const directTextInfo = (el: Element): { truncated: boolean; length?: number } => {
-    let full = '',
-      visits = 0,
-      c: ChildNode | null = r(el, 'firstChild');
-    for (; c && visits++ < 64; c = r(c, 'nextSibling')) {
-      if (r(c, 'nodeType') === 3 && c.nodeValue) {
-        if (full.length + c.nodeValue.length > 1048576) return { truncated: true };
-        full += c.nodeValue;
-      }
-    }
-    if (c) return { truncated: true };
-    const length = full.trim().length;
-    return { truncated: length > cfg.fieldMax, length };
   };
   const visible = (el: HTMLElement): boolean => {
     try {
@@ -432,6 +503,85 @@ function snapshotPageFn(
     referencedClipped ||= text.length > cfg.fieldMax;
     return text.slice(0, cfg.fieldMax).trim();
   };
+  // A line as a person reads it: the element's own text plus the text of its inline children (links, emphasis, spans), in order.
+  // Block and cell children are listed on their own and left out. Controls, scripts, protected regions, subtrees that are not rendered and
+  // inline children whose text a human cannot see are never merged (the latter set hidden). text keeps at most fieldMax characters;
+  // length counts the whole text up to the 1 MiB cap (absent past it) and block says a block child was left out.
+  const INLINE_TEXT_CAP = 1048576,
+    INLINE_VISITS = 256,
+    INLINE_DEPTH = 8;
+  const inlineText = (
+    el: Element,
+  ): { text: string; length?: number; truncated: boolean; hidden: boolean; block: boolean } => {
+    const skip = cfg.privacyRules.textSkipSelector + ',' + cfg.privacyRules.regionSelector;
+    let preserve = false;
+    try {
+      preserve = /^(pre|break-spaces)/.test(getComputedStyle(el).whiteSpace);
+    } catch {
+      /* collapse whitespace */
+    }
+    let out = '',
+      visits = 0,
+      truncated = false,
+      hidden = false,
+      block = false;
+    const walk = (parent: Element, level: number): void => {
+      for (let c = r(parent, 'firstChild') as ChildNode | null; c && !truncated; c = r(c, 'nextSibling')) {
+        if (++visits > INLINE_VISITS) {
+          truncated = true;
+          return;
+        }
+        const type = r(c, 'nodeType');
+        if (type === 3) {
+          let piece = String(r(c, 'nodeValue') ?? '');
+          if (!preserve) {
+            piece = piece.replace(/[ \t\n\r\f]+/g, ' ');
+            if (out === '' || out.endsWith(' ') || out.endsWith('\n')) piece = piece.replace(/^ /, '');
+          }
+          if (out.length + piece.length > INLINE_TEXT_CAP) {
+            truncated = true;
+            return;
+          }
+          out += piece;
+          continue;
+        }
+        if (type !== 1) continue;
+        const child = c as Element,
+          childTag = tagOf(child);
+        if (childTag === 'BR') {
+          out = out.replace(/ +$/, '') + '\n';
+          continue;
+        }
+        if (BLOCK_TAGS.has(childTag) || CELL_TAGS.has(childTag) || CELL_ROLES.has(attr(child, 'role') ?? '')) {
+          block = true;
+          continue;
+        }
+        if (m(child, 'matches', skip)) continue;
+        if (has(child, 'hidden') || attr(child, 'aria-hidden') === 'true' || !shown(child)) continue;
+        if (level >= INLINE_DEPTH) {
+          truncated = true;
+          continue;
+        }
+        const before = out.length;
+        walk(child, level + 1);
+        if (!truncated && out.length > before && out.slice(before).trim() && textHidden(child)) {
+          out = out.slice(0, before);
+          hidden = true;
+        }
+      }
+    };
+    walk(el, 0);
+    const text = out.trim();
+    return {
+      text: text.slice(0, cfg.fieldMax),
+      ...(truncated ? {} : { length: text.length }),
+      truncated: truncated || text.length > cfg.fieldMax,
+      hidden,
+      block,
+    };
+  };
+  // Regions that hold page text: a long one is named by its first characters, not by a fail-closed placeholder.
+  const LANDMARK_ROLES = new Set(['main', 'article', 'region', 'document', 'feed']);
   const INTERACTIVE = new Set(['a', 'button', 'input', 'select', 'textarea']);
   const elements: ElementInfo[] = [];
   const sigParts: string[] = [];
@@ -646,11 +796,18 @@ function snapshotPageFn(
         attr(cur, 'title')?.trim() ||
         (tag === 'svg' && svgTitle(cur))
       );
+    // A page's main region, an article and a labelled section are listed so that their whole text can be read by id.
+    const containerTag =
+      !roleAttr &&
+      (tag === 'main' ||
+        tag === 'article' ||
+        (tag === 'section' && !!(attr(cur, 'aria-label')?.trim() || attr(cur, 'aria-labelledby')?.trim())));
     const interesting =
       (isInteractive ||
         clickable ||
         isStatus ||
         roleAttr ||
+        containerTag ||
         isText ||
         editable ||
         structural ||
@@ -667,7 +824,8 @@ function snapshotPageFn(
       }
       let role = roleAttr || '';
       if (!role) {
-        if (tag === 'table') role = 'table';
+        if (containerTag) role = tag === 'section' ? 'region' : tag;
+        else if (tag === 'table') role = 'table';
         else if (tag === 'tr') role = 'row';
         else if (tag === 'ul' || tag === 'ol') role = 'list';
         else if (tag === 'li') role = 'listitem';
@@ -723,18 +881,34 @@ function snapshotPageFn(
         labelClipped = !!labelEl && descendantClipped;
       const referenceText = referencedName(cur),
         referenceClipped = referencedClipped;
-      const useOwn = isText && !isInteractive && !clickable && !roleAttr && !editable;
+      const useOwn = isText && !isInteractive && !clickable && !roleAttr && !editable && !containerTag;
+      // A container is named by its label, else by its first visible heading outside protected regions.
+      let headingName = '';
+      if (containerTag) {
+        const heading = m(cur, 'querySelector', 'h1,h2,h3,h4,h5,h6,[role="heading"]') as Element | null;
+        if (heading && !inSensitiveRegion(heading) && shown(heading))
+          headingName = descendantText(heading, false, false);
+      }
+      const inline = useOwn ? inlineText(cur) : undefined;
       // Tables and lists name themselves from explicit labels only; their rows and items carry the text. Rows and items may be long without being labels.
       // An editing host is named by its label, never by the text being edited: that text is its value.
       const aggregate =
-        role === 'table' || role === 'list' || role === 'grid' || role === 'rowgroup' || role === 'tree' || editable;
+        role === 'table' ||
+        role === 'list' ||
+        role === 'grid' ||
+        role === 'rowgroup' ||
+        role === 'tree' ||
+        editable ||
+        containerTag;
       const descendant =
           useOwn || aggregate
             ? ''
             : descendantText(
                 cur,
                 false,
-                !bodyText && !((role === 'row' || role === 'listitem') && !isInteractive && !clickable),
+                !bodyText &&
+                  !LANDMARK_ROLES.has(role) &&
+                  !((role === 'row' || role === 'listitem') && !isInteractive && !clickable),
               ),
         descendantWasClipped = useOwn || aggregate ? false : descendantClipped;
       // A live region that is still empty must not be named after its id attribute.
@@ -742,7 +916,9 @@ function snapshotPageFn(
         referenceText ||
         attr(cur, 'aria-label') ||
         labelText ||
-        (useOwn ? ownText : descendant) ||
+        (useOwn ? inline!.text : descendant) ||
+        headingName ||
+        (containerTag ? ownText : '') ||
         attr(cur, 'alt') ||
         attr(cur, 'placeholder') ||
         attr(cur, 'title') ||
@@ -750,7 +926,6 @@ function snapshotPageFn(
         '';
       const fromText = !(referenceText || attr(cur, 'aria-label') || labelText) && !!(useOwn ? ownText : descendant);
       const derived = !(referenceText || attr(cur, 'aria-label') || labelText);
-      const ownInfo = useOwn ? directTextInfo(cur) : undefined;
       const nameTruncated =
         (referenceText
           ? referenceClipped
@@ -759,9 +934,9 @@ function snapshotPageFn(
             : labelText
               ? labelClipped
               : useOwn
-                ? ownInfo!.truncated
+                ? inline!.truncated
                 : descendantWasClipped) || rawName.length > cfg.fieldMax;
-      const textLength = derived && useOwn && !r(cur, 'firstElementChild') ? ownInfo?.length : undefined;
+      const textLength = derived && useOwn && !inline!.block ? inline!.length : undefined;
       if (rawName.length > 4096) throw new Error('Snapshot field limit');
       const name = clip(rawName);
       const isPassword = tag === 'input' && type === 'password';
@@ -827,7 +1002,8 @@ function snapshotPageFn(
       const value = isPassword ? undefined : clip(rawVal);
       const valueClipped = !isPassword && (rawVal.length > cfg.fieldMax || edited?.overflow === true);
       const hiddenText =
-        (fromText && !sensitive && !inRegion && textHidden(cur)) || (edited?.hidden === true && !sensitive);
+        (fromText && !sensitive && !inRegion && (textHidden(cur) || inline?.hidden === true)) ||
+        (edited?.hidden === true && !sensitive);
       // The content of a secret-labelled editor is as secret as its value: nothing inside it is listed either.
       if (editable && sensitive) hideContent = true;
       const enabled =
@@ -1000,35 +1176,66 @@ function snapshotPageFn(
   };
 }
 
-// Runs inside the page: scrolls an element (or the document's scrolling element) by 80% of its height.
-function scrollByViewport(node: Element, args: { direction: 'up' | 'down'; key: string }): void {
+// Runs inside the page: scrolls an element (or the document's scrolling element) by 80% of its height and reports whether it moved.
+function scrollByViewport(node: Element, args: { direction: 'up' | 'down'; key: string }): boolean {
   if (!(window as unknown as Record<string, BrowserIntegrity>)[args.key]?.check()) throw new Error('ADL_UNTRUSTED_DOM');
   const element = node as HTMLElement,
-    height = Reflect.get(Object.getPrototypeOf(element), 'clientHeight', element) as number;
-  Reflect.apply(Reflect.get(Object.getPrototypeOf(element), 'scrollBy', element), element, [
+    proto = Object.getPrototypeOf(element),
+    height = Reflect.get(proto, 'clientHeight', element) as number,
+    before = Reflect.get(proto, 'scrollTop', element) as number;
+  Reflect.apply(Reflect.get(proto, 'scrollBy', element), element, [
     { top: (args.direction === 'down' ? 1 : -1) * Math.max(1, height * 0.8), behavior: 'instant' },
   ]);
+  return Reflect.get(proto, 'scrollTop', element) !== before;
+}
+// A scroll that could not move is a notice, not an error: the page or region was already at that end.
+function scrollEdgeNotice(direction: 'up' | 'down', what: 'page' | 'region'): AdapterWarning {
+  return {
+    code: 'scroll_at_edge',
+    count: 1,
+    message: `Nothing scrolled: the ${what} is already at the ${direction === 'down' ? 'bottom' : 'top'}. Scroll the other way or observe.`,
+  };
 }
 
 const STORE_INIT = (key: string) => {
   const integrity = (window as unknown as Record<string, BrowserIntegrity>)[key];
   if (!integrity || !integrity.check()) throw new Error('ADL_UNTRUSTED_DOM');
-  return {
+  const store = {
     ids: new WeakMap<object, string>(),
     nodes: new Map<string, object>(),
     seq: 0,
     prefix: '',
     seen: new Set<string>(),
     integrity,
+    activity: 0,
   };
+  // The post-action settle waits for the document to go quiet. A page that replaces MutationObserver only changes that timing.
+  try {
+    new MutationObserver(() => {
+      store.activity++;
+    }).observe(document, { subtree: true, childList: true, attributes: true, characterData: true });
+  } catch {
+    /* timing only */
+  }
+  return store;
 };
 
 class BrowserSession implements AdapterSession {
   readonly tracksDispatch = true;
   private readonly frameStores = new Map<Frame, JSHandle<Store>>();
   private frameSeq = 0;
-  private readonly networkBlocks = new Map<string, NetworkWarning>();
-  recordNetworkBlock(code: string, origin?: string, resource_type = 'other', method = 'GET') {
+  // Blocks of the current document that no observation has reported yet; seq is the latest occurrence (blockSeq at that time).
+  private readonly networkBlocks = new Map<string, BlockEntry>();
+  private blockSeq = 0;
+  /** A main-frame navigation whose request started when blockSeq was seq; its commit discards the blocks of the document it replaces. */
+  private navigationPending: { request: Request; seq: number; at: number } | undefined;
+  /** Main-frame navigations that replaced the document (not same-document ones): a write window opened before one cannot hand its holds over. */
+  private documentReplacements = 0;
+  /**
+   * windowId: the write window a hold's verdict belongs to; a verdict ending an earlier action's hold (a denial arriving while a later
+   * action runs) is not that action's block, so it goes to the document when the current window is another one.
+   */
+  recordNetworkBlock(code: string, origin?: string, resource_type = 'other', method = 'GET', windowId?: string) {
     if (origin) {
       try {
         origin = new URL(origin).origin;
@@ -1037,17 +1244,46 @@ class BrowserSession implements AdapterSession {
       }
     }
     const key = [code, origin ?? '', resource_type, method].join('|');
-    const old = this.networkBlocks.get(key);
+    const seq = ++this.blockSeq;
+    // While an action's window lives its blocks belong to that action's result; any other block belongs to the document and is reported once by an observation.
+    const ww = this.writeWindow;
+    this.addBlock(
+      ww && !ww.collected && (windowId === undefined || ww.id === windowId) ? ww.blocked : this.networkBlocks,
+      key,
+      {
+        code,
+        count: 1,
+        ...(origin ? { origin } : {}),
+        resource_type,
+        method,
+        seq,
+      },
+    );
+  }
+  /** Adds a block to a sink: the same block merges into its entry (count, latest occurrence); each class keeps up to 8 distinct entries, further ones only raise an existing entry's count, so action attribution never loses a block. */
+  private addBlock(sink: Map<string, BlockEntry>, key: string, entry: BlockEntry): void {
+    const old = sink.get(key);
     if (old) {
-      old.count = Math.min(old.count + 1, 999999);
+      old.count = Math.min(old.count + entry.count, 999999);
+      old.seq = Math.max(old.seq, entry.seq);
       return;
     }
-    const warning: NetworkWarning = { code, count: 1, ...(origin ? { origin } : {}), resource_type, method };
-    // Each class keeps up to 8 distinct entries; further distinct blocks of a class only raise an existing entry's count, so action attribution never loses a block.
-    const action = isActionNetworkBlock(warning),
-      peers = [...this.networkBlocks.values()].filter(w => isActionNetworkBlock(w) === action);
-    if (peers.length < 8) this.networkBlocks.set(key, warning);
-    else peers[peers.length - 1]!.count = Math.min(peers[peers.length - 1]!.count + 1, 999999);
+    const action = isActionNetworkBlock(entry),
+      peers = [...sink.values()].filter(w => isActionNetworkBlock(w) === action);
+    if (peers.length < 8) sink.set(key, entry);
+    else {
+      const last = peers[peers.length - 1]!;
+      last.count = Math.min(last.count + entry.count, 999999);
+      last.seq = Math.max(last.seq, entry.seq);
+    }
+  }
+  /** An action that ended with an error reports nothing itself: what it caused shows once in the next observation. */
+  private adoptBlocks(blocks: Map<string, BlockEntry>): void {
+    for (const [key, entry] of blocks) this.addBlock(this.networkBlocks, key, { ...entry });
+  }
+  /** Marks the blocks recorded up to RawSnapshot.warningSeq as reported. */
+  acknowledgeWarnings(upToSeq: number): void {
+    for (const [key, warning] of this.networkBlocks) if (warning.seq <= upToSeq) this.networkBlocks.delete(key);
   }
   pendingDocumentRedirect: string | undefined;
   // The answer at the end of a main-frame redirect chain, fetched with the chain so that a chain ending in 204/205 never
@@ -1115,28 +1351,321 @@ class BrowserSession implements AdapterSession {
     await this.navigationProtocol;
     this.submissionGuard = { requested: 0, blocked: 0 };
   }
-  // Standard-mode containment: a control consequential only through a verb that may stay in the session ("Delete") is dispatched
-  // with the network closed until the next action. The session's storage ends with it, so what happens in the page stays there.
-  // Requests cannot be told apart by cause, so what passes is what the document was already asking for before the click, such as
-  // its polling. Anything new is cut: a data request or navigation is the sign that the control reaches further and stops the
-  // action, while a new image, style, font or media load is only left out, as a redraw may ask for one.
-  private containment: { blocked: number } | undefined;
+  // Containment (standard mode, and ask mode with an approver): a control consequential only through a verb that may stay in the
+  // session ("Delete") is dispatched with the network closed to reads until the next action. The session's storage ends with it,
+  // so what happens in the page stays there. Requests cannot be told apart by cause, so what passes is what the document was
+  // already asking for before the click, such as its polling. A new read or navigation is the sign that the control reaches
+  // further and stops the action, while a new image, style, font or media load is only left out, as a redraw may ask for one.
+  // Writes are not decided here: they fall through to the method branch of the route, where ask mode holds them for approval and
+  // standard mode blocks them (holdableWrites counts those a human could have been asked about).
+  private containment: { blockedReads: number; blockedWrites: number; holdableWrites: number } | undefined;
   private readonly knownRequests = new Set<string>();
   containedRequest(request: Request): boolean {
     const read = ['GET', 'HEAD'].includes(request.method().toUpperCase());
-    if (request.isNavigationRequest()) {
+    const navigation = request.isNavigationRequest();
+    if (navigation) {
       if (!this.containment && request.frame() === this.pageValue?.mainFrame()) this.knownRequests.clear();
     } else if (read && !this.containment && this.knownRequests.size < MAX_KNOWN_REQUESTS)
       this.knownRequests.add(requestShape(request.url()));
     const containment = this.containment;
     if (!containment) return false;
-    if (read && !request.isNavigationRequest() && this.knownRequests.has(requestShape(request.url()))) return false;
-    const passive =
-      read &&
-      !request.isNavigationRequest() &&
-      ['image', 'stylesheet', 'font', 'media'].includes(request.resourceType());
-    if (!passive) containment.blocked++;
+    if (!read && !navigation) return false;
+    if (read && !navigation && this.knownRequests.has(requestShape(request.url()))) return false;
+    const passive = read && !navigation && ['image', 'stylesheet', 'font', 'media'].includes(request.resourceType());
+    if (!passive) containment.blockedReads++;
     return true;
+  }
+
+  // Ask mode with an approver (set by the engine after open): a write the page sends during a click/press/fill/check/select is
+  // paused inside the route instead of blocked, and act() reports it as HeldWritesError once the action's window has closed.
+  private holdWritesEnabled = false;
+  private writeWindow: WriteWindow | undefined;
+  // The paused set an action left behind; at most one per session, until the engine releases or aborts it.
+  private heldSet: { id: string; holds: PausedWrite[]; timer: ReturnType<typeof setTimeout> } | undefined;
+  // Per released set: how many of its requests are still in flight, how many reached the network fetch or were refused before it, and
+  // the statuses of those answered (heldWriteOutcome).
+  private readonly heldOutcomes = new Map<
+    string,
+    { inflight: number; dispatched: number; refused: number; statuses: number[] }
+  >();
+
+  setWriteHolding(enabled: boolean): void {
+    this.holdWritesEnabled = enabled;
+  }
+  /** Whether a write to an origin the workspace granted could be held right now (the route lets it past the origin check to decide). */
+  canHoldNow(): boolean {
+    const ww = this.writeWindow;
+    return this.holdWritesEnabled && !!ww && ww.open && ww.hold;
+  }
+  private openWriteWindow(action: Action, authorization: ActionAuthorization | undefined): void {
+    const now = Date.now();
+    this.writeWindow = {
+      id: crypto.randomUUID(),
+      open: true,
+      hold:
+        this.holdWritesEnabled &&
+        authorization?.holdWrites === true &&
+        !this.policy.allowAllOperations &&
+        HOLD_ACTIONS.has(action.action),
+      holds: [],
+      overflow: false,
+      blocked: new Map(),
+      collected: false,
+      inflight: new Set(),
+      lastActivity: now,
+      dispatchedAt: now,
+      baseline: SETTLED_ACTIONS.has(action.action) ? this.readActivity() : Promise.resolve(-1),
+      replacements: this.documentReplacements,
+      returned: false,
+      refused: false,
+      documentGone: false,
+    };
+  }
+  /** The page's own thread waits for a request it sent (a synchronous XHR): nobody can be asked, so what is held fails closed and the page goes on. */
+  private abortSynchronousHolds(ww: WriteWindow): void {
+    ww.refused = true;
+    const waiting = ww.holds.filter(paused => !paused.decided);
+    if (!waiting.length) return;
+    if (this.containment) this.containment.blockedWrites += waiting.length;
+    this.abortHolds(waiting, 'request_not_approvable');
+  }
+  /** Whether the document the window opened on was replaced (or is being replaced) since: its holds belong to a page that is gone. */
+  private windowDocumentReplaced(ww: WriteWindow): boolean {
+    const pending = this.navigationPending;
+    return (
+      ww.documentGone || this.documentReplacements !== ww.replacements || (!!pending && pending.at >= ww.dispatchedAt)
+    );
+  }
+  /** The document's mutation count (see STORE_INIT); -1 when it cannot be read (no store, the document went away). */
+  private async readActivity(): Promise<number> {
+    return (await this.store?.evaluate(store => store.activity).catch(() => -1)) ?? -1;
+  }
+  /** The write window's blocks as the action result carries them; later blocks belong to the document. */
+  private collectWindowBlocks(): NetworkWarning[] {
+    const ww = this.writeWindow;
+    if (!ww) return [];
+    ww.collected = true;
+    // The same order as the observation's list: what the action itself set in motion first.
+    return [...ww.blocked.values()]
+      .map(({ seq: _seq, ...warning }) => warning)
+      .sort((a, b) => Number(isActionNetworkBlock(b)) - Number(isActionNetworkBlock(a)));
+  }
+  /** The request as a human could be asked about it, or undefined when it cannot be described completely (or is not holdable at all). */
+  private holdShape(
+    request: Request,
+    url: URL,
+    body: Buffer | undefined,
+  ): { contentType: string; details: string[]; secret: boolean } | undefined {
+    const page = this.pageValue;
+    const method = request.method().toUpperCase();
+    if (
+      !page ||
+      request.frame() !== page.mainFrame() ||
+      request.isNavigationRequest() ||
+      !['fetch', 'xhr'].includes(request.resourceType()) ||
+      !HELD_METHODS.has(method) ||
+      (url.origin !== this.origin && !this.policy.allowedOrigins.includes(url.origin))
+    )
+      return undefined;
+    const headers = request.headers();
+    const contentType = headers['content-type'] ?? '';
+    const base = contentType.split(';')[0]!.trim().toLowerCase();
+    if ((base && !HELD_CONTENT_TYPES.has(base)) || (body && body.length > MAX_HELD_BODY)) return undefined;
+    // Chromium exposes no bytes for a streamed (ReadableStream) upload, and an empty body is not told apart from it: a request that
+    // describes a body in its headers but has none here is never shown as bodiless, so it is not approvable.
+    if (!body && (contentType || (headers['content-length'] ?? '0') !== '0' || headers['transfer-encoding']))
+      return undefined;
+    // A header a server may read as the real method (X-HTTP-Method-Override: DELETE) is part of what the human approves.
+    const overrides: string[] = [];
+    for (const name of METHOD_OVERRIDE_HEADERS) {
+      const value = headers[name];
+      if (value === undefined) continue;
+      if (value.length > 64) return undefined;
+      overrides.push(`Method override header ${name}: ${JSON.stringify(value)}`);
+    }
+    let text: string | undefined;
+    if (body && body.length) {
+      try {
+        text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(body);
+      } catch {
+        return undefined;
+      }
+    }
+    try {
+      const described = describeHeldRequest({
+        method,
+        url: request.url(),
+        contentType,
+        ...(text !== undefined ? { body: text } : {}),
+      });
+      return { contentType, details: [...described.lines, ...overrides], secret: described.secret };
+    } catch {
+      return undefined;
+    }
+  }
+  /**
+   * The route's decision for a write that matches no permit: pause it until the engine releases or aborts it, or the code to
+   * block it with. Only a main-frame fetch/XHR the page sends while a click/press/fill/check/select runs is ever held; whatever
+   * else it sends (timers, beacons, sub-frames, uploads, a fifth request) is blocked, and the codes say why.
+   */
+  async holdWrite(request: Request, url: URL, body: Buffer | undefined): Promise<HoldVerdict> {
+    const shape = this.holdShape(request, url, body);
+    const refuse = (code: string): HoldVerdict => {
+      const containment = this.containment;
+      if (containment) {
+        containment.blockedWrites++;
+        if (shape) containment.holdableWrites++;
+      }
+      return { block: code };
+    };
+    if (!this.holdWritesEnabled) {
+      // Nothing can approve it here: read_only has no actions, so every write is background traffic; otherwise the code says whether ask mode could have asked.
+      if (this.policy.operationMode === 'read_only') return refuse('background_write_blocked');
+      if (!shape) return refuse('request_not_approvable');
+      return refuse(this.policy.operationMode === 'ask' ? 'approval_unavailable' : 'method_requires_approval');
+    }
+    if (this.heldSet) return refuse('approval_pending_other_action');
+    const ww = this.writeWindow;
+    if (!ww || !ww.open || !ww.hold) return refuse('background_write_blocked');
+    if (!shape || ww.overflow || ww.refused) return refuse('request_not_approvable');
+    if (ww.holds.length >= MAX_HELD_PER_ACTION) {
+      // A partially approved save is worse than none: the whole set fails closed.
+      ww.overflow = true;
+      this.abortHolds(ww.holds, 'request_not_approvable');
+      return refuse('request_not_approvable');
+    }
+    let resolve!: (verdict: string) => void;
+    const decision = new Promise<string>(done => {
+      resolve = done;
+    });
+    const paused: PausedWrite = {
+      setId: ww.id,
+      request,
+      method: request.method().toUpperCase(),
+      url: request.url(),
+      contentType: shape.contentType,
+      body,
+      bodySha256: crypto
+        .createHash('sha256')
+        .update(body ?? Buffer.alloc(0))
+        .digest('hex'),
+      details: shape.details,
+      secret: shape.secret,
+      decision,
+      decide: verdict => {
+        if (paused.decided) return;
+        paused.decided = true;
+        resolve(verdict);
+      },
+      decided: false,
+      abandoned: false,
+    };
+    ww.holds.push(paused);
+    // The page's thread may be blocked in this very request (a synchronous XHR), which also blocks the dispatch that would end the
+    // window. A request the page waits for cannot be shown to a human: if the dispatch has not returned within the grace, abort.
+    if (!ww.returned && !ww.syncTimer) {
+      ww.syncTimer = setTimeout(() => {
+        ww.syncTimer = undefined;
+        if (!ww.returned) this.abortSynchronousHolds(ww);
+      }, SYNC_GRACE_MS);
+      ww.syncTimer.unref();
+    }
+    const verdict = await decision;
+    // Not counted as a containment block: a hold that ended is the human's or the page's doing. The block belongs to this set's window.
+    if (verdict !== 'release') return { block: verdict, setId: ww.id };
+    return { expires: paused.releaseExpires, paused };
+  }
+  /** A released request is about to be sent: it passed the guard, DNS and the expiry re-check. */
+  noteHeldDispatch(paused: PausedWrite): void {
+    if (paused.dispatched) return;
+    paused.dispatched = true;
+    const outcome = this.heldOutcomes.get(paused.setId);
+    if (outcome) outcome.dispatched++;
+  }
+  /** A released request's answer arrived (whatever the route does with it afterwards). */
+  noteHeldResponse(paused: PausedWrite, status: number): void {
+    this.heldOutcomes.get(paused.setId)?.statuses.push(status);
+  }
+  /** A released request is done with the route: answered, or failed or refused without an answer. */
+  finishHeldWrite(paused: PausedWrite): void {
+    const outcome = this.heldOutcomes.get(paused.setId);
+    if (!outcome || outcome.inflight <= 0) return;
+    outcome.inflight--;
+    if (!paused.dispatched) outcome.refused++;
+  }
+  private abortHolds(holds: PausedWrite[], code: string): void {
+    for (const paused of holds) paused.decide(code);
+  }
+  private abortAllHolds(code: string): void {
+    const set = this.heldSet;
+    this.heldSet = undefined;
+    if (set) {
+      clearTimeout(set.timer);
+      this.abortHolds(set.holds, code);
+    }
+    if (this.writeWindow) this.abortHolds(this.writeWindow.holds, code);
+  }
+  /**
+   * The page gave up on a request the route still holds (its own timeout or abort): nothing can be sent for it any more, and what was
+   * approved (or is being asked) was the set as a whole, so the rest of the set goes with it: a save is sent complete or not at all.
+   */
+  private abandonHeld(request: Request): void {
+    const ww = this.writeWindow;
+    for (const holds of [this.heldSet?.holds, ww?.holds]) {
+      const paused = holds?.find(candidate => candidate.request === request && !candidate.decided);
+      if (!holds || !paused) continue;
+      paused.abandoned = true;
+      paused.decide('request_denied');
+      const inWindow = holds === ww?.holds;
+      if (inWindow) ww!.refused = true;
+      this.abortHolds(holds, inWindow ? 'request_denied' : 'approval_invalidated');
+    }
+  }
+  async releaseHeldWrites(holdId: string, expiresAt: number): Promise<void> {
+    const set = this.heldSet;
+    if (!set || set.id !== holdId) throw new AdlError('E_STALE_STATE');
+    this.heldSet = undefined;
+    clearTimeout(set.timer);
+    // The set goes out whole: every request of it must still be pending (a request the page gave up on ends the whole set).
+    if (!set.holds.length || set.holds.some(paused => paused.decided) || this.closed) {
+      this.abortHolds(set.holds, 'approval_invalidated');
+      throw new AdlError('E_STALE_STATE');
+    }
+    this.heldOutcomes.set(holdId, { inflight: set.holds.length, dispatched: 0, refused: 0, statuses: [] });
+    while (this.heldOutcomes.size > MAX_HELD_OUTCOMES) this.heldOutcomes.delete(this.heldOutcomes.keys().next().value!);
+    for (const paused of set.holds) {
+      paused.releaseExpires = expiresAt;
+      paused.decide('release');
+    }
+  }
+  async abortHeldWrites(holdId: string, outcome: HeldWriteAbortOutcome): Promise<void> {
+    const set = this.heldSet;
+    if (!set || set.id !== holdId) return;
+    this.heldSet = undefined;
+    clearTimeout(set.timer);
+    const code = {
+      denied: 'approval_denied',
+      expired: 'approval_expired',
+      invalidated: 'approval_invalidated',
+      not_approvable: 'request_not_approvable',
+    }[outcome];
+    this.abortHolds(set.holds, code);
+  }
+  heldWritesAlive(holdId: string): boolean {
+    return this.heldSet?.id === holdId && this.heldSet.holds.every(paused => !paused.decided);
+  }
+  /**
+   * Undefined while a released request is still in flight (or the set was never released); then how many requests reached the network
+   * fetch and how many were refused before it, and the highest status answered when any was.
+   */
+  heldWriteOutcome(holdId: string): { dispatched: number; refused: number; response_status?: number } | undefined {
+    const outcome = this.heldOutcomes.get(holdId);
+    if (!outcome || outcome.inflight > 0) return undefined;
+    return {
+      dispatched: outcome.dispatched,
+      refused: outcome.refused,
+      ...(outcome.statuses.length ? { response_status: Math.max(...outcome.statuses) } : {}),
+    };
   }
   private manualNetworkExpires = 0;
   // The origin the human approved, which a later redirect does not widen.
@@ -1180,6 +1709,80 @@ class BrowserSession implements AdapterSession {
       // handler rather than spinning on immediately fulfilled promises.
       await new Promise<void>(resolve => setImmediate(resolve));
       this.checkAlive();
+    }
+  }
+
+  /** Whether a request counts toward the post-action settle: the page's own data requests and navigations, not what it was already polling. */
+  private attributable(request: Request): boolean {
+    try {
+      const page = this.pageValue;
+      if (!page || request.frame() !== page.mainFrame() || !SETTLE_RESOURCE_TYPES.has(request.resourceType()))
+        return false;
+      if (request.isNavigationRequest() || !['GET', 'HEAD'].includes(request.method().toUpperCase())) return true;
+      return !this.knownRequests.has(requestShape(request.url()));
+    } catch {
+      return false; // a request without a frame or a URL that does not parse is not the page's own data request
+    }
+  }
+  private noteRequestStart(request: Request): void {
+    const ww = this.writeWindow;
+    if (!ww || !this.attributable(request)) return;
+    ww.inflight.add(request);
+    ww.lastActivity = Date.now();
+  }
+  private noteRequestEnd(request: Request): void {
+    const ww = this.writeWindow;
+    if (ww?.inflight.delete(request)) ww.lastActivity = Date.now();
+  }
+  /**
+   * Waits until the page has reacted to an input action: no attributable request in flight and SETTLE_QUIET_MS without activity
+   * (a request starting or ending, a DOM mutation), at the latest SETTLE_MAX_MS after the dispatch, and never so late that the
+   * action's own time limit is at risk. A document that goes away or fails to answer ends the wait quietly.
+   */
+  private async settle(ww: WriteWindow, signal: AbortSignal, budgetEnd: number): Promise<void> {
+    const deadline = Math.min(Math.max(ww.dispatchedAt + SETTLE_MAX_MS, Date.now() + SETTLE_QUIET_MS), budgetEnd);
+    if (signal.aborted || Date.now() >= deadline) return;
+    // A read that does not come back while a write is held means the page's thread is blocked in that request (a synchronous XHR
+    // sent after the dispatch returned): it cannot be asked about, so it is aborted and the read then completes.
+    const read = async (): Promise<number> => {
+      const reading = this.readActivity();
+      let grace: ReturnType<typeof setTimeout> | undefined;
+      const stuck = new Promise<undefined>(resolve => {
+        grace = setTimeout(() => resolve(undefined), SYNC_GRACE_MS);
+        grace.unref();
+      });
+      try {
+        const value = await Promise.race([reading, stuck]);
+        if (value !== undefined) return value;
+        if (ww.holds.some(paused => !paused.decided)) this.abortSynchronousHolds(ww);
+        return await reading;
+      } finally {
+        clearTimeout(grace);
+      }
+    };
+    let seen = await read();
+    // The document is gone (it is being replaced): whatever it held belongs to a page that no longer exists, which act() checks.
+    if (seen < 0) {
+      ww.documentGone = true;
+      return;
+    }
+    // The document changed between the dispatch and now (the handler's own render): it only counts as quiet from here on.
+    const base = await ww.baseline;
+    if (base >= 0 && base !== seen) ww.lastActivity = Date.now();
+    for (;;) {
+      const now = Date.now();
+      if (signal.aborted || now >= deadline) return;
+      const current = await read();
+      if (current < 0) {
+        ww.documentGone = true;
+        return;
+      }
+      if (current !== seen) {
+        seen = current;
+        ww.lastActivity = Date.now();
+      }
+      if (ww.inflight.size === 0 && Date.now() - ww.lastActivity >= SETTLE_QUIET_MS) return;
+      await new Promise(resolve => setTimeout(resolve, Math.max(1, Math.min(25, deadline - Date.now()))));
     }
   }
 
@@ -1269,10 +1872,32 @@ class BrowserSession implements AdapterSession {
   async attach(page: Page): Promise<void> {
     this.pageValue = page;
     page.on('framenavigated', frame => {
-      if (frame === page.mainFrame()) this.documentGeneration++;
+      if (frame !== page.mainFrame()) return;
+      this.documentGeneration++;
+      // A document replaced by a navigation takes its unreported blocks and the requests still held for it along; blocks recorded
+      // during the navigation itself (its own redirect refusals) belong to the new document. Same-document navigations (hash,
+      // pushState) start no request and keep both.
+      const pending = this.navigationPending;
+      this.navigationPending = undefined;
+      if (!pending) return;
+      this.documentReplacements++;
+      for (const [key, warning] of this.networkBlocks) if (warning.seq <= pending.seq) this.networkBlocks.delete(key);
+      this.abortAllHolds(DOCUMENT_REPLACED);
     });
     page.on('request', request => {
-      if (request.isNavigationRequest() && request.frame() === page.mainFrame()) this.latestMainNavigation = request;
+      if (request.isNavigationRequest() && request.frame() === page.mainFrame()) {
+        this.latestMainNavigation = request;
+        this.navigationPending = { request, seq: this.blockSeq, at: Date.now() };
+      }
+      this.noteRequestStart(request);
+    });
+    page.on('requestfinished', request => this.noteRequestEnd(request));
+    page.on('requestfailed', request => {
+      if (this.navigationPending?.request === request) this.navigationPending = undefined;
+      // A request the route still holds is gone once the page cancelled it. Playwright reports no failure for a navigation that
+      // replaces the document under a held request, which the framenavigated handler above covers.
+      this.abandonHeld(request);
+      this.noteRequestEnd(request);
     });
     // Same-document navigations (hash, pushState) fetch no document and so keep the last status. 204/205 leave the current document in place.
     page.on('response', response => {
@@ -1612,9 +2237,12 @@ class BrowserSession implements AdapterSession {
     await this.owner.callGuard(this.page.url());
     const url = redactUrl(this.page.url(), this.policy.allowPersonalData),
       title = redactString(await this.page.title(), this.policy.allowPersonalData);
+    // The blocks no observation has reported yet, those of an action first. Reporting never changes the revision (the fingerprint
+    // hashes blockSeq), a new block does.
     const warnings = [...this.networkBlocks.values()]
-      .map(w => ({ ...w }))
+      .map(({ seq: _seq, ...warning }) => warning)
       .sort((a, b) => Number(isActionNetworkBlock(b)) - Number(isActionNetworkBlock(a)));
+    const warningSeq = this.blockSeq;
     const digest = (value: string) => crypto.createHash('sha256').update(value).digest('hex');
     const formDigests = Object.fromEntries(Object.entries(res.forms).map(([id, value]) => [id, digest(value)]));
     const actionEvidence = {
@@ -1629,7 +2257,7 @@ class BrowserSession implements AdapterSession {
     // Only an error status is reported; a change of status (for example a reload) is a new revision.
     const httpStatus =
       this.documentStatus !== undefined && this.documentStatus >= 400 ? this.documentStatus : undefined;
-    const fingerprint = digest(res.sig + JSON.stringify([url, title, warnings, actionEvidence, httpStatus ?? null]));
+    const fingerprint = digest(res.sig + JSON.stringify([url, title, warningSeq, actionEvidence, httpStatus ?? null]));
     await this.assertIntegrity(signal);
     return {
       elements: res.elements,
@@ -1638,6 +2266,7 @@ class BrowserSession implements AdapterSession {
       url,
       title,
       actionEvidence,
+      warningSeq,
       ...(warnings.length ? { warnings } : {}),
       ...(httpStatus !== undefined ? { http_status: httpStatus } : {}),
     };
@@ -1648,7 +2277,13 @@ class BrowserSession implements AdapterSession {
     offset: number,
     length: number,
     signal: AbortSignal,
-  ): Promise<{ text: string; total_length: number; next_offset: number | null; truncated: boolean }> {
+  ): Promise<{
+    text: string;
+    total_length: number;
+    next_offset: number | null;
+    truncated: boolean;
+    hidden_text?: true;
+  }> {
     this.checkAlive();
     if (signal.aborted) throw new AdlError('E_CANCELLED');
     if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isSafeInteger(length) || length < 1 || length > 1048576)
@@ -1697,7 +2332,7 @@ class BrowserSession implements AdapterSession {
       await handle.dispose();
       throw new AdlError('E_TARGET_NOT_FOUND');
     }
-    let result: { error: 'missing' | 'protected' } | { text: string; truncated: boolean };
+    let result: { error: 'missing' | 'protected' } | { text: string; truncated: boolean; hidden?: boolean };
     try {
       await element.scrollIntoViewIfNeeded({ timeout: this.policy.actionTimeoutMs });
       result = await isolatedCollect(
@@ -1749,6 +2384,13 @@ class BrowserSession implements AdapterSession {
               null
           )
             if (skip(ancestor)) return { text: '', truncated: false };
+          const displayNone = (e: Element) => {
+            try {
+              return getComputedStyle(e).display === 'none';
+            } catch {
+              return false;
+            }
+          };
           const walker = m(
             r(root, 'ownerDocument'),
             'createTreeWalker',
@@ -1756,33 +2398,178 @@ class BrowserSession implements AdapterSession {
             NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT,
             {
               acceptNode: (n: Node) =>
-                r(n, 'nodeType') === 1 && skip(n as Element) ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT,
+                r(n, 'nodeType') === 1 && (skip(n as Element) || displayNone(n as Element))
+                  ? NodeFilter.FILTER_REJECT
+                  : NodeFilter.FILTER_ACCEPT,
             },
           ) as TreeWalker;
+          // Text a human cannot see (the snapshot's hidden_text rule) is left out and reported. The element read itself is not judged:
+          // an element flagged hidden_text is read as is, so that its text can be inspected.
+          const alphaOf = (color: string): number => {
+            const match =
+              /^rgba\(\s*[^,]+,[^,]+,[^,]+,\s*([\d.]+)(%?)\s*\)$/.exec(color) ?? /\/\s*([\d.]+)(%?)\s*\)$/.exec(color);
+            if (!match) return 1;
+            const value = parseFloat(match[1]!);
+            return match[2] ? value / 100 : value;
+          };
+          const looksHidden = (e: Element, withAncestors: boolean): boolean => {
+            try {
+              const style = getComputedStyle(e);
+              if (parseFloat(style.fontSize) <= 2 || parseFloat(style.opacity) < 0.05 || alphaOf(style.color) <= 0.05)
+                return true;
+              if (withAncestors && !m(e, 'checkVisibility', { opacityProperty: true })) return true;
+              if (
+                parseFloat(style.textIndent) <= -999 ||
+                /^rect\(\s*0(?:px)?[\s,]+0(?:px)?[\s,]+0(?:px)?[\s,]+0(?:px)?\s*\)$/.test(style.clip) ||
+                /^inset\(\s*(?:50|100)%/.test(style.clipPath)
+              )
+                return true;
+              const box = m(e, 'getBoundingClientRect') as DOMRect;
+              if (box.bottom + scrollY < -20) return true;
+              if (style.direction === 'ltr' && (box.right + scrollX < -20 || box.left + scrollX > innerWidth + 10000))
+                return true;
+              return (
+                (box.width <= 1 || box.height <= 1) && (style.overflowX !== 'visible' || style.overflowY !== 'visible')
+              );
+            } catch {
+              return false;
+            }
+          };
+          const filtering = !looksHidden(root, true);
+          const hiddenCache = new Map<Element, boolean>();
+          const hiddenBelowRoot = (e: Element | null, depth = 0): boolean => {
+            if (!e || e === root || depth > 256) return false;
+            let value = hiddenCache.get(e);
+            if (value === undefined) {
+              value = looksHidden(e, false) || hiddenBelowRoot(r(e, 'parentElement') as Element | null, depth + 1);
+              hiddenCache.set(e, value);
+            }
+            return value;
+          };
+          // Paragraph structure: text is joined per block. A block change gives a new line, or a blank line around paragraphs, headings,
+          // lists and tables; cells of one row are joined with " | "; <br> is a new line; whitespace collapses unless the element preserves it.
+          const BLOCKS = new Set(
+            'DIV P TR UL OL TABLE THEAD TBODY TFOOT SECTION ARTICLE ASIDE HEADER FOOTER NAV MAIN H1 H2 H3 H4 H5 H6 BLOCKQUOTE PRE FIGURE FIGCAPTION FORM FIELDSET LEGEND DL HR ADDRESS DETAILS SUMMARY CAPTION LI DT DD TD TH DIALOG HGROUP MENU'.split(
+              ' ',
+            ),
+          );
+          const PARAGRAPHS = new Set(
+            'P H1 H2 H3 H4 H5 H6 BLOCKQUOTE PRE FIGURE UL OL DL TABLE ARTICLE SECTION ASIDE MAIN HEADER FOOTER NAV FORM FIELDSET DETAILS ADDRESS HR'.split(
+              ' ',
+            ),
+          );
+          const tagOf = (e: Element) => String(r(e, 'tagName'));
+          const blocks = new Map<Element, Element>();
+          const blockOf = (owner: Element): Element => {
+            let found = blocks.get(owner);
+            if (found) return found;
+            found = root;
+            for (
+              let up: Element | null = owner, climbed = 0;
+              up && up !== root && climbed < 64;
+              climbed++, up = r(up, 'parentElement') as Element | null
+            )
+              if (BLOCKS.has(tagOf(up))) {
+                found = up;
+                break;
+              }
+            blocks.set(owner, found);
+            return found;
+          };
+          // The list or table an item or cell belongs to: moving between two of them is one line, leaving it is a paragraph break.
+          const groups = new Map<Element, Element>();
+          const groupOf = (block: Element): Element => {
+            let found = groups.get(block);
+            if (!found) {
+              const tag = tagOf(block);
+              found =
+                tag === 'LI' || tag === 'DT' || tag === 'DD'
+                  ? ((m(block, 'closest', 'ul,ol,dl,menu') as Element | null) ?? block)
+                  : tag === 'TD' || tag === 'TH'
+                    ? ((m(block, 'closest', 'table') as Element | null) ?? block)
+                    : block;
+              groups.set(block, found);
+            }
+            return found;
+          };
+          const preserved = new Map<Element, boolean>();
+          const preserves = (owner: Element): boolean => {
+            let value = preserved.get(owner);
+            if (value === undefined) {
+              try {
+                value = /^(pre|break-spaces)/.test(getComputedStyle(owner).whiteSpace);
+              } catch {
+                value = false;
+              }
+              preserved.set(owner, value);
+            }
+            return value;
+          };
+          const LIMIT = 1048576;
           let text = '',
             visited = 0,
-            node: Node | null = walker.nextNode(),
-            truncated = false;
-          while (node) {
+            truncated = false,
+            hidden = !filtering,
+            last: Element | null = null;
+          for (let node: Node | null = walker.nextNode(); node; node = walker.nextNode()) {
             if (++visited > 100000) {
               truncated = true;
               break;
             }
-            if (r(node, 'nodeType') === 3) {
-              const value = node.nodeValue ?? '';
-              const remaining = 1048576 - text.length;
-              if (value.length > remaining) {
-                text += value.slice(0, remaining);
-                truncated = true;
-                break;
-              }
-              text += value;
+            if (r(node, 'nodeType') === 1) {
+              if (tagOf(node as Element) === 'BR') text = text.replace(/ +$/, '') + '\n';
+              continue;
             }
-            node = walker.nextNode();
+            const owner = r(node, 'parentElement') as Element | null;
+            // Text that is not rendered (display:none, visibility:hidden, a closed details element) is not read.
+            if (!owner || !m(owner, 'checkVisibility', { visibilityProperty: true })) continue;
+            if (filtering && hiddenBelowRoot(owner)) {
+              hidden = true;
+              continue;
+            }
+            const keep = preserves(owner),
+              raw = String(r(node, 'nodeValue') ?? '');
+            let piece = keep ? raw.replace(/\r\n?/g, '\n') : raw.replace(/[ \t\n\r\f]+/g, ' ');
+            const block = blockOf(owner);
+            if (!keep && piece === ' ') {
+              if (text !== '' && block === last && !/[ \n]$/.test(text)) text += ' ';
+              continue;
+            }
+            if (piece === '') continue;
+            if (last !== null && block !== last) {
+              const before = tagOf(last),
+                after = tagOf(block);
+              text = text.replace(/ +$/, '');
+              if (
+                (before === 'TD' || before === 'TH') &&
+                (after === 'TD' || after === 'TH') &&
+                r(last, 'parentElement') === r(block, 'parentElement')
+              )
+                text += ' | ';
+              else {
+                const from = groupOf(last),
+                  to = groupOf(block),
+                  blank =
+                    PARAGRAPHS.has(before) ||
+                    PARAGRAPHS.has(after) ||
+                    (from !== to && (PARAGRAPHS.has(tagOf(from)) || PARAGRAPHS.has(tagOf(to))));
+                text += '\n'.repeat(Math.max(0, (blank ? 2 : 1) - /\n*$/.exec(text)![0].length));
+              }
+            }
+            if (!keep && (text === '' || /[ \n]$/.test(text))) piece = piece.replace(/^ /, '');
+            if (piece === '') continue;
+            last = block;
+            if (text.length + piece.length > LIMIT) {
+              text += piece.slice(0, LIMIT - text.length);
+              truncated = true;
+              break;
+            }
+            text += piece;
           }
+          text = text.trim();
           // Never return the prefix of a token cut at the source cap.
           if (truncated) text = text.replace(/[A-Za-z0-9._%+@-]+$/u, '');
-          return { text, truncated };
+          return { text, truncated, ...(hidden ? { hidden: true } : {}) };
         },
         { rules: BROWSER_PRIVACY_RULES, pattern: SECRET_LABEL_PATTERN },
         [],
@@ -1808,6 +2595,7 @@ class BrowserSession implements AdapterSession {
       total_length: text.length,
       next_offset: end < text.length ? end : null,
       truncated: result.truncated,
+      ...(result.hidden ? { hidden_text: true as const } : {}),
     };
   }
 
@@ -2053,6 +2841,8 @@ class BrowserSession implements AdapterSession {
     if (this.policy.browserHeadless !== false) throw new AdlError('E_UNSUPPORTED_ACTION');
     if (signal.aborted) throw new AdlError('E_CANCELLED');
     this.containment = undefined;
+    // A human working in the window may change what a held request was about: it fails closed.
+    this.abortAllHolds('approval_invalidated');
     this.manualNetworkGeneration++;
     this.manualNetworkExpires = 0;
     try {
@@ -2084,11 +2874,14 @@ class BrowserSession implements AdapterSession {
       completed = false;
     const local = new AbortController();
     const combined = AbortSignal.any([signal, local.signal]);
+    const startedAt = Date.now();
     const mark = () => {
       if (combined.aborted) throw new AdlError('E_CANCELLED');
       if (authorization?.approved && (!authorization.expires_at || authorization.expires_at <= Date.now()))
         throw new AdlError('E_POLICY_DENIED');
       onDispatch?.();
+      // From here on what the page sends belongs to this action: its blocks go into the result, its writes may be held.
+      if (!this.writeWindow) this.openWriteWindow(action, authorization);
       dispatched = true;
     };
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -2114,21 +2907,87 @@ class BrowserSession implements AdapterSession {
       const notices = await Promise.race([
         (async () => {
           const found = await this.runAction(action, combined, mark, authorization, complete);
+          // The dispatch is back, so the page's thread was not stuck in a request it sent: holds are no longer suspected of being synchronous.
+          const dispatchedWindow = this.writeWindow;
+          if (dispatchedWindow) {
+            dispatchedWindow.returned = true;
+            clearTimeout(dispatchedWindow.syncTimer);
+            dispatchedWindow.syncTimer = undefined;
+          }
           await this.settleRedirect();
+          const ww = this.writeWindow;
+          // Let the page react (a message after a rejected request, a render after an answer) before the caller reads it.
+          if (ww && dispatched && SETTLED_ACTIONS.has(action.action))
+            await this.settle(
+              ww,
+              combined,
+              startedAt + Math.min(action.timeout_ms ?? Infinity, this.policy.actionTimeoutMs) - 150,
+            );
           const containment = this.containment;
           if (containment) {
-            // A handler may start its request after the click returns. The network stays closed until the next action.
-            await new Promise(resolve => setTimeout(resolve, CONTAINMENT_REPORT_MS));
-            if (containment.blocked) {
-              complete();
-              throw new AdlError('E_APPROVAL_REQUIRED', 'requires_ask_mode', { page_script_ran: true });
-            }
+            // A handler may start its request after the click returns. The network stays closed until the next action. The wait
+            // is counted from the dispatch, so a settled action takes CONTAINMENT_REPORT_MS in total, not the sum.
+            const remaining = CONTAINMENT_REPORT_MS - (Date.now() - (ww?.dispatchedAt ?? Date.now()));
+            if (remaining > 0) await new Promise(resolve => setTimeout(resolve, remaining));
+          }
+          // Writes the page sends from now on are background traffic, not this action's.
+          if (ww) ww.open = false;
+          // Writes of a document that is being replaced (the handler navigated away, or the settle found the document gone) die with
+          // it: they are not handed to a human for a page that no longer exists.
+          if (ww && this.windowDocumentReplaced(ww)) this.abortHolds(ww.holds, DOCUMENT_REPLACED);
+          if (containment?.blockedReads) {
+            if (ww) this.abortHolds(ww.holds, 'contained_request_blocked');
+            complete();
+            throw new AdlError('E_APPROVAL_REQUIRED', 'contained_request_blocked', { page_script_ran: true });
+          }
+          if (ww?.overflow) {
+            complete();
+            throw new AdlError('E_APPROVAL_REQUIRED', 'request_not_approvable', { page_script_ran: true });
           }
           const guard = this.submissionGuard;
           this.submissionGuard = undefined;
           if (guard?.blocked) {
             complete();
             throw new AdlError('E_APPROVAL_REQUIRED', 'form_submission_requires_approval');
+          }
+          let alive = ww?.holds.filter(paused => !paused.decided) ?? [];
+          // A set is handed over whole: if any request of it already ended (the page gave up on it), the rest ends too.
+          if (ww && alive.length !== ww.holds.length) {
+            this.abortHolds(alive, 'request_denied');
+            alive = [];
+          }
+          // A contained control that sent a write nobody could approve. A write that cannot be shown to a human cannot be sent in
+          // any tier; one that ask mode would hold is what standard mode tells the caller to select ask for. (In ask mode a
+          // write that could be asked about was held above, or reported by its warning.)
+          if (containment?.blockedWrites && !alive.length) {
+            if (containment.holdableWrites < containment.blockedWrites) {
+              complete();
+              throw new AdlError('E_APPROVAL_REQUIRED', 'request_not_approvable', { page_script_ran: true });
+            }
+            if (!ww?.hold) {
+              complete();
+              throw new AdlError('E_APPROVAL_REQUIRED', 'requires_ask_mode', { page_script_ran: true });
+            }
+          }
+          if (ww && alive.length) {
+            // The writes stay paused inside the browser; the engine asks a human about their exact content and releases or aborts them.
+            const id = ww.id;
+            const expiry = setTimeout(() => void this.abortHeldWrites(id, 'expired'), HELD_SET_LIFETIME_MS);
+            expiry.unref();
+            this.heldSet = { id, holds: alive, timer: expiry };
+            complete();
+            throw new HeldWritesError({
+              id,
+              requests: alive.map(paused => ({
+                method: paused.method,
+                url: paused.url,
+                content_type: paused.contentType,
+                body_sha256: paused.bodySha256,
+                body_length: paused.body?.length ?? 0,
+                details: paused.details,
+                secret: paused.secret,
+              })),
+            });
           }
           if (this.noContentAfterStub > noContentAfterStub)
             return [
@@ -2164,7 +3023,13 @@ class BrowserSession implements AdapterSession {
         })(),
         stopped,
       ]);
-      return notices?.length ? { warnings: notices } : undefined;
+      // The result carries exactly the blocks of this action's window (the engine falls back to a count difference only for adapters
+      // that report none); anything blocked from here on belongs to the document and shows once in the next observation.
+      return dispatched
+        ? { ...(notices?.length ? { warnings: notices } : {}), blocks: this.collectWindowBlocks() }
+        : notices?.length
+          ? { warnings: notices }
+          : undefined;
     } catch (error) {
       const safe =
         error instanceof AdlError
@@ -2182,6 +3047,16 @@ class BrowserSession implements AdapterSession {
       this.approvedRequest = undefined;
       this.submissionGuard = undefined;
       if (!dispatched) this.containment = undefined;
+      // Requests this action held that were not handed over as a set (it timed out, was cancelled or failed otherwise) fail closed.
+      const ww = this.writeWindow;
+      if (ww) {
+        ww.open = false;
+        clearTimeout(ww.syncTimer);
+        ww.syncTimer = undefined;
+        if (this.heldSet?.id !== ww.id) this.abortHolds(ww.holds, 'request_denied');
+        this.writeWindow = undefined;
+        if (!ww.collected) this.adoptBlocks(ww.blocked);
+      }
       if (timer) clearTimeout(timer);
       combined.removeEventListener('abort', onAbort);
     }
@@ -2308,13 +3183,13 @@ class BrowserSession implements AdapterSession {
       }, this.integrityKey);
       try {
         const element = scroller.asElement();
-        if (!element) throw new AdlError('E_UNSUPPORTED_ACTION');
+        if (!element) throw new AdlError('E_UNSUPPORTED_ACTION', 'not_scrollable');
         onDispatch();
-        await element.evaluate(scrollByViewport, { direction: action.direction, key: this.integrityKey });
+        const moved = await element.evaluate(scrollByViewport, { direction: action.direction, key: this.integrityKey });
+        return moved ? undefined : [scrollEdgeNotice(action.direction, 'page')];
       } finally {
         await scroller.dispose();
       }
-      return;
     }
     const id = action.element_id;
     if (!id || !(id.startsWith(this.prefix + '-') || id.startsWith(this.prefix + '_f')))
@@ -2646,9 +3521,16 @@ class BrowserSession implements AdapterSession {
           await this.armSubmissionGuard();
         }
         if (fresh.contained && !authorization.approved) {
-          if (this.policy.operationMode !== 'standard' || this.policy.allowAllOperations)
+          // Standard mode has nobody to ask; ask mode contains it too when the engine lets the writes it sends be held for approval.
+          if (
+            this.policy.allowAllOperations ||
+            !(
+              this.policy.operationMode === 'standard' ||
+              (this.policy.operationMode === 'ask' && authorization.holdWrites === true)
+            )
+          )
             throw new AdlError('E_APPROVAL_REQUIRED', 'requires_ask_mode');
-          this.containment = { blocked: 0 };
+          this.containment = { blockedReads: 0, blockedWrites: 0, holdableWrites: 0 };
         }
       }
       if (targetFrame) {
@@ -2816,9 +3698,13 @@ class BrowserSession implements AdapterSession {
           }, this.integrityKey);
           try {
             const element = scrollTarget.asElement();
-            if (!element) throw new AdlError('E_UNSUPPORTED_ACTION');
+            if (!element) throw new AdlError('E_UNSUPPORTED_ACTION', 'not_scrollable');
             onDispatch();
-            await element.evaluate(scrollByViewport, { direction: action.direction, key: this.integrityKey });
+            const moved = await element.evaluate(scrollByViewport, {
+              direction: action.direction,
+              key: this.integrityKey,
+            });
+            if (!moved) return [scrollEdgeNotice(action.direction, 'region')];
           } finally {
             await scrollTarget.dispose();
           }
@@ -2836,6 +3722,7 @@ class BrowserSession implements AdapterSession {
 
   markClosed(): void {
     this.closed = true;
+    this.abortAllHolds('approval_invalidated');
     this.controller.abort();
     this.transportPool.destroy();
     this.resourceCache.clear();
@@ -2844,6 +3731,8 @@ class BrowserSession implements AdapterSession {
   close(): Promise<void> {
     if (this.closing) return this.closing;
     this.closed = true;
+    // Requests the route still holds must not stay pending, or leave if the context is torn down in between.
+    this.abortAllHolds('approval_invalidated');
     this.openAbortCleanup?.();
     this.openAbortCleanup = undefined;
     this.controller.abort();
@@ -3021,7 +3910,7 @@ export class BrowserAdapter implements Adapter {
       // Hard network boundary, installed before the first page exists.
       if (routesNetwork(this.policy)) {
         await context.route('**/*', async (route: Route) => {
-          const block = async (code: string, origin?: string) => {
+          const block = async (code: string, origin?: string, windowId?: string) => {
             let kind = 'other',
               verb = 'GET';
             try {
@@ -3029,9 +3918,11 @@ export class BrowserAdapter implements Adapter {
               kind = networkResourceType(blocked);
               verb = networkMethod(blocked.method());
             } catch {}
-            active.recordNetworkBlock(code, origin, kind, verb);
+            active.recordNetworkBlock(code, origin, kind, verb, windowId);
             await route.abort().catch(() => undefined);
           };
+          // The write a human released: however this handler ends, the request is done with the route (heldWriteOutcome).
+          let releasedWrite: PausedWrite | undefined;
           try {
             const req = route.request();
             if (active.controller.signal.aborted || req.frame().page() !== page) return route.abort();
@@ -3058,7 +3949,7 @@ export class BrowserAdapter implements Adapter {
             }
             if (active.containedRequest(req)) {
               active.recordNetworkBlock(
-                'requires_ask_mode',
+                'contained_request_blocked',
                 undefined,
                 networkResourceType(req),
                 networkMethod(req.method()),
@@ -3072,7 +3963,12 @@ export class BrowserAdapter implements Adapter {
                 (mainNavigation && active.reachable(u.origin)) ||
                 (resource &&
                   ['GET', 'HEAD'].includes(method) &&
-                  [...this.policy.allowedOrigins, ...(this.policy.resourceOrigins ?? [])].includes(u.origin));
+                  [...this.policy.allowedOrigins, ...(this.policy.resourceOrigins ?? [])].includes(u.origin)) ||
+                // A write to a granted origin is decided below: held for approval while an action runs, blocked otherwise.
+                (resource &&
+                  HELD_METHODS.has(method) &&
+                  this.policy.allowedOrigins.includes(u.origin) &&
+                  active.canHoldNow());
               if (!permitted) return block('origin_not_allowed', u.origin);
             }
             const body = req.postDataBuffer() ?? undefined;
@@ -3093,10 +3989,21 @@ export class BrowserAdapter implements Adapter {
                   !body.equals(Buffer.from(permit.body)) ||
                   (req.headers()['content-type'] ?? '').split(';')[0]?.trim().toLowerCase() !==
                     'application/x-www-form-urlencoded'
-                )
-                  return block('method_requires_approval');
-                approvedExpires = permit.expires;
-                active.approvedRequest = undefined;
+                ) {
+                  // Not the one-shot form permit: a page write is paused here for a human's decision (ask mode, during an action),
+                  // or blocked with the code that says why. A released one continues below like the permitted form POST:
+                  // guard, DNS pinning and the expiry re-check apply to its exact bytes.
+                  const verdict = await active.holdWrite(req, u, body);
+                  if ('block' in verdict)
+                    return verdict.block === DOCUMENT_REPLACED
+                      ? route.abort('aborted').catch(() => undefined)
+                      : block(verdict.block, undefined, verdict.setId);
+                  approvedExpires = verdict.expires ?? 0; // no expiry on a release fails closed at dispatch
+                  releasedWrite = verdict.paused;
+                } else {
+                  approvedExpires = permit.expires;
+                  active.approvedRequest = undefined;
+                }
               }
             }
             if (!['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'].includes(method))
@@ -3133,6 +4040,8 @@ export class BrowserAdapter implements Adapter {
                   (approvedExpires !== undefined && approvedExpires <= Date.now())
                 )
                   return block('request_denied');
+                // From here the released write is on its way to the network (the guard, DNS and the expiry re-check passed).
+                if (releasedWrite && hops === 0) active.noteHeldDispatch(releasedWrite);
                 const cacheKey = active.resourceCache.key(current, ips[0]!, hopMethod, req.resourceType(), hopHeaders);
                 const cached = active.resourceCache.get(cacheKey);
                 res =
@@ -3153,6 +4062,8 @@ export class BrowserAdapter implements Adapter {
                   ));
                 if (!cached) active.resourceCache.put(cacheKey, res);
               }
+              // The released write was answered, whatever becomes of the answer below.
+              if (releasedWrite && hops === 0) active.noteHeldResponse(releasedWrite, res.status);
               if (res.status < 300 || res.status >= 400 || !res.headers.location) break;
               const nextMethod = redirectedMethod(res.status, hopMethod);
               // A grant covers one write to one URL: repeating the write elsewhere takes the permission for every operation.
@@ -3246,6 +4157,8 @@ export class BrowserAdapter implements Adapter {
                 ? (error.reason ?? (error.code === 'E_RESOURCE_LIMIT' ? 'response_blocked' : 'network_error'))
                 : 'network_error',
             );
+          } finally {
+            if (releasedWrite) active.finishHeldWrite(releasedWrite);
           }
         });
         await context.routeWebSocket('**/*', ws => {
