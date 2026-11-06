@@ -990,6 +990,7 @@ test('held writes: approval releases the requests once; adl_approvals reports se
         summary: undefined,
         sent: true,
         response_status: 200,
+        save: { state: 'submitted', next_step: 'observe', retry_action: false },
       },
     );
     assert.equal(f.state.released.length, 1);

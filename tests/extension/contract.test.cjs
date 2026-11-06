@@ -91,6 +91,18 @@ function harness(initial = {}, options = {}) {
   const uri = value => ({ fsPath: value, path: value, scheme: 'file', toString: () => `file://${value}` });
   const config = {
     enabled: false,
+    ...(options.freshDefaults
+      ? {}
+      : {
+          allowAllOperations: false,
+          operationMode: 'read_only',
+          allowAllBrowserOrigins: false,
+          allowAllApplications: false,
+          allowPhysicalInput: false,
+          allowUnredactedImages: false,
+          allowLoopback: false,
+          allowPrivateNetwork: false,
+        }),
     nodePath: '',
     configPath: '',
     autoUpdate: true,
@@ -371,7 +383,7 @@ test('manifest contributes the sidebar, workspace switch and application update 
   );
   assert.equal(pkg.galleryBanner.color, '#191827');
   const props = pkg.contributes.configuration.properties;
-  assert.equal(props['agentdesklink.enabled'].default, false);
+  assert.equal(props['agentdesklink.enabled'].default, true);
   assert.equal(props['agentdesklink.enabled'].scope, 'window');
   for (const key of [
     'allowAllOperations',
@@ -381,7 +393,7 @@ test('manifest contributes the sidebar, workspace switch and application update 
     'allowPrivateNetwork',
     'allowPersonalData',
   ]) {
-    assert.equal(props[`agentdesklink.${key}`].default, false);
+    assert.equal(props[`agentdesklink.${key}`].default, key !== 'allowPersonalData');
     assert.equal(props[`agentdesklink.${key}`].scope, 'window');
   }
   assert.deepEqual(props['agentdesklink.browserOrigins'].default, []);
@@ -418,7 +430,50 @@ test('MCP is opt-in and absent in empty and untrusted windows', async () => {
     assert.equal((await p.provideMcpServerDefinitions()).length, 0);
   }
 });
-test('enabled MCP uses bundled Node with default-deny permissions and no legacy policy inputs', async () => {
+test('fresh settings grant all operations, URLs and applications without registration', async () => {
+  const h = harness({ enabled: true }, { freshDefaults: true });
+  await h.ready;
+  const [definition] = await h.providers.get('agentdesklink.mcp').provideMcpServerDefinitions();
+  const grants = JSON.parse(definition.env.ADL_MCP_PERMISSIONS);
+  for (const key of [
+    'allowAllOperations',
+    'allowAllBrowserOrigins',
+    'allowAllApplications',
+    'allowPhysicalInput',
+    'allowUnredactedImages',
+    'allowLoopback',
+    'allowPrivateNetwork',
+  ])
+    assert.equal(grants[key], true, key);
+  assert.equal(grants.allowPersonalData, false);
+  assert.deepEqual(grants.browserOrigins, []);
+});
+
+test('editing origins does not require repairing an unused app selection in All applications mode', async () => {
+  const h = harness(
+    { enabled: true, desktopAppId: 'Unused old selection', desktopAppPath: '' },
+    { freshDefaults: true },
+  );
+  await h.ready;
+  const panel = await h.panel();
+  await panel.send({ type: 'setBrowserOrigins', origins: ['https://example.com'] });
+  assert.deepEqual(Array.from(h.config.browserOrigins), ['https://example.com']);
+  assert.equal(h.posts.at(-1).status.originsError, '');
+});
+
+test('an explicitly selected read-only profile survives the permissive defaults and completes setup', async () => {
+  const h = harness({ enabled: true, operationMode: 'read_only' }, { freshDefaults: true });
+  await h.ready;
+  const [definition] = await h.providers.get('agentdesklink.mcp').provideMcpServerDefinitions();
+  const grants = JSON.parse(definition.env.ADL_MCP_PERMISSIONS);
+  assert.equal(grants.allowAllOperations, false);
+  assert.equal(grants.allowPhysicalInput, false);
+  assert.equal(grants.allowAllBrowserOrigins, true);
+  await h.panel();
+  assert.equal(h.posts.at(-1).settings.operationModeConfirmed, true);
+});
+
+test('an explicit restricted profile uses bundled Node and preserves its deny permissions', async () => {
   const h = harness({ enabled: true, nodePath: '/invalid/old/node', configPath: 'missing-policy.json' });
   await h.ready;
   const p = h.providers.get('agentdesklink.mcp'),
@@ -441,6 +496,8 @@ test('enabled MCP uses bundled Node with default-deny permissions and no legacy 
     allowUnredactedImages: false,
     allowLoopback: false,
     allowPrivateNetwork: false,
+    allowAllBrowserOrigins: false,
+    allowAllApplications: false,
   });
   assert.ok(definition.env.ADL_OPERATION_CONTROL);
   assert.ok(definition.env.ADL_OPERATION_EPOCH);
@@ -1686,6 +1743,21 @@ const panelGrants = async h => {
   await sleep(30); // grant changes reach the panel in one coalesced publish
   return h.posts.filter(x => x.type === 'state').at(-1).grants;
 };
+
+test('approval and standing grants work for unregistered sites with All URLs, and narrow immediately when it is off', async () => {
+  const h = grantHarness(APPROVE);
+  h.config.allowAllBrowserOrigins = true;
+  h.config.browserOrigins = [];
+  await h.ready;
+  const made = await giveGrant(h, { origin: OTHER_SITE });
+  assert.equal(made.status, 201);
+  const covered = await postGrantable(h, { origin: OTHER_SITE });
+  assert.equal(covered.reply.status, 'approved');
+  assert.equal(covered.reply.granted, 'site_writes');
+  assert.equal((await postGrantable(h, { origin: 'file:///private', grant: null })).status, 400);
+  h.config.allowAllBrowserOrigins = false;
+  assert.equal((await postGrantable(h, { origin: OTHER_SITE })).status, 400);
+});
 
 test('the approval dialog offers the standing-grant item only for grant-eligible browser summaries, and only that item creates a grant', async () => {
   const h = grantHarness(APPROVE);

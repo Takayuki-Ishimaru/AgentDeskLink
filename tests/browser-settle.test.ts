@@ -147,7 +147,9 @@ test('allowAllOperations: the answer to a slow request is in the diff', { timeou
     assert.ok(JSON.stringify(result.observation).includes('saved'), JSON.stringify(result.observation));
     assert.ok(!JSON.stringify(result.observation).includes('saving'), 'the final state, not the intermediate one');
     assert.ok(timing.ms >= 150 - 20, `waited for the answer (${timing.ms} ms)`);
-    assert.ok(timing.ms < SETTLE_MAX_MS, `but not for ever (${timing.ms} ms)`);
+    // The adapter's wall time also includes the final document/freshness verification after
+    // the bounded settle loop. Do not mistake a scheduler delay there for an unbounded wait.
+    assert.ok(timing.ms < SETTLE_MAX_MS + 100, `bounded settle plus final verification (${timing.ms} ms)`);
   } finally {
     await f.close();
   }

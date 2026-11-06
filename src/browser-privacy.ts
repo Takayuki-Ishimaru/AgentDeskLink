@@ -1,4 +1,5 @@
 import { selectors } from 'playwright';
+import { withPersonalContext, personalContextPageFn } from './personal-context.js';
 import {
   SECRET_LABEL_PATTERN,
   BROWSER_PRIVACY_RULES,
@@ -9,20 +10,24 @@ import {
 
 // This engine executes at screenshot mask resolution, in an isolated world.
 // It returns live DOM nodes rather than mutable selectors or observed coordinates.
-function privacyMaskEngine() {
+function privacyMaskEngine(_root: unknown, _arg: unknown, personalContext: typeof personalContextPageFn) {
   const queryAll = (root: Document | Element, source: string): Element[] => {
     const {
       pattern: sourcePattern,
       privacyRules,
       valuePatterns,
       maskPersonalData,
+      secretPattern,
     } = JSON.parse(source) as {
       pattern: string;
       privacyRules: typeof BROWSER_PRIVACY_RULES;
       valuePatterns: string[];
       maskPersonalData?: boolean;
+      secretPattern: string;
     };
     const pattern = new RegExp(sourcePattern, 'iu');
+    const personalContexts = new WeakMap<Element, boolean>();
+    const credentialPattern = new RegExp(secretPattern, 'iu');
     const valueRules = valuePatterns.map(source => new RegExp(source, 'i'));
     const secret = (text: string) =>
       pattern.test(
@@ -151,7 +156,11 @@ function privacyMaskEngine() {
         const labelText = !control && !!m(node, 'closest', 'label') && !secretValue(node.textContent ?? '');
         if (
           inSensitiveRegion(node) ||
-          (!labelText && hints.some(secret)) ||
+          (maskPersonalData && personalContext(node, privacyRules.personalContextLabelPattern, personalContexts)) ||
+          (!labelText &&
+            hints.some(hint =>
+              control ? secret(hint) : credentialPattern.test(hint.normalize('NFKC')) || secretValue(hint),
+            )) ||
           (control && maskPersonalData && /(?:^|\s)name(?:$|\s)/i.test(attr(node, 'autocomplete') ?? '')) ||
           (control && (secretValue(value) || selected))
         ) {
@@ -168,9 +177,13 @@ function privacyMaskEngine() {
 
 let registration: Promise<void> | undefined;
 export function ensureBrowserPrivacySelectors(): Promise<void> {
-  return (registration ??= selectors.register('adlprivacy', privacyMaskEngine, { contentScript: true }));
+  return (registration ??= selectors.register(
+    'adlprivacy',
+    withPersonalContext(privacyMaskEngine) as () => ReturnType<typeof privacyMaskEngine>,
+    { contentScript: true },
+  ));
 }
 export function privacyMaskSelector(allowPersonalData = false): string {
-  return `adlprivacy=${JSON.stringify({ pattern: SECRET_LABEL_PATTERN + (allowPersonalData ? '' : '|' + PERSONAL_LABEL_PATTERN), privacyRules: BROWSER_PRIVACY_RULES, maskPersonalData: !allowPersonalData, valuePatterns: [...TEXT_REDACTION_RULES, ...(allowPersonalData ? [] : PERSONAL_DATA_REDACTION_RULES)].map(([source]) => source) })}`;
+  return `adlprivacy=${JSON.stringify({ pattern: SECRET_LABEL_PATTERN + (allowPersonalData ? '' : '|' + PERSONAL_LABEL_PATTERN), secretPattern: SECRET_LABEL_PATTERN, privacyRules: BROWSER_PRIVACY_RULES, maskPersonalData: !allowPersonalData, valuePatterns: [...TEXT_REDACTION_RULES, ...(allowPersonalData ? [] : PERSONAL_DATA_REDACTION_RULES)].map(([source]) => source) })}`;
 }
 export const browserPrivacyMaskSelector = privacyMaskSelector();

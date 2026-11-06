@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { createHash } from 'node:crypto';
+import { performance } from 'node:perf_hooks';
 import {
   readSettings,
   log,
@@ -84,10 +85,11 @@ function askHostTargetConflict(settings: ReturnType<typeof readSettings>): strin
   if (
     settings.allowAllOperations ||
     settings.operationMode !== 'ask' ||
-    !settings.desktopAppId ||
-    !settings.desktopAppPath
+    (!settings.allowAllApplications && (!settings.desktopAppId || !settings.desktopAppPath))
   )
     return undefined;
+  if (settings.allowAllApplications)
+    return 'Ask approvals require All applications to be off, so the AI cannot operate the approval host. / 都度承認では、AIが承認ホストを操作できないよう「すべてのアプリ」をオフにしてください。';
   const appId = settings.desktopAppId.trim().toLowerCase();
   const remote = typeof vscode.env.remoteName === 'string' && vscode.env.remoteName.length > 0;
   if (remote)
@@ -117,7 +119,7 @@ function askHostTargetConflict(settings: ReturnType<typeof readSettings>): strin
     (appId === path.basename(settings.desktopAppPath).toLowerCase() &&
       /^(code|code-insiders|codium|cursor|windsurf)(\.exe)?$/.test(hostExe));
   if (sameExec || sameBundle || sameId)
-    return 'Ask approvals are disabled because the native target can control the VS Code host and click its approval dialog. Remove the host app target or disable physical input. / ネイティブ対象がVS Codeホストを操作し承認ダイアログを押せるため、都度承認を無効にしています。ホストアプリの許可を削除するか物理入力を無効にしてください。';
+    return 'Ask approvals are disabled because the native target can control the VS Code host and click its approval dialog. Remove the host app target; disabling physical input alone does not disable semantic control. / ネイティブ対象がVS Codeホストを操作し承認ダイアログを押せるため、都度承認を無効にしています。ホストアプリの許可を削除してください。物理入力をオフにしても意味的操作は可能です。';
   return undefined;
 }
 
@@ -213,8 +215,12 @@ class McpProvider {
     let browserStage = false,
       chosen: InstalledBrowser | undefined;
     this.pendingSetups++;
+    const setupStarted = performance.now();
+    let runtimeResolvedAt = setupStarted;
     try {
       runtime = await resolveRuntime({ extensionRoot: this.extensionRoot });
+      runtimeResolvedAt = performance.now();
+      log.line(`startup runtime_resolution_ms=${Math.round(runtimeResolvedAt - setupStarted)}`);
       if (!current()) return [];
       this.playwrightVersion = runtime.manifest.playwrightVersion;
       browserStage = true;
@@ -230,7 +236,13 @@ class McpProvider {
         signal: this.setupController.signal,
         ...(chosen ? { fallbackExecutable: chosen.executablePath } : {}),
       });
+      log.line(
+        `startup browser_preparation_ms=${Math.round(performance.now() - runtimeResolvedAt)} total_ms=${Math.round(performance.now() - setupStarted)} outcome=succeeded`,
+      );
     } catch (err) {
+      log.line(
+        `startup failed_stage=${browserStage ? 'browser_preparation' : 'runtime_resolution'} elapsed_ms=${Math.round(performance.now() - setupStarted)}`,
+      );
       if (!current()) return [];
       if (browserStage) {
         this.installedBrowsers = await detectInstalledBrowsers().catch(() => []);
@@ -312,6 +324,7 @@ export function activate(context: vscode.ExtensionContext): void {
       const app = mcpPermissions(readSettings()).desktopAppId;
       return app ? [app] : [];
     },
+    () => panelPermissions(readSettings()).effective.allowAllBrowserOrigins === true,
   );
   void approvalBroker.then(broker => {
     liveApprovalBroker = broker;
@@ -536,6 +549,9 @@ export function activate(context: vscode.ExtensionContext): void {
           await configuration.update('allowAllOperations', true, vscode.ConfigurationTarget.Workspace);
         else {
           await configuration.update('allowAllOperations', false, vscode.ConfigurationTarget.Workspace);
+          await configuration.update('allowPhysicalInput', false, vscode.ConfigurationTarget.Workspace);
+          if (mode === 'ask')
+            await configuration.update('allowAllApplications', false, vscode.ConfigurationTarget.Workspace);
           await configuration.update('operationMode', mode, vscode.ConfigurationTarget.Workspace);
         }
       } finally {
@@ -572,6 +588,8 @@ export function activate(context: vscode.ExtensionContext): void {
           'desktopAppId',
           'desktopAppPath',
           'allowAllOperations',
+          'allowAllBrowserOrigins',
+          'allowAllApplications',
           'allowPhysicalInput',
           'browserResourceOrigins',
           'allowPersonalData',
@@ -598,6 +616,8 @@ export function activate(context: vscode.ExtensionContext): void {
           'desktopAppId',
           'desktopAppPath',
           'allowAllOperations',
+          'allowAllBrowserOrigins',
+          'allowAllApplications',
           'allowPhysicalInput',
           'browserResourceOrigins',
           'allowPersonalData',

@@ -57,7 +57,7 @@
     clientsList: $('clients-list'), clientsStatus: $('clients-status'), clientsError: $('clients-error'),
     originsList: $('origins-list'), originInput: $('origin-input'), originAdd: $('origin-add'), originsError: $('origins-error'),
     resourceOriginsList: $('resource-origins-list'), resourceOriginInput: $('resource-origin-input'), resourceOriginAdd: $('resource-origin-add'),
-    loopbackSuggestion: $('loopback-suggestion'), allowLoopback: $('allow-loopback'), allowPrivateNetwork: $('allow-private-network'), allowPersonalData: $('allow-personal-data'),
+    loopbackSuggestion: $('loopback-suggestion'), allowAllBrowserOrigins: $('allow-all-browser-origins'), allowAllApplications: $('allow-all-applications'), allowLoopback: $('allow-loopback'), allowPrivateNetwork: $('allow-private-network'), allowPersonalData: $('allow-personal-data'),
     sessionIdleMinutes: $('session-idle-minutes'), browserHeadless: $('browser-headless'), browserProxyServer: $('browser-proxy-server'),
     sessionIdleEffective: $('session-idle-effective'), runtimeError: $('runtime-settings-error'), operationMode: $('operation-mode'), operationModeError: $('operation-mode-error'),
     privateNetworkSuggestion: $('private-network-suggestion'), browserProxyConnectHostname: $('browser-proxy-connect-hostname'),
@@ -71,7 +71,7 @@
     clientsDetails: $('clients-details'), desktopState: $('desktop-state'), clientsState: $('clients-state')
   };
   const SETUP_STEPS = ['mcp', 'origin', 'tier'].map((name) => ({ name, item: $(`setup-step-${name}`), mark: $(`setup-mark-${name}`), state: $(`setup-state-${name}`), go: $(`setup-go-${name}`) }));
-  const DESKTOP_CONTROLS = ['desktopAppId', 'desktopAppPath', 'desktopBrowse', 'desktopSave', 'desktopClear', 'allowPhysicalInput', 'allowUnredactedImages'];
+  const DESKTOP_CONTROLS = ['allowAllApplications', 'desktopAppId', 'desktopAppPath', 'desktopBrowse', 'desktopSave', 'desktopClear', 'allowPhysicalInput', 'allowUnredactedImages'];
 
   const set = (el, text) => setText(el, text);
   // A collapsed group opens by itself when a problem or an elevated grant appears inside it (once per appearance, so the user can close it again).
@@ -113,7 +113,7 @@
   let hostDesktopNotice = '';
   function markBusy(key, on) {
     busy[key] = on;
-    const map = { enabled: ['enabled'], auto: ['autoUpdate'], check: ['checkUpdates'], checkNow: ['checkNow'], resume: ['resumeOperations'], clients: ['clientsEnable', 'clientsRefresh'], origins: ['originAdd'], runtime: ['sessionIdleMinutes','browserHeadless','browserProxyServer','browserProxyConnectHostname'], operationMode:['operationMode'], desktop: DESKTOP_CONTROLS, browser: ['browserRetry','browserUseAuto'], grants: [] };
+    const map = { enabled: ['enabled'], auto: ['autoUpdate'], check: ['checkUpdates'], checkNow: ['checkNow'], resume: ['resumeOperations'], clients: ['clientsEnable', 'clientsRefresh'], origins: ['originAdd', 'allowAllBrowserOrigins'], runtime: ['sessionIdleMinutes','browserHeadless','browserProxyServer','browserProxyConnectHostname'], operationMode:['operationMode'], desktop: DESKTOP_CONTROLS, browser: ['browserRetry','browserUseAuto'], grants: [] };
     (map[key] || []).forEach((name) => setBusy(els[name], on));
     if (key === 'grants') grantButtons.forEach((button) => setBusy(button, on));
     // Emergency stop must stay clickable even while the stop itself runs.
@@ -212,9 +212,9 @@
     const requested = p.requested || p;
     p = p.effective || p;
     const flags = {'operations':'allowAllOperations','physical':'allowPhysicalInput','images':'allowUnredactedImages','loopback':'allowLoopback','private':'allowPrivateNetwork'};
-    const value = (key) => key === 'mode' ? ({read_only:'読み取り専用 / read only',standard:'標準 / standard',ask:'都度承認 / ask each time',all:'すべて許可 / allow all (legacy)'}[p.operationMode] || 'unknown')
-      : key === 'origins' ? (Array.isArray(p.browserOrigins) && p.browserOrigins.length ? p.browserOrigins.join(', ') : OFF.origins)
-      : key === 'app' ? (p.desktopAppId || OFF.app)
+    const value = (key) => key === 'mode' ? ({read_only:'読み取り専用 / read only',standard:'標準 / standard',ask:'都度承認 / ask each time',all:'すべて許可 / all operations'}[p.operationMode] || 'unknown')
+      : key === 'origins' ? (p.allowAllBrowserOrigins ? 'すべてのURL / all URLs' : Array.isArray(p.browserOrigins) && p.browserOrigins.length ? p.browserOrigins.join(', ') : OFF.origins)
+      : key === 'app' ? (p.allowAllApplications ? 'すべてのアプリ / all apps' : p.desktopAppId || OFF.app)
       : p[flags[key]] ? '有効 / on' : OFF[key];
     els.permissions.textContent = '';
     for (const [key, label] of PERMS) {
@@ -223,7 +223,7 @@
       const b = document.createElement('span'); b.className = 'perm-value'; setText(b, String(value(key)) + (requested[flags[key]] === true && p[flags[key]] !== true ? '（要求 on / requested on）' : ''));
       li.appendChild(a); li.appendChild(b); els.permissions.appendChild(li);
     }
-    const hint = (Array.isArray(p.browserOrigins) && p.browserOrigins.length) || p.desktopAppId ? '許可された範囲のみ利用できます。 / Only granted scopes are usable.' : 'MCP を有効にしても権限は付きません。 / Enabling MCP alone grants nothing.';
+    const hint = p.allowAllBrowserOrigins || p.allowAllApplications || (Array.isArray(p.browserOrigins) && p.browserOrigins.length) || p.desktopAppId ? '許可された範囲のみ利用できます。 / Only granted scopes are usable.' : 'MCP を有効にしても権限は付きません。 / Enabling MCP alone grants nothing.';
     if (els.permissionsHint) setTextParts(els.permissionsHint, [hint, ...(Array.isArray(p.reasons) ? p.reasons : [])]);
   }
   const HOST_NOTES = { 'cdn.playwright.dev': 'Chromium 本体と補助ファイル / Chromium and helpers', 'playwright.download.prss.microsoft.com': '補助ファイルのミラー / mirror for helper files' };
@@ -336,6 +336,8 @@
     send({ type: 'setBrowserResourceOrigins', origins: [...currentResourceOrigins, value] }, 'origins');
   });
   if (els.resourceOriginInput) els.resourceOriginInput.addEventListener('keydown', (event) => { if (event.key === 'Enter') { event.preventDefault(); els.resourceOriginAdd?.click(); } });
+  if (els.allowAllBrowserOrigins) els.allowAllBrowserOrigins.addEventListener('change', () => send({type:'setAllowAllBrowserOrigins',enabled:els.allowAllBrowserOrigins.checked},'origins'));
+  if (els.allowAllApplications) els.allowAllApplications.addEventListener('change', () => send({type:'setAllowAllApplications',enabled:els.allowAllApplications.checked},'desktop'));
   if (els.allowLoopback) els.allowLoopback.addEventListener('change', () => { suggestLoopback(); send({type:'setAllowLoopback',enabled:els.allowLoopback.checked},'origins'); });
   if (els.allowPrivateNetwork) els.allowPrivateNetwork.addEventListener('change', () => { suggestLoopback(); send({type:'setAllowPrivateNetwork',enabled:els.allowPrivateNetwork.checked},'origins'); });
   if (els.allowPersonalData) els.allowPersonalData.addEventListener('change', () => send({type:'setAllowPersonalData',enabled:els.allowPersonalData.checked},'origins'));
@@ -437,9 +439,9 @@
     if (!s.enabled) return { ja: 'このワークスペースでは MCP が無効です。AI は何もできません。', en: 'MCP is off in this workspace, so the AI can do nothing.' };
     if (model.mcpError) return { ja: 'MCP の設定に問題があります。下のメッセージを解消するまで、AI の権限は確定しません。', en: 'There is a problem with the MCP configuration. The AI\'s access is not settled until the message below is resolved.' };
     const origins = grantedOrigins();
-    if (!origins.length) return { ja: 'MCP は有効ですが、許可された Web サイトがないため、AI はブラウザーを操作できません。', en: 'MCP is on, but no websites are allowed, so the AI cannot use the browser.' };
-    const sites = sitesText(origins), mode = currentMode();
-    if (mode === 'all') return { ja: `AI は ${sites.ja} で、確認なしにあらゆる操作（送信・削除・購入・認証情報の入力を含む）を実行できます（すべて許可・旧設定）。`, en: `The AI can perform any action on ${sites.en} without asking, including submitting forms, deleting, buying and entering credentials (allow all, legacy).` };
+    if (!origins.length && !flag('allowAllBrowserOrigins')) return { ja: 'MCP は有効ですが、許可された Web サイトがないため、AI はブラウザーを操作できません。', en: 'MCP is on, but no websites are allowed, so the AI cannot use the browser.' };
+    const sites = flag('allowAllBrowserOrigins') ? {ja:'すべてのWebサイト',en:'all websites'} : sitesText(origins), mode = currentMode();
+    if (mode === 'all') return { ja: `AI は ${sites.ja} で、確認なしにあらゆる操作（送信・削除・購入・認証情報の入力を含む）を実行できます（全操作）。`, en: `The AI can perform any action on ${sites.en} without asking, including submitting forms, deleting, buying and entering credentials (all operations).` };
     if (mode === 'ask') {
       const text = { ja: `AI は ${sites.ja} を閲覧し、通常のクリックや入力ができます。送信や削除などの重要な操作と、ページが保存のために送る通信は、VS Code の確認画面で内容を承認した場合のみ実行されます（都度承認）。`, en: `The AI can view ${sites.en} and click or type in ordinary controls. Consequential actions such as submitting or deleting, and the requests a page sends to save data, run only after you approve each one in VS Code (ask each time).` };
       // A standing grant is only ever created by the host's approval dialog; it is named here so the sentence stays true while one is active.
@@ -459,7 +461,8 @@
     if (!s || s.enabled !== true || model.stopped === true || model.workspaceOk === false || model.mcpError) return null;
     const eff = effective() || {}, ja = [], en = [];
     const app = typeof eff.desktopAppId === 'string' ? eff.desktopAppId : '';
-    if (app) { ja.push(`デスクトップアプリ ${plain(app)}`); en.push(`desktop app ${plain(app)}`); }
+    if (flag('allowAllApplications')) { ja.push('すべてのデスクトップアプリ'); en.push('all desktop applications'); }
+    else if (app) { ja.push(`デスクトップアプリ ${plain(app)}`); en.push(`desktop app ${plain(app)}`); }
     if (flag('allowPhysicalInput')) { ja.push('物理入力'); en.push('physical input'); }
     if (flag('allowUnredactedImages')) { ja.push('無加工のネイティブ画像'); en.push('unredacted native images'); }
     if (flag('allowLoopback')) { ja.push('ループバック'); en.push('loopback'); }
@@ -473,7 +476,7 @@
     const extra = text ? extraGrants() : null;
     if (els.aiSummaryExtra) { set(els.aiSummaryExtra, extra ? `${extra.ja} / ${extra.en}` : ''); els.aiSummaryExtra.hidden = !extra; }
   }
-  const SETUP_DONE = { mcp: () => !!model.settings && model.settings.enabled === true, origin: () => grantedOrigins().length > 0, tier: () => currentMode() !== 'read_only' };
+  const SETUP_DONE = { mcp: () => !!model.settings && model.settings.enabled === true, origin: () => flag('allowAllBrowserOrigins') || grantedOrigins().length > 0, tier: () => !!model.settings && (currentMode() !== 'read_only' || model.settings.operationModeConfirmed === true) };
   function renderSetup() {
     const known = model.settings !== null || model.perms !== null;
     const done = SETUP_STEPS.map((step) => !!SETUP_DONE[step.name]());
@@ -547,7 +550,7 @@
       if (els.originInput) els.originInput.disabled = !workspaceOk || busy.origins === true;
       if (els.resourceOriginAdd) { els.resourceOriginAdd.dataset.locked = workspaceOk ? 'false' : 'true'; setBusy(els.resourceOriginAdd, !!busy.origins); }
       if (els.resourceOriginInput) els.resourceOriginInput.disabled = !workspaceOk || busy.origins === true;
-      for (const grant of [els.allowLoopback, els.allowPrivateNetwork, els.allowPersonalData]) if (grant) { grant.dataset.locked = workspaceOk ? 'false' : 'true'; setBusy(grant, !!busy.origins); }
+      for (const grant of [els.allowAllBrowserOrigins, els.allowLoopback, els.allowPrivateNetwork, els.allowPersonalData]) if (grant) { grant.dataset.locked = workspaceOk ? 'false' : 'true'; setBusy(grant, !!busy.origins); }
       if (els.sessionIdleMinutes) { els.sessionIdleMinutes.dataset.locked=workspaceOk?'false':'true'; setBusy(els.sessionIdleMinutes,!!busy.runtime); }
       if (els.browserHeadless) { els.browserHeadless.dataset.locked=workspaceOk?'false':'true'; setBusy(els.browserHeadless,!!busy.runtime); }
       if (els.browserProxyServer) { els.browserProxyServer.dataset.locked=workspaceOk?'false':'true'; setBusy(els.browserProxyServer,!!busy.runtime); }
@@ -567,6 +570,8 @@
       renderResourceOrigins(s.settings.browserResourceOrigins);
       settleAdd('origin', els.originInput, s.settings.browserOrigins);
       settleAdd('resource', els.resourceOriginInput, s.settings.browserResourceOrigins);
+      if (els.allowAllBrowserOrigins && typeof s.settings.allowAllBrowserOrigins === 'boolean') els.allowAllBrowserOrigins.checked=s.settings.allowAllBrowserOrigins;
+      if (els.allowAllApplications && typeof s.settings.allowAllApplications === 'boolean') els.allowAllApplications.checked=s.settings.allowAllApplications;
       if (els.allowLoopback && typeof s.settings.allowLoopback === 'boolean') els.allowLoopback.checked = s.settings.allowLoopback;
       if (els.allowPrivateNetwork && typeof s.settings.allowPrivateNetwork === 'boolean') els.allowPrivateNetwork.checked = s.settings.allowPrivateNetwork;
       if (els.allowPersonalData && typeof s.settings.allowPersonalData === 'boolean') els.allowPersonalData.checked = s.settings.allowPersonalData;

@@ -109,7 +109,7 @@ final class SemanticInputMonitor: @unchecked Sendable {
     }
 }
 final class Broker {
-    let appID:String; let appPath:String; let rules:[String:Rule];let allowAll:Bool;let restrictTargets:Bool
+    let appID:String; let appPath:String; let rules:[String:Rule];let allowAll:Bool;let restrictTargets:Bool;let allApps:Bool
     // --operation-mode standard|ask (argv only): the vocabulary tier shared with the Linux and Windows helpers. ask also
     // honours the parent's one-shot `approved:true` on the consequential gate; sensitive controls stay refused in both.
     let operationMode:String?
@@ -119,9 +119,9 @@ final class Broker {
     let system = AXUIElementCreateSystemWide()
     let captureBroker: WindowCaptureBroker
     let lifecycle:NativeApplicationLifecycle
-    init(_ appID:String,_ appPath:String,_ controls:String?,_ visualEnabled:Bool=false,_ interactiveConfig:String?=nil,_ lifecycleEnabled:Bool=false,_ allowAll:Bool=false,_ restrictTargets:Bool=false,_ operationMode:String?=nil) throws {
-        self.allowAll=allowAll;self.restrictTargets=restrictTargets;self.operationMode=operationMode;self.appID=appID;self.appPath=URL(fileURLWithPath:appPath).resolvingSymlinksInPath().path
-        self.captureBroker=WindowCaptureBroker(appID,self.appPath,visualEnabled,allowAll:allowAll,restrictTargets:restrictTargets)
+    init(_ appID:String,_ appPath:String,_ controls:String?,_ visualEnabled:Bool=false,_ interactiveConfig:String?=nil,_ lifecycleEnabled:Bool=false,_ allowAll:Bool=false,_ restrictTargets:Bool=false,_ operationMode:String?=nil,_ allApps:Bool=false) throws {
+        self.allowAll=allowAll;self.allApps=allApps;self.restrictTargets=restrictTargets;self.operationMode=operationMode;self.appID=appID;self.appPath=URL(fileURLWithPath:appPath).resolvingSymlinksInPath().path
+        self.captureBroker=WindowCaptureBroker(appID,self.appPath,visualEnabled,allowAll:allowAll,restrictTargets:restrictTargets,allApps:allApps)
         self.lifecycle=NativeApplicationLifecycle(appID,self.appPath,lifecycleEnabled)
         guard appPath.hasPrefix("/"), !appID.isEmpty, appID.utf8.count<=128 else {throw fail("E_INVALID_ARGUMENT")}
         var parsed:[String:Rule]=[:]
@@ -140,7 +140,7 @@ final class Broker {
         guard AXIsProcessTrusted(), AXUIElementSetMessagingTimeout(system,0.25) == .success else {throw fail("E_BACKEND_UNAVAILABLE")}
     }
     func approved(_ app:NSRunningApplication)->Bool {
-        !app.isTerminated && (allowAll && !restrictTargets ? app.activationPolicy == .regular && app.executableURL != nil : app.bundleIdentifier==appID && app.executableURL?.resolvingSymlinksInPath().path==appPath) && processStart(app.processIdentifier) != nil
+        !app.isTerminated && (allApps || (allowAll && !restrictTargets) ? app.activationPolicy == .regular && app.executableURL != nil : app.bundleIdentifier==appID && app.executableURL?.resolvingSymlinksInPath().path==appPath) && processStart(app.processIdentifier) != nil
     }
     func watch(_ t:WindowTarget) throws {
         let pid=t.app.processIdentifier
@@ -174,15 +174,15 @@ final class Broker {
     func discover() throws -> [[String:Any]] {
         prune()
         let candidates=NSWorkspace.shared.runningApplications.filter{approved($0)}
-        guard allowAll || candidates.count<=32 else {throw fail("E_RESOURCE_LIMIT")}
+        guard allApps || allowAll || candidates.count<=32 else {throw fail("E_RESOURCE_LIMIT")}
         let apps=Array(candidates.prefix(32))
         var found:[WindowTarget]=[]
         for app in apps {
             let roots:[AXUIElement]
             do{roots=try array(AXUIElementCreateApplication(app.processIdentifier),kAXWindowsAttribute,32)}
-            catch{if allowAll{continue};throw error}
+            catch{if allApps || allowAll{continue};throw error}
             for root in roots {
-                if allowAll && found.count>=32{break}
+                if (allApps || allowAll) && found.count>=32{break}
                 do {
                 guard try stringValue(root,kAXRoleAttribute,100,false)==kAXWindowRole else {throw fail("E_TARGET_NOT_FOUND")}
                 if let old=targets.first(where:{!$0.retired && $0.app.processIdentifier==app.processIdentifier && $0.started==processStart(app.processIdentifier) && CFEqual($0.root,root)}) {found.append(old)}
@@ -190,14 +190,14 @@ final class Broker {
                     guard targets.count<256,let date=processStart(app.processIdentifier) else {throw fail("E_RESOURCE_LIMIT")}
                     let target=WindowTarget(app,root,date);try watch(target);targets.append(target);found.append(target)
                 }
-                }catch{if !allowAll{throw error}}
+                }catch{if !allApps && !allowAll{throw error}}
             }
         }
         guard found.count<=32 else {throw fail("E_RESOURCE_LIMIT")}
         for target in targets where !found.contains(where:{$0 === target}) {target.retired=true}
         prune()
         var result:[[String:Any]]=[]
-        for target in found{do{result.append(try metadata(target))}catch{if !allowAll{throw error};target.retired=true}}
+        for target in found{do{result.append(try metadata(target))}catch{if !allApps && !allowAll{throw error};target.retired=true}}
         return result
     }
     func validate(_ t:WindowTarget) throws {
@@ -399,9 +399,9 @@ final class Broker {
         }
         if op=="discover" {
             let semantic=try discover(); let visual=try captureBroker.discover()
-            guard allowAll || semantic.count+visual.count<=32 else {throw fail("E_RESOURCE_LIMIT")}
+            guard allApps || allowAll || semantic.count+visual.count<=32 else {throw fail("E_RESOURCE_LIMIT")}
             var combined:[[String:Any]]=[]
-            if allowAll{for i in 0..<max(semantic.count,visual.count){if i<semantic.count{combined.append(semantic[i])};if i<visual.count{combined.append(visual[i])}}}else{combined=semantic+visual}
+            if allApps || allowAll{for i in 0..<max(semantic.count,visual.count){if i<semantic.count{combined.append(semantic[i])};if i<visual.count{combined.append(visual[i])}}}else{combined=semantic+visual}
             return ["protocol_version":2,"targets":Array(combined.prefix(32)),"mutations_enabled":allowAll || !rules.isEmpty || tier,"focus_control":"probe_guarded_semantic","visual_capture":captureBroker.available,"interactive_input":captureBroker.input?.available ?? false,"gesture_backends":captureBroker.input?.backends ?? []]
         }
         if let targetID=r["target_id"] as? String,captureBroker.owns(targetID) {return try captureBroker.request(op,r,targetID)}
@@ -425,16 +425,17 @@ if Array(CommandLine.arguments.dropFirst())==["--release-input"]{
 var args=Array(CommandLine.arguments.dropFirst());var opts:[String:String]=[:]
 let visualFlags=args.filter{$0=="--visual-enabled"}.count
 let allowAllFlags=args.filter{$0=="--allow-all"}.count
+let allAppFlags=args.filter{$0=="--all-apps"}.count
 let restrictTargetFlags=args.filter{$0=="--restrict-targets"}.count
 let lifecycleFlags=args.filter{$0=="--lifecycle-enabled"}.count
-guard visualFlags<=1,lifecycleFlags<=1,allowAllFlags<=1,restrictTargetFlags<=1 else {exit(2)}
-args.removeAll{$0=="--visual-enabled" || $0=="--lifecycle-enabled" || $0=="--allow-all" || $0=="--restrict-targets"}
+guard visualFlags<=1,lifecycleFlags<=1,allowAllFlags<=1,restrictTargetFlags<=1,allAppFlags<=1 else {exit(2)}
+args.removeAll{$0=="--visual-enabled" || $0=="--lifecycle-enabled" || $0=="--allow-all" || $0=="--restrict-targets" || $0=="--all-apps"}
 while args.count>=2 {let key=args.removeFirst();if !["--app-id","--app-path","--controls-file","--interactive-config","--operation-mode"].contains(key) || opts[key] != nil {exit(2)};opts[key]=args.removeFirst()}
 guard args.isEmpty,let appID=opts["--app-id"],let appPath=opts["--app-path"] else {exit(2)}
 // A tier is one policy: standard or ask, never combined with --allow-all or an allowlist.
 if let mode=opts["--operation-mode"] {guard ["standard","ask"].contains(mode),allowAllFlags==0,opts["--controls-file"]==nil else {exit(2)}}
 let broker:Broker
-do {broker=try Broker(appID,appPath,opts["--controls-file"],visualFlags==1,opts["--interactive-config"],lifecycleFlags==1,allowAllFlags==1,restrictTargetFlags==1,opts["--operation-mode"])} catch {FileHandle.standardError.write(Data("AgentDeskLink: native setup unavailable.\n".utf8));exit(2)}
+do {broker=try Broker(appID,appPath,opts["--controls-file"],visualFlags==1,opts["--interactive-config"],lifecycleFlags==1,allowAllFlags==1,restrictTargetFlags==1,opts["--operation-mode"],allAppFlags==1)} catch {FileHandle.standardError.write(Data("AgentDeskLink: native setup unavailable.\n".utf8));exit(2)}
 var running=true
 let reader=DispatchQueue(label:"adl.stdin")
 let pending=NativeRequestQueue()

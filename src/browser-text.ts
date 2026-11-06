@@ -1,15 +1,18 @@
 import { BROWSER_PRIVACY_RULES } from './privacy.js';
+import { withPersonalContext, personalContextPageFn } from './personal-context.js';
 
 export type PageTextResult =
   { error: 'missing' | 'protected' } | { text: string; truncated: boolean; hidden?: boolean };
 
-export function readTextPageFn(
+function readTextPage(
   root: Element,
-  arg: { rules: typeof BROWSER_PRIVACY_RULES; pattern: string },
+  arg: { rules: typeof BROWSER_PRIVACY_RULES; pattern: string; allowPersonalData?: boolean },
+  personalContext: typeof personalContextPageFn,
 ): PageTextResult {
   const r = (o: object, k: string): any => Reflect.get(Object.getPrototypeOf(o), k, o),
     m = (o: object, k: string, ...a: unknown[]): any => Reflect.apply(r(o, k), o, a);
   if (r(root, 'isConnected') !== true) return { error: 'missing' as const };
+  const personalContexts = new WeakMap<Element, boolean>();
   const protectedNode = (element: Element) => {
     let n: Element | null = element,
       depth = 0;
@@ -191,7 +194,14 @@ export function readTextPageFn(
     }
     const keep = preserves(owner),
       raw = String(r(node, 'nodeValue') ?? '');
-    let piece = keep ? raw.replace(/\r\n?/g, '\n') : raw.replace(/[ \t\n\r\f]+/g, ' ');
+    let piece =
+      !arg.allowPersonalData &&
+      personalContext(owner, arg.rules.personalContextLabelPattern, personalContexts) &&
+      raw.trim()
+        ? '[redacted]'
+        : keep
+          ? raw.replace(/\r\n?/g, '\n')
+          : raw.replace(/[ \t\n\r\f]+/g, ' ');
     const block = blockOf(owner);
     if (!keep && piece === ' ') {
       if (text !== '' && block === last && !/[ \n]$/.test(text)) text += ' ';
@@ -233,3 +243,5 @@ export function readTextPageFn(
   if (truncated) text = text.replace(/[A-Za-z0-9._%+@-]+$/u, '');
   return { text, truncated, ...(hidden ? { hidden: true } : {}) };
 }
+
+export const readTextPageFn = withPersonalContext(readTextPage);

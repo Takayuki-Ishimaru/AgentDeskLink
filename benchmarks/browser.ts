@@ -57,7 +57,7 @@ try {
     do {
       const page = await engine.observe(id, { ...options, ...(cursor ? { cursor } : {}) });
       pages.push(page);
-      assert.ok(Buffer.byteLength(JSON.stringify(page)) <= options.token_budget * 4);
+      assert.ok(Buffer.byteLength(JSON.stringify(page)) <= (options.byte_budget ?? (options.token_budget ?? 1800) * 4));
       cursor = page.next_cursor ?? undefined;
       assert.ok(pages.length < 256);
     } while (cursor);

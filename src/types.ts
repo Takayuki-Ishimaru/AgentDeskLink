@@ -1,4 +1,5 @@
 import type { CapturedImage, VisualPolicy, DesktopVisualPolicy } from './visual-types.js';
+import { saveAfterError, saveAfterApproval } from './save-state.js';
 import type { GesturePolicy, GesturePlan, GestureReference, GestureExecution } from './gesture-types.js';
 import type {
   InteractivePolicy,
@@ -36,6 +37,8 @@ export interface Element {
   sensitive?: boolean;
   /** Internal context-based personal-data label, independently controlled by allowPersonalData. */
   personal?: boolean;
+  /** Non-sensitive explanations of the values hidden from this element. */
+  redaction_reasons?: string[];
   protected?: boolean;
   /** Internal DOM depth, projected out of public responses. */
   depth?: number;
@@ -46,6 +49,9 @@ export interface Element {
   options?: { label: string; value: string; disabled: boolean; selected: boolean }[];
   /** Candidates were omitted by the source or response budget; reobserve this id with a larger budget. */
   options_truncated?: boolean;
+  /** Total choices in the source, including choices not in the initial page. */
+  options_total?: number;
+  options_truncation?: ('source_limit' | 'response_budget' | 'field_limit')[];
   name_truncated?: boolean;
   text_length?: number;
   parent_id?: string;
@@ -133,6 +139,8 @@ export interface BrowserTargetConfig {
   gestures?: GesturePolicy;
 }
 export interface DesktopConfig {
+  /** Discover current-user applications without requiring one configured application. */
+  allowAllApplications?: boolean;
   allowAllOperations?: boolean;
   restrictTargets?: boolean;
   helperPath: string;
@@ -145,6 +153,10 @@ export interface DesktopConfig {
   lifecycle?: { enabled: boolean };
 }
 export interface PolicyConfig {
+  /** Navigation/resource scope, independent from permission to submit writes. */
+  allowAllBrowserOrigins?: boolean;
+  /** Cold launch and first observation deadline; independent from normal actions. */
+  startupTimeoutMs?: number;
   allowAllOperations?: boolean;
   restrictTargets?: boolean;
   browserHeadless?: boolean;
@@ -244,6 +256,13 @@ export interface AdapterSession {
   prepareInput?(request: PrepareInput, reference: GestureReference, signal: AbortSignal): Promise<PreparedInput>;
   commitInput?(confirmation_id: string, value: string | undefined, signal: AbortSignal): Promise<InputExecution>;
   snapshot(signal?: AbortSignal): Promise<RawSnapshot>;
+  readOptions?(
+    elementId: string,
+    query: string,
+    offset: number,
+    limit: number,
+    signal: AbortSignal,
+  ): Promise<import('./browser-options.js').OptionsResult>;
   readText?(
     elementId: string,
     offset: number,
@@ -300,6 +319,7 @@ export interface AdapterSession {
   close(): Promise<void>;
 }
 export interface Adapter {
+  startupDiagnostics?(): unknown;
   /** config: the engine's own record for a URL-opened browser target, which is never added to policy.browserTargets. */
   open(target: Target, mode: Mode, signal: AbortSignal, config?: BrowserTargetConfig): Promise<AdapterSession>;
   onInvalidated?(listener: () => void): () => void;
@@ -581,8 +601,14 @@ export function safeError(error: unknown) {
   const mayHaveExecuted = error instanceof AdlError && error.mayHaveExecuted;
   const hints = reason ? REASON_HINTS[reason] : undefined;
   const detail = error instanceof AdlError ? error.detail : undefined;
+  const save =
+    saveAfterError(reason, detail?.approved) ??
+    (code === 'E_APPROVAL_REQUIRED' && error instanceof AdlError && error.requestId
+      ? saveAfterApproval('pending', undefined)
+      : undefined);
   return {
     code,
+    ...(save ? { save } : {}),
     retryable:
       (code === 'E_STALE_STATE' ||
         (code === 'E_APPROVAL_REQUIRED' &&

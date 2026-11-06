@@ -125,14 +125,15 @@ export class SettingsPanelProvider implements vscode.WebviewViewProvider {
   <p class="status" id="mcp-status" role="status"></p>
   <p class="error" id="mcp-error" role="alert"></p>
   <h4 class="perm-title">ブラウザ移動を許可する origin / Navigable browser origins</h4>
-  <p class="hint">完全な http(s) origin を追加します。localhost はループバック許可を手動で有効にした場合のみ利用できます。 / Add exact http(s) origins. Localhost requires manually enabling the loopback grant.</p>
+  <p class="hint">初期設定ではすべての http(s) URL を利用できます。対象を限定する場合は「すべてのURL」をオフにして origin を登録します。 / All http(s) URLs are available by default. Turn off All URLs and add origins to limit access.</p>
+  <div class="row"><label class="check"><input type="checkbox" id="allow-all-browser-origins"><span>すべてのURLへのアクセス / All http(s) URLs</span></label></div>
   <ul class="client-list" id="origins-list" aria-label="Navigable browser origins"></ul>
   <div class="actions"><input id="origin-input" type="text" inputmode="url" placeholder="https://example.com" aria-label="Origin to allow"><button id="origin-add">追加 / Add</button></div>
   <p class="hint" id="loopback-suggestion" hidden>この origin はループバックです。必要な場合だけ「詳細な許可」で手動で有効にしてください。 / This is a loopback origin. Enable the grant in More grants manually only if needed.</p>
   <p class="hint" id="private-network-suggestion" hidden>この origin はプライベートネットワークのアドレスです。必要な場合だけ「詳細な許可」の「プライベートネットワークを許可」を手動で有効にしてください。 / This origin is a private-network address. Enable "Allow private network" in More grants manually only if needed.</p>
   <p class="error" id="origins-error" role="alert"></p>
   <details class="group" id="grants-details"><summary>詳細な許可 / More grants</summary>
-  <p class="hint">権限はワークスペース単位です。空の許可リストはアクセスを許可しません。 / Grants apply to this workspace; empty lists allow no access.</p>
+  <p class="hint">権限はワークスペース単位です。対象を限定した場合、空の許可リストはアクセスを許可しません。 / Grants apply to this workspace. With All URLs off, an empty list grants no access.</p>
   <div class="row"><label class="check"><input type="checkbox" id="allow-loopback"><span>ループバックを許可 / Allow loopback (localhost)</span></label></div>
   <div class="row"><label class="check"><input type="checkbox" id="allow-private-network"><span>プライベートネットワークを許可 / Allow private network</span></label></div>
   <div class="row"><label class="check"><input type="checkbox" id="allow-personal-data"><span>メール・電話番号などの個人データを表示 / Allow revealing email and phone numbers</span></label></div>
@@ -141,7 +142,8 @@ export class SettingsPanelProvider implements vscode.WebviewViewProvider {
   <ul class="client-list" id="resource-origins-list" aria-label="Resource origins"></ul>
   <div class="actions"><input id="resource-origin-input" type="text" inputmode="url" placeholder="https://cdn.example.com" aria-label="Resource origin to allow"><button id="resource-origin-add">追加 / Add</button></div>
   </details>
-  <div class="row"><label for="operation-mode">操作の権限段階 / Operation permission tier</label><select id="operation-mode" aria-label="Operation permission tier"><option value="read_only">読み取り専用 / Read only</option><option value="standard">標準 / Standard</option><option value="ask">都度承認 / Ask each time</option><option value="all">すべて許可 / Allow all (legacy)</option></select></div>
+  <div class="row"><label for="operation-mode">操作の権限段階 / Operation permission tier</label><select id="operation-mode" aria-label="Operation permission tier"><option value="read_only">読み取り専用 / Read only</option><option value="standard">下書き（保存しない） / Draft (no save)</option><option value="ask">承認付き保存 / Save with approval</option><option value="all">全操作（初期設定） / All operations (default)</option></select></div>
+  <p class="hint">初期設定は全操作です。閲覧、下書き、承認付き保存へ切り替えられます。承認付き保存を選ぶと全アプリ許可を解除し、ネイティブ操作は個別指定したアプリに限定します。 / All operations is the default. Choose Read only, Draft, or Save with approval to narrow permissions. Save with approval turns off All apps and limits native control to an individually configured application.</p>
   <p class="hint">都度承認はブラウザー操作と、許可したデスクトップアプリの重要なネイティブ操作（削除・送信など）に適用されます。機密コントロールは承認できません。「すべて許可」は、フォーム送信・削除・購入や支払い・認証情報の入力を確認なしで許可します。有効にする前に内容を確認する画面が表示されます。 / Ask applies to browser actions and to consequential native actions (delete, send, ...) in the granted desktop app; sensitive native controls are never approved. Allow all lets the AI submit forms, delete, buy or pay, and enter credentials without asking; a confirmation dialog lists the details before it is enabled.</p>
   <p class="error" id="operation-mode-error" role="alert"></p>
   <p class="hint" id="permissions-hint"></p>
@@ -175,6 +177,7 @@ export class SettingsPanelProvider implements vscode.WebviewViewProvider {
   </div>
 </section>
 <section class="section" aria-labelledby="desktop-title">
+  <div class="row"><label class="check"><input type="checkbox" id="allow-all-applications"><span>すべてのアプリの操作（個別登録不要） / All applications (no registration needed)</span></label></div>
   <details class="group section-group" id="desktop-details"><summary><span class="group-title" id="desktop-title">デスクトップアプリ / Desktop app</span><span class="summary-state" id="desktop-state"></span></summary>
   <p class="hint">AI が観測・操作できるネイティブアプリを 1 つだけ指定します。ワークスペースごとの信頼設定で、信頼したワークスペースでのみ保存できます。 / Name the one native app the AI may observe and operate. A trusted per-workspace setting that can only be saved in a trusted workspace.</p>
   <p class="hint" id="desktop-os-hint"></p>
@@ -251,6 +254,14 @@ export class SettingsPanelProvider implements vscode.WebviewViewProvider {
       case 'setBrowserResourceOrigins':
         if (Array.isArray(m.origins) && m.origins.every(value => typeof value === 'string'))
           return this.saveGrantSetting('browserResourceOrigins', m.origins as string[]);
+        return Promise.resolve();
+      case 'setAllowAllBrowserOrigins':
+      case 'setAllowAllApplications':
+        if (typeof m.enabled === 'boolean')
+          return this.saveGrantSetting(
+            m.type === 'setAllowAllBrowserOrigins' ? 'allowAllBrowserOrigins' : 'allowAllApplications',
+            m.enabled,
+          );
         return Promise.resolve();
       case 'setAllowLoopback':
       case 'setAllowPrivateNetwork':
@@ -369,6 +380,8 @@ export class SettingsPanelProvider implements vscode.WebviewViewProvider {
         const current = readSettings();
         const grants = {
           browserOrigins: origins,
+          allowAllBrowserOrigins: current.allowAllBrowserOrigins,
+          allowAllApplications: current.allowAllApplications,
           desktopAppId: current.desktopAppId,
           desktopAppPath: current.desktopAppPath,
           allowAllOperations: current.allowAllOperations,
@@ -403,6 +416,8 @@ export class SettingsPanelProvider implements vscode.WebviewViewProvider {
   private saveGrantSetting(
     key:
       | 'browserResourceOrigins'
+      | 'allowAllBrowserOrigins'
+      | 'allowAllApplications'
       | 'allowLoopback'
       | 'allowPrivateNetwork'
       | 'allowPersonalData'
@@ -424,6 +439,8 @@ export class SettingsPanelProvider implements vscode.WebviewViewProvider {
         const current = readSettings();
         const candidate = normalizePermissions({
           browserOrigins: current.browserOrigins,
+          allowAllBrowserOrigins: key === 'allowAllBrowserOrigins' ? value : current.allowAllBrowserOrigins,
+          allowAllApplications: key === 'allowAllApplications' ? value : current.allowAllApplications,
           browserResourceOrigins: key === 'browserResourceOrigins' ? value : current.browserResourceOrigins,
           allowPersonalData: key === 'allowPersonalData' ? value : current.allowPersonalData,
           desktopAppId: current.desktopAppId,
@@ -531,6 +548,8 @@ export class SettingsPanelProvider implements vscode.WebviewViewProvider {
         const current = readSettings();
         const candidate = normalizePermissions({
           browserOrigins: current.browserOrigins,
+          allowAllBrowserOrigins: current.allowAllBrowserOrigins,
+          allowAllApplications: current.allowAllApplications,
           browserResourceOrigins: current.browserResourceOrigins,
           allowPersonalData: current.allowPersonalData,
           desktopAppId: checked.value.appId,
@@ -735,6 +754,12 @@ export class SettingsPanelProvider implements vscode.WebviewViewProvider {
       this.errors.runtimeError ??=
         '保存済みの運用設定が無効です。値を修正してください。 / Saved runtime settings are invalid. Update the values to repair them.';
     }
+    const selectedMode = vscode.workspace.getConfiguration('agentdesklink').inspect?.<string>('operationMode');
+    const operationModeConfirmed = [
+      selectedMode?.workspaceFolderValue,
+      selectedMode?.workspaceValue,
+      selectedMode?.globalValue,
+    ].some(value => value !== undefined);
     const hasFolder = !!vscode.workspace.workspaceFolders?.length;
     const state = {
       type: 'state',
@@ -743,6 +768,8 @@ export class SettingsPanelProvider implements vscode.WebviewViewProvider {
         autoUpdate: settings.autoUpdate,
         checkForUpdates: settings.checkForUpdates,
         browserOrigins: settings.browserOrigins,
+        allowAllBrowserOrigins: settings.allowAllBrowserOrigins,
+        allowAllApplications: settings.allowAllApplications,
         browserResourceOrigins: settings.browserResourceOrigins,
         allowLoopback: settings.allowLoopback,
         allowPrivateNetwork: settings.allowPrivateNetwork,
@@ -757,6 +784,7 @@ export class SettingsPanelProvider implements vscode.WebviewViewProvider {
         allowPhysicalInput: settings.allowPhysicalInput,
         allowUnredactedImages: settings.allowUnredactedImages,
         operationMode: settings.operationMode,
+        operationModeConfirmed,
       },
       platform: process.platform,
       browser: this.hooks.browserSetup(),

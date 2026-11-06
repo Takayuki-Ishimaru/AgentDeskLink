@@ -1,4 +1,6 @@
 import { AliasMap } from './aliases.js';
+import { StartupDiagnostics } from './startup-diagnostics.js';
+import { saveAfterAction, saveAfterApproval } from './save-state.js';
 import { randomUUID, randomBytes, createHmac, createHash } from 'node:crypto';
 import { appendFile, chmod, mkdir } from 'node:fs/promises';
 import { dirname } from 'node:path';
@@ -243,6 +245,7 @@ function newBlocks(before: NetworkWarning[] | undefined, after: NetworkWarning[]
 const URL_TARGET_LIMIT = 64;
 type UrlTarget = { config: BrowserTargetConfig; target: Target };
 export class Engine {
+  private readonly startup = new StartupDiagnostics();
   /** Public element ids are per-session aliases (e1, e2, ...); see aliases.ts. */
   private readonly aliasMaps = new Map<string, AliasMap>();
   private sessions = new Map<string, Session>();
@@ -387,14 +390,14 @@ export class Engine {
         all_operations: blanket,
         operation_mode: blanket ? 'all' : (p.operationMode ?? 'legacy_controls'),
         restricted_targets: p.restrictTargets === true,
-        origins: blanket && !p.restrictTargets ? 'all_allowed' : p.allowedOrigins.slice(),
+        origins: p.allowAllBrowserOrigins || (blanket && !p.restrictTargets) ? 'all_allowed' : p.allowedOrigins.slice(),
         resource_origins: (p.resourceOrigins ?? []).slice(),
         personal_data: p.allowPersonalData === true,
         targets:
-          blanket && !p.restrictTargets
+          p.allowAllBrowserOrigins || (blanket && !p.restrictTargets)
             ? 'all_allowed'
             : p.browserTargets.map(t => ({ application_id: t.id, origin: new URL(t.url).origin })),
-        desktop_app: app?.appId ?? '',
+        desktop_app: app?.allowAllApplications ? 'all_allowed' : (app?.appId ?? ''),
         physical_input: app?.interactive?.enabled === true,
         unredacted_images: app?.visual?.allowUnredacted === true,
         loopback: p.allowLoopback,
@@ -414,8 +417,19 @@ export class Engine {
         same_origin_iframe: true,
         cross_origin_iframe_approval: false,
       },
-      version: '0.1.10',
+      startup: {
+        sessions: this.startup.snapshot(),
+        ...(this.adapters.browser.startupDiagnostics ? { browser: this.adapters.browser.startupDiagnostics() } : {}),
+      },
+      version: '0.1.11',
       transport: 'stdio',
+      observation_budget: {
+        unit: 'utf8_json_bytes',
+        default_bytes: this.policy.defaultTokenBudget * 4,
+        byte_budget: { min: 1024, max: 32000 },
+        legacy_token_multiplier: 4,
+        tokenizer_limit: false,
+      },
       modes: [
         'strict_isolated',
         ...(this.adapters.desktop ? ['background_semantic', ...(interactive ? ['interactive_desktop'] : [])] : []),
@@ -479,7 +493,7 @@ export class Engine {
         pre_dispatch_target_check: true,
       },
       limitations: [
-        blanket && !p.restrictTargets
+        p.allowAllBrowserOrigins || (blanket && !p.restrictTargets)
           ? 'Broad policy supplies default browser visuals; native images follow the native visual policy. Sequences sample discrete frames without audio.'
           : 'Visuals require trusted per-target opt-in. Native images may need explicit unredacted-pixel permission. Sequences sample discrete frames without audio.',
         'interactive_desktop shares the human desktop and moves the real pointer. Human input or focus changes stop execution; partial input cannot be rolled back.',
@@ -491,8 +505,8 @@ export class Engine {
                 ? 'Browser credentials and consequential operations, and consequential native desktop controls, require a matching one-shot host approval. Sensitive native controls and unsupported payloads remain denied.'
                 : 'Credentials, uploads and consequential operations are disabled.',
             ]),
-        ...(p.restrictTargets
-          ? ['Origin and application grants remain enforced even with broad operation permission.']
+        ...(p.restrictTargets && !p.allowAllBrowserOrigins
+          ? ['Configured browser origin grants remain enforced even with broad operation permission.']
           : []),
         'Arbitrary code execution is unavailable. Desktop strict isolation requires a separate isolated runner.',
         linux
@@ -1064,7 +1078,11 @@ export class Engine {
       return known.target;
     }
     const granted = this.policy.browserTargets.find(t => new URL(t.url).origin === origin);
-    if (!granted && (!this.policy.allowAllOperations || this.policy.restrictTargets))
+    if (
+      !granted &&
+      !this.policy.allowAllBrowserOrigins &&
+      (!this.policy.allowAllOperations || this.policy.restrictTargets)
+    )
       throw new AdlError('E_POLICY_DENIED', 'origin_not_allowed');
     // Make room: evict the least recently used entry that has no live session. Targets with sessions are never evicted.
     const live = new Set([...this.sessions.values()].map(x => x.target.target_id));
@@ -1122,6 +1140,9 @@ export class Engine {
     }
     const adapter = target.surface === 'browser' ? this.adapters.browser : this.adapters.desktop;
     if (!adapter) throw new AdlError('E_TARGET_NOT_FOUND');
+    const startup = this.startup.start();
+    startup.stage('adapter_open');
+    const startupTimeout = this.policy.startupTimeoutMs ?? this.policy.actionTimeoutMs;
     let instance: AdapterSession | undefined;
     try {
       instance = await this.deadline(
@@ -1138,16 +1159,15 @@ export class Engine {
           }
           return opened;
         },
-        this.policy.actionTimeoutMs,
+        startupTimeout,
         cancel,
       );
       // Ask mode with an approver: writes the page sends during an action are held for a human instead of blocked (adapters without holding ignore it).
       instance.setWriteHolding?.(
         this.policy.operationMode === 'ask' && !!this.approval && !this.policy.allowAllOperations,
       );
-      const raw = this.boundSnapshot(
-        await this.deadline(sig => instance!.snapshot(sig), this.policy.actionTimeoutMs, cancel),
-      );
+      startup.stage('first_observation');
+      const raw = this.boundSnapshot(await this.deadline(sig => instance!.snapshot(sig), startupTimeout, cancel));
       const s: Session = {
         id: `s_${randomUUID()}`,
         target,
@@ -1165,6 +1185,7 @@ export class Engine {
       this.sessions.set(s.id, s);
       this.recordSnapshot(s.id, 1, raw);
       this.recordActionEvidence(s);
+      startup.finish(true);
       return {
         ok: true,
         session_id: s.id,
@@ -1176,6 +1197,7 @@ export class Engine {
         ...(raw.http_status !== undefined ? { http_status: raw.http_status } : {}),
       };
     } catch (error) {
+      startup.finish(false);
       if (instance) await this.stopAdapter(instance);
       throw error;
     }
@@ -1527,17 +1549,91 @@ export class Engine {
   }
   observe(
     session_id: string,
-    options: Omit<ObserveOptions, 'token_budget' | 'element_limit'> & { token_budget?: number } = {},
+    options: Omit<ObserveOptions, 'element_limit'> = {},
     cancel?: AbortSignal,
   ): Promise<ObserveResult> {
     return this.sessionLane(session_id, async () => {
       const s = this.get(session_id);
+      if (options.byte_budget !== undefined && options.token_budget !== undefined) throw invalid('byte_budget');
+      const budgetBytes = options.byte_budget ?? (options.token_budget ?? this.policy.defaultTokenBudget) * 4;
+      if (options.byte_budget !== undefined) {
+        if (!Number.isInteger(options.byte_budget) || options.byte_budget < 1024 || options.byte_budget > 32000)
+          throw invalid('byte_budget');
+      } else if (
+        options.token_budget !== undefined &&
+        (!Number.isInteger(options.token_budget) || options.token_budget < 256 || options.token_budget > 8000)
+      )
+        throw invalid('token_budget');
       if (options.depth !== undefined) {
         if (s.target.surface !== 'browser') throw new AdlError('E_UNSUPPORTED_ACTION');
         if (!Number.isSafeInteger(options.depth) || options.depth < 1 || options.depth > MAX_DOM_DEPTH)
           throw invalid('depth');
       }
+      if (options.options) {
+        const q = options.options;
+        if (
+          options.text ||
+          options.cursor !== undefined ||
+          options.since_revision !== undefined ||
+          options.scope !== undefined ||
+          options.include !== undefined ||
+          options.depth !== undefined ||
+          options.format !== undefined ||
+          options.representation !== undefined
+        )
+          throw invalid('options');
+        if (
+          typeof q.element_id !== 'string' ||
+          typeof (q.query ?? '') !== 'string' ||
+          (q.query?.length ?? 0) > 512 ||
+          !Number.isSafeInteger(q.offset ?? 0) ||
+          (q.offset ?? 0) < 0 ||
+          !Number.isSafeInteger(q.limit ?? 50) ||
+          (q.limit ?? 50) < 1 ||
+          (q.limit ?? 50) > 100
+        )
+          throw invalid('options');
+      }
       await this.refresh(s, cancel);
+      if (options.options) {
+        if (s.target.surface !== 'browser' || !s.adapter.readOptions) throw new AdlError('E_UNSUPPORTED_ACTION');
+        const { element_id, query = '', offset = 0, limit = 50 } = options.options;
+        const internal = this.internalId(s.id, element_id);
+        if (!s.raw.elements.some(e => e.id === internal)) throw new AdlError('E_TARGET_NOT_FOUND');
+        const read = await this.deadline(
+          sig => s.adapter.readOptions!(internal, query, offset, limit, sig),
+          this.policy.actionTimeoutMs,
+          cancel,
+        );
+        const make = (count: number): ObserveResult => {
+          const next = offset + count < read.matched ? offset + count : null;
+          return {
+            ok: true,
+            revision: s.revision,
+            ...(s.raw.read_only ? { read_only: true as const } : {}),
+            truncated: read.source_limited === true || next !== null,
+            options: {
+              element_id,
+              offset,
+              total: read.total,
+              matched: read.matched,
+              items: read.options.slice(0, count),
+              next_offset: next,
+              ...(read.source_limited ? { source_limited: true as const } : {}),
+            },
+          };
+        };
+        let lo = 0,
+          hi = read.options.length;
+        while (lo < hi) {
+          const mid = Math.ceil((lo + hi) / 2);
+          if (Buffer.byteLength(JSON.stringify(make(mid)), 'utf8') <= budgetBytes) lo = mid;
+          else hi = mid - 1;
+        }
+        if ((!lo && read.options.length) || Buffer.byteLength(JSON.stringify(make(lo)), 'utf8') > budgetBytes)
+          throw new AdlError('E_RESOURCE_LIMIT');
+        return make(lo);
+      }
       if (options.text) {
         if (s.target.surface !== 'browser' || !s.adapter.readText) throw new AdlError('E_UNSUPPORTED_ACTION');
         if (
@@ -1550,11 +1646,9 @@ export class Engine {
           options.representation !== undefined
         )
           throw invalid('text');
-        const { element_id, offset = 0, length = 4096 } = options.text,
-          budget = options.token_budget ?? this.policy.defaultTokenBudget;
+        const { element_id, offset = 0, length = 4096 } = options.text;
         if (!Number.isInteger(offset) || offset < 0 || offset > 1048576) throw invalid('text.offset');
         if (!Number.isInteger(length) || length < 1 || length > 8192) throw invalid('text.length');
-        if (!Number.isInteger(budget) || budget < 256 || budget > 8000) throw invalid('token_budget');
         const internal = this.internalId(s.id, element_id);
         if (!s.raw.elements.some(e => e.id === internal)) throw new AdlError('E_TARGET_NOT_FOUND');
         const read = await this.deadline(
@@ -1587,7 +1681,7 @@ export class Engine {
           hi = chars.length;
         while (lo < hi) {
           const mid = Math.ceil((lo + hi) / 2);
-          if (Buffer.byteLength(JSON.stringify(make(mid)), 'utf8') <= budget * 4) lo = mid;
+          if (Buffer.byteLength(JSON.stringify(make(mid)), 'utf8') <= budgetBytes) lo = mid;
           else hi = mid - 1;
         }
         if (!lo && chars.length) throw new AdlError('E_RESOURCE_LIMIT');
@@ -1595,7 +1689,8 @@ export class Engine {
       }
       const result = this.snapshots.observe(s.id, s.revision, {
         ...options,
-        token_budget: options.token_budget ?? this.policy.defaultTokenBudget,
+        token_budget: undefined,
+        byte_budget: budgetBytes,
         element_limit: this.policy.maxElements,
       });
       // Warnings are reported once: the first page of an observation delivers them, later pages and observations of the same revision do not repeat
@@ -1668,7 +1763,7 @@ export class Engine {
       if (!pending || Date.now() >= deadline)
         return {
           ok: true,
-          requests,
+          requests: requests.map(row => ({ ...row, save: saveAfterApproval(row.status, row.sent) })),
           waited_ms: waited ? Date.now() - started : 0,
           ...(pending && waitMs > 0 ? { timed_out: true } : {}),
         };
@@ -2463,6 +2558,9 @@ export class Engine {
       ...(networkBlocked ? { network_blocked: true } : {}),
       ...(subresourcesBlocked > 0 ? { subresources_blocked: subresourcesBlocked } : {}),
       ...(writeBlocked ? { write_blocked: true } : {}),
+      ...(s.target.surface === 'browser' && ['click', 'fill', 'select', 'check', 'press'].includes(action.action)
+        ? { save: saveAfterAction(writeBlocked, released?.sent === true) }
+        : {}),
       ...(warnings.length ? { warnings } : {}),
       ...(observation ? { observation } : {}),
       ...(observation_error ? { observation_error } : {}),

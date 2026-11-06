@@ -7,12 +7,15 @@ import {
   type NetworkWarning,
   type RawSnapshot,
 } from './types.js';
-import { redactElement, redactString } from './policy.js';
+import { redactElements, redactString } from './policy.js';
 
 export type Representation = 'auto' | 'full' | 'delta';
 export type ObservationFormat = 'json' | 'compact' | 'lines';
 export interface ObserveOptions {
-  token_budget: number;
+  /** Legacy alias: the response is bounded by token_budget*4 UTF-8 bytes. Exclusive with byte_budget. */
+  token_budget?: number;
+  /** Hard cap on the serialized UTF-8 JSON response (1024-32000). Exclusive with token_budget. */
+  byte_budget?: number;
   /** Internal per-response element limit; storage retains later scoped elements. */
   element_limit?: number;
   since_revision?: number;
@@ -23,6 +26,7 @@ export interface ObserveOptions {
   representation?: Representation;
   format?: ObservationFormat;
   text?: { element_id: string; offset?: number; length?: number };
+  options?: { element_id: string; query?: string; offset?: number; limit?: number };
 }
 /**
  * Change record. Elements are held in their full internal shape; every response omits enabled:true and value:""
@@ -34,6 +38,15 @@ export interface SnapshotChange {
   element?: Element;
 }
 export interface ObserveResult {
+  options?: {
+    element_id: string;
+    offset: number;
+    total: number;
+    matched: number;
+    items: NonNullable<Element['options']>;
+    next_offset: number | null;
+    source_limited?: true;
+  };
   /** This session supports isolated reading and navigation only. */
   read_only?: true;
   text?: {
@@ -80,6 +93,9 @@ const MAX_CURSORS = 128;
 const CURSOR_TTL_MS = 60_000;
 const MIN_BUDGET = 256;
 const MAX_BUDGET = 8_000;
+const DEFAULT_TOKEN_BUDGET = 1_800;
+const MIN_BYTES = 1_024;
+const MAX_BYTES = 32_000;
 const NAME_CAP = 48;
 const VALUE_CAP = 96;
 
@@ -93,6 +109,9 @@ const FIELDS = [
   'selected',
   'expanded',
   'options',
+  'options_total',
+  'options_truncation',
+  'redaction_reasons',
   'parent_id',
   'name_truncated',
   'text_length',
@@ -333,6 +352,10 @@ function project(element: Element, include: Field[] | null): Element {
   const out: Record<string, unknown> = {};
   for (const field of include) if (element[field] !== undefined) out[field] = element[field];
   if (include.includes('options') && element.options_truncated) out.options_truncated = true;
+  if (include.includes('options')) {
+    if (element.options_total !== undefined) out.options_total = element.options_total;
+    if (element.options_truncation) out.options_truncation = element.options_truncation;
+  }
   // A warning about text a human cannot see must survive any field selection.
   if (element.hidden_text) out.hidden_text = true;
   return out as unknown as Element;
@@ -444,9 +467,7 @@ export class SnapshotStore {
     if (typeof sessionId !== 'string' || sessionId.length === 0) deny('E_INVALID_ARGUMENT');
     if (!Number.isInteger(revision) || revision < 0) deny('E_INVALID_ARGUMENT');
     if (!snapshot || !Array.isArray(snapshot.elements)) deny('E_INVALID_ARGUMENT');
-    const elements = snapshot.elements
-      .slice(0, MAX_ELEMENTS)
-      .map(e => redactElement(e, this.allowPersonalData, snapshot.url) as Element);
+    const elements = redactElements(snapshot.elements.slice(0, MAX_ELEMENTS), this.allowPersonalData, snapshot.url);
     const clipped = new Set(elements.filter(e => e.name_truncated || e.value_truncated).map(e => e.id));
     const redactions = elements.reduce((count, e, i) => {
       const raw = snapshot.elements[i]!;
@@ -682,10 +703,18 @@ export class SnapshotStore {
 
   private checkOptions(options: ObserveOptions): number {
     if (!options || typeof options !== 'object') deny('E_INVALID_ARGUMENT');
-    const budget = options.token_budget;
+    const { token_budget: tokens, byte_budget: bytes } = options;
+    if (tokens !== undefined && bytes !== undefined) invalidArgument('byte_budget');
+    if (bytes !== undefined) {
+      if (typeof bytes !== 'number' || !Number.isInteger(bytes) || bytes < MIN_BYTES || bytes > MAX_BYTES)
+        invalidArgument('byte_budget');
+      return bytes;
+    }
+    // Returns the effective response cap in bytes; token_budget is the legacy alias (bytes = 4 * budget).
+    const budget = tokens ?? DEFAULT_TOKEN_BUDGET;
     if (typeof budget !== 'number' || !Number.isFinite(budget) || budget < MIN_BUDGET || budget > MAX_BUDGET)
       invalidArgument('token_budget');
-    return Math.floor(budget);
+    return Math.floor(budget) * 4;
   }
 
   private items(
@@ -771,10 +800,10 @@ export class SnapshotStore {
     format: ObservationFormat = 'json',
     clippedIds: ReadonlySet<string> = new Set(),
   ): ObserveResult {
-    const limit = budget * 4;
+    const limit = budget;
     const textClipped = (list: SnapshotChange[]): boolean =>
       list.some(c => c.element?.name_truncated || c.element?.value_truncated || clippedIds.has(c.id));
-    if (budget < 512)
+    if (budget < 2_048)
       metadata = {
         ...metadata,
         ...(metadata.url ? { url: metadata.url.slice(0, 128) } : {}),
@@ -875,7 +904,13 @@ export class SnapshotStore {
     // Candidate lists are optional detail. Keep the control's identity and live
     // state, and make omission explicit even when later cursor pages are complete.
     const { options, ...core } = item.element;
-    const compact = options ? { ...core, options_truncated: true } : item.element;
+    const compact = options
+      ? {
+          ...core,
+          options_truncated: true,
+          options_truncation: [...new Set([...(core.options_truncation ?? []), 'response_budget' as const])],
+        }
+      : item.element;
     const capped = preserveText ? compact : cap(compact, NAME_CAP, VALUE_CAP);
     return JSON.stringify(capped) === JSON.stringify(item.element) ? null : { ...item, element: capped };
   }

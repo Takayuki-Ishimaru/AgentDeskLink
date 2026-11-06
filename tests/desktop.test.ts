@@ -53,6 +53,31 @@ createInterface({input:process.stdin}).on('line',l=>{
 });
 `;
 const APP_ID = 'com.example.notes';
+
+test('all-app discovery accepts issued targets from other apps without granting mutation', async () => {
+  const h = await harness({ FAKE_DISCOVERY: 'crossapp' }, 'darwin', {
+    allowAllApplications: true,
+    allowAllOperations: false,
+    controlsPath: undefined,
+  });
+  try {
+    const targets = await h.adapter.discover(new AbortController().signal);
+    assert.equal(targets[0]?.application_id, 'com.evil.other');
+    assert.equal(targets[0]?.capabilities.includes('click'), false);
+    const session = await h.adapter.open(targets[0]!, 'background_semantic', new AbortController().signal);
+    await assert.rejects(
+      h.adapter.open(
+        { ...targets[0]!, application_id: 'forged.app' },
+        'background_semantic',
+        new AbortController().signal,
+      ),
+      { code: 'E_TARGET_NOT_FOUND' },
+    );
+    await session.close();
+  } finally {
+    await h.dispose();
+  }
+});
 type Mode = Partial<
   Record<
     | 'FAKE_DISCOVERY'

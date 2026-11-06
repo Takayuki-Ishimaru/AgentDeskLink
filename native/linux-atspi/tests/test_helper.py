@@ -145,6 +145,24 @@ class FixtureTest(unittest.TestCase):
         snapshot = helper.ok('snapshot', target_id=target['target_id'], session_id=session_id)
         return target['target_id'], session_id, snapshot
 
+    def test_00_all_apps_needs_no_application_registration_and_preserves_mutation_permissions(self):
+        readonly = self.helper('--all-apps', app_id='not-registered', app_path=os.path.realpath(HELPER))
+        discovery = readonly.ok('discover')
+        self.assertFalse(discovery['mutations_enabled'])
+        self.assertTrue(any(t['label'] == 'ADL Fixture' and t['application_id'] != 'not-registered' for t in discovery['targets']))
+        target_id, session_id, snapshot = self.session(readonly)
+        self.assertEqual(readonly.error('act', target_id=target_id, session_id=session_id,
+            element_id=by(snapshot['elements'], role='button', name='Run')['id'],
+            expected_revision=snapshot['revision'], action='click')['error']['code'], 'E_POLICY_DENIED')
+        broad = self.helper('--all-apps', '--allow-all', app_id='not-registered', app_path=os.path.realpath(HELPER))
+        target_id, session_id, snapshot = self.session(broad)
+        for value in ('All apps without registration', ''):
+            field = by(snapshot['elements'], role='textbox', name='Name')
+            broad.ok('act', target_id=target_id, session_id=session_id, element_id=field['id'],
+                expected_revision=snapshot['revision'], action='fill', value=value)
+            snapshot = broad.ok('snapshot', target_id=target_id, session_id=session_id)
+            self.assertEqual(by(snapshot['elements'], role='textbox', name='Name')['value'], value)
+
     def test_01_discover_open_snapshot(self):
         helper = self.helper('--allow-all')
         discovered = helper.ok('discover')

@@ -39,6 +39,9 @@ export interface ExtensionPermissions {
   allowUnredactedImages: boolean;
   allowLoopback: boolean;
   allowPrivateNetwork: boolean;
+  /** Trusted broad grants: reach any URL origin / any application without registering one. */
+  allowAllBrowserOrigins?: boolean;
+  allowAllApplications?: boolean;
   /** Labels never treated as consequential (clears label-derived risk only). Omitted when empty. */
   consequentialAllowLabels?: string[];
   /** Labels always treated as consequential. Omitted when empty. */
@@ -57,6 +60,8 @@ const GRANT_KEYS = [
   'allowUnredactedImages',
   'allowLoopback',
   'allowPrivateNetwork',
+  'allowAllBrowserOrigins',
+  'allowAllApplications',
   'consequentialAllowLabels',
   'consequentialDenyLabels',
 ] as const;
@@ -181,9 +186,9 @@ export function normalizePermissions(value: unknown): ExtensionPermissions {
   const rawMode = p.operationMode ?? 'read_only';
   if (!['read_only', 'standard', 'ask'].includes(String(rawMode)))
     invalidGrant('operationMode', 'read_only, standard, or ask');
-  if (appPath !== '' && !isAbsolutePath(appPath))
+  if (!flag('allowAllApplications') && appPath !== '' && !isAbsolutePath(appPath))
     invalidGrant('desktopAppPath', 'an absolute application path / アプリの絶対パス');
-  if (appId !== '' && !isAbsolutePath(appPath))
+  if (!flag('allowAllApplications') && appId !== '' && !isAbsolutePath(appPath))
     invalidGrant(
       'desktopAppPath',
       'an absolute path paired with desktopAppId / desktopAppIdに対応するアプリの絶対パス',
@@ -201,6 +206,9 @@ export function normalizePermissions(value: unknown): ExtensionPermissions {
     allowUnredactedImages: flag('allowUnredactedImages'),
     allowLoopback: flag('allowLoopback'),
     allowPrivateNetwork: flag('allowPrivateNetwork'),
+    // Broad grants are never implied by an absent key: they default to deny here.
+    allowAllBrowserOrigins: flag('allowAllBrowserOrigins'),
+    allowAllApplications: flag('allowAllApplications'),
     // Serialized only when set, so the default grants (and the MCP definition they travel in) are unchanged.
     ...(allowLabels.length ? { consequentialAllowLabels: allowLabels } : {}),
     ...(denyLabels.length ? { consequentialDenyLabels: denyLabels } : {}),
@@ -219,6 +227,21 @@ const DENY_ALL: ExtensionPermissions = {
   allowUnredactedImages: false,
   allowLoopback: false,
   allowPrivateNetwork: false,
+  allowAllBrowserOrigins: false,
+  allowAllApplications: false,
+};
+
+/** User-facing fresh-install/standalone defaults. Decoding an invalid permission envelope still denies everything. */
+export const DEFAULT_PERMISSIONS: ExtensionPermissions = {
+  ...DENY_ALL,
+  operationMode: 'standard',
+  allowAllOperations: true,
+  allowAllBrowserOrigins: true,
+  allowAllApplications: true,
+  allowPhysicalInput: true,
+  allowUnredactedImages: true,
+  allowLoopback: true,
+  allowPrivateNetwork: true,
 };
 
 // Decodes the MCP environment. Missing, oversized or malformed input denies everything.
@@ -333,7 +356,15 @@ export function extensionPolicy(
   runtimeSettings?: unknown,
 ): PolicyConfig {
   const grants = normalizePermissions(permissions ?? {});
-  const hasApp = grants.desktopAppId !== '' && grants.desktopAppPath !== '' && isAbsolutePath(helperPath ?? '');
+  const helper = helperPath ?? '';
+  const broadApps = grants.allowAllApplications === true;
+  const explicitApp = grants.desktopAppId !== '' && isAbsolutePath(grants.desktopAppPath);
+  const hasApp = isAbsolutePath(helper) && (broadApps || explicitApp);
+  // Broad native access names no application: '*' is resolved by the core at launch, and the
+  // absolute helper path only anchors the schema-required absolute appPath.
+  const appSelection = broadApps
+    ? { allowAllApplications: true, appId: '*', appPath: helper }
+    : { appId: grants.desktopAppId, appPath: grants.desktopAppPath };
   // Physical input needs a valid application plus the desktop visual opt-in, which is only
   // possible once unredacted native images are explicitly granted (mask regions are not configured here).
   const interactive =
@@ -351,10 +382,9 @@ export function extensionPolicy(
       : undefined;
   const desktop = hasApp
     ? {
-        restrictTargets: true,
-        helperPath: helperPath as string,
-        appId: grants.desktopAppId,
-        appPath: grants.desktopAppPath,
+        restrictTargets: !broadApps,
+        helperPath: helper,
+        ...appSelection,
         classification: 'PUBLIC' as const,
         allowAllOperations: grants.allowAllOperations,
         ...(grants.allowUnredactedImages ? { visual: { enabled: true, allowUnredacted: true, maskRegions: [] } } : {}),
@@ -366,10 +396,9 @@ export function extensionPolicy(
   const linuxDesktop =
     hasApp && platform === 'linux'
       ? {
-          restrictTargets: true,
-          helperPath: helperPath as string,
-          appId: grants.desktopAppId,
-          appPath: grants.desktopAppPath,
+          restrictTargets: !broadApps,
+          helperPath: helper,
+          ...appSelection,
           classification: 'PUBLIC' as const,
           allowAllOperations: grants.allowAllOperations,
         }
@@ -387,6 +416,7 @@ export function extensionPolicy(
   }));
   const policy = parsePolicy({
     restrictTargets: true,
+    allowAllBrowserOrigins: grants.allowAllBrowserOrigins === true,
     allowAllOperations: grants.allowAllOperations,
     operationMode: grants.operationMode,
     allowedOrigins: grants.browserOrigins,
@@ -429,13 +459,14 @@ export function effectivePermissions(
           ? policy.linux
           : undefined;
   const reasons: string[] = [];
-  if (grants.allowPhysicalInput || grants.allowUnredactedImages || grants.desktopAppId) {
+  const broadRequested = grants.allowAllApplications === true;
+  if (grants.allowPhysicalInput || grants.allowUnredactedImages || grants.desktopAppId || broadRequested) {
     if (platform !== 'darwin' && platform !== 'win32' && platform !== 'linux')
       reasons.push(
         'Native control requires macOS, Windows or Linux / ネイティブ操作はmacOS・Windows・Linuxのみ対応です。',
       );
     else {
-      if (!grants.desktopAppId || !grants.desktopAppPath)
+      if (!broadRequested && (!grants.desktopAppId || !grants.desktopAppPath))
         reasons.push(
           platform === 'linux'
             ? 'Configure the AT-SPI application name and the absolute executable path / AT-SPIアプリケーション名と実行ファイルの絶対パスが必要です。'
@@ -469,6 +500,8 @@ export function effectivePermissions(
     allowUnredactedImages: native?.visual?.enabled === true,
     allowLoopback: policy.allowLoopback === true,
     allowPrivateNetwork: policy.allowPrivateNetwork === true,
+    allowAllBrowserOrigins: policy.allowAllBrowserOrigins === true,
+    allowAllApplications: native?.allowAllApplications === true,
     ...(policy.consequentialAllowLabels?.length ? { consequentialAllowLabels: policy.consequentialAllowLabels } : {}),
     ...(policy.consequentialDenyLabels?.length ? { consequentialDenyLabels: policy.consequentialDenyLabels } : {}),
     reasons,

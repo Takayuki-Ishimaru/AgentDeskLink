@@ -231,6 +231,7 @@ const linuxArgs = (config: DesktopConfig, tier?: Tier) => [
   '--app-path',
   config.appPath,
   ...(config.allowAllOperations ? ['--allow-all'] : []),
+  ...(config.allowAllApplications ? ['--all-apps'] : []),
   ...(config.restrictTargets ? ['--restrict-targets'] : []),
   ...(config.controlsPath ? ['--controls-file', config.controlsPath] : []),
   ...tierArgs(config, tier),
@@ -267,6 +268,7 @@ class NativeClient {
         ? linuxArgs(config, tier)
         : [
             ...(config.allowAllOperations ? ['--allow-all'] : []),
+            ...(config.allowAllApplications ? ['--all-apps'] : []),
             ...(config.restrictTargets ? ['--restrict-targets'] : []),
             '--app-id',
             config.appId,
@@ -598,7 +600,8 @@ export class NativeDesktopAdapter implements Adapter {
       const result = discovery.parse(await c.call('discover', {}, signal));
       const ids = new Set<string>();
       for (const t of result.targets) {
-        if (ids.has(t.target_id) || t.application_id !== this.config.appId) throw new Error();
+        if (ids.has(t.target_id) || (!this.config.allowAllApplications && t.application_id !== this.config.appId))
+          throw new Error();
         ids.add(t.target_id);
         if (
           t.window.bounds.coordinate_space !==
@@ -648,9 +651,11 @@ export class NativeDesktopAdapter implements Adapter {
     if (mode !== 'background_semantic' && mode !== 'interactive_desktop') throw new AdlError('E_INTERFERENCE_RISK');
     if (
       target.surface !== 'desktop' ||
-      target.application_id !== this.config.appId ||
+      (!this.config.allowAllApplications && target.application_id !== this.config.appId) ||
       !this.issued.has(target.target_id)
     )
+      throw new AdlError('E_TARGET_NOT_FOUND');
+    if (this.issued.get(target.target_id)?.application_id !== target.application_id)
       throw new AdlError('E_TARGET_NOT_FOUND');
     const interactive = mode === 'interactive_desktop';
     if (interactive && !this.interactiveTargets.has(target.target_id)) throw new AdlError('E_UNSUPPORTED_ACTION');

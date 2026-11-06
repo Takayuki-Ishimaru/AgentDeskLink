@@ -45,6 +45,10 @@ import {
 import { IsolatedReadStore, MainDocumentIdentity } from './browser-reading.js';
 import { SECRET_LABEL_PATTERN, PERSONAL_LABEL_PATTERN, BROWSER_PRIVACY_RULES } from './privacy.js';
 import { readTextPageFn, type PageTextResult } from './browser-text.js';
+import { withPersonalContext, personalContextPageFn } from './personal-context.js';
+import { readOptionsPageFn, type OptionsPageArgs, type OptionsResult } from './browser-options.js';
+import { StartupDiagnostics } from './startup-diagnostics.js';
+import { TEXT_REDACTION_RULES, PERSONAL_DATA_REDACTION_RULES } from './privacy.js';
 import { ensureBrowserPrivacySelectors } from './browser-privacy.js';
 import type { GesturePolicy, GesturePlan, GestureReference, GestureExecution } from './gesture-types.js';
 import type { CapturedImage, VisualPolicy } from './visual-types.js';
@@ -77,7 +81,13 @@ function deny(): never {
 
 /** Whether every request of the session passes the network route installed in BrowserAdapter.open. */
 function routesNetwork(policy: PolicyConfig): boolean {
-  return !policy.allowAllOperations || !!policy.restrictTargets || !!policy.browserProxyServer;
+  return (
+    !policy.allowAllOperations ||
+    (!!policy.restrictTargets && !policy.allowAllBrowserOrigins) ||
+    !policy.allowLoopback ||
+    !policy.allowPrivateNetwork ||
+    !!policy.browserProxyServer
+  );
 }
 
 /**
@@ -244,12 +254,15 @@ function snapshotPageFn(
     maxDepth: number;
     fieldMax: number;
     isolatedReadOnly?: boolean;
+    allowPersonalData?: boolean;
     secretLabelPattern: string;
     personalLabelPattern: string;
     privacyRules: typeof BROWSER_PRIVACY_RULES;
   },
+  personalContext: typeof personalContextPageFn,
 ): PageSnapshot {
   if (!store.integrity.check()) throw new Error('ADL_UNTRUSTED_DOM');
+  const personalContexts = new WeakMap<Element, boolean>();
   // Document and form named properties (img name="body", input name="tagName")
   // shadow instance APIs in the page world. Reads on the document or on nodes
   // that may be forms resolve through the verified prototype chain instead.
@@ -500,7 +513,14 @@ function snapshotPageFn(
             !(['title', 'desc'].includes(String(r(parent, 'localName'))) && m(parent, 'closest', 'svg'))
           )
             descendantHidden = true;
-          else add(node.textContent ?? '');
+          else
+            add(
+              !cfg.allowPersonalData &&
+                personalContext(parent, cfg.privacyRules.personalContextLabelPattern, personalContexts) &&
+                (node.textContent ?? '').trim()
+                ? '[redacted]'
+                : (node.textContent ?? ''),
+            );
       } else {
         const child = node as Element,
           tag = tagOf(child);
@@ -1068,9 +1088,10 @@ function snapshotPageFn(
         inRegion ||
         (credentialField ? hints : semanticHints).some(hint => hint.length >= cfg.fieldMax || sensitiveLabel(hint));
       const personal =
-        credentialField &&
-        (hints.some(hint => new RegExp(cfg.personalLabelPattern, 'iu').test(hint.normalize('NFKC'))) ||
-          /(?:^|\s)name(?:$|\s)/i.test(attr(cur, 'autocomplete') ?? ''));
+        personalContext(cur, cfg.privacyRules.personalContextLabelPattern, personalContexts) ||
+        (credentialField &&
+          (hints.some(hint => new RegExp(cfg.personalLabelPattern, 'iu').test(hint.normalize('NFKC'))) ||
+            /(?:^|\s)name(?:$|\s)/i.test(attr(cur, 'autocomplete') ?? '')));
       let rawVal = '';
       if (tag === 'input' || tag === 'textarea') rawVal = store.integrity.value(cur);
       else if (tag === 'select') {
@@ -1122,15 +1143,24 @@ function snapshotPageFn(
       const expanded = has(cur, 'aria-expanded') ? attr(cur, 'aria-expanded') === 'true' : undefined;
       let options: ElementInfo['options'];
       let optionsTruncated = false;
+      let optionsTotal: number | undefined;
+      const optionsTruncation: NonNullable<ElementInfo['options_truncation']> = [];
       if (tag === 'select') {
         const entries = (cur as HTMLSelectElement).options;
-        if (entries.length > 100) optionsTruncated = true;
+        optionsTotal = entries.length;
+        if (entries.length > 100) {
+          optionsTruncated = true;
+          optionsTruncation.push('source_limit');
+        }
         options = [];
         for (let i = 0; i < Math.min(entries.length, 100); i++) {
           const option = entries[i]!;
           if (option.label.length > 4096 || option.value.length > 4096) throw new Error('Snapshot field limit');
           const hidden = inSensitiveRegion(option) || sensitiveLabel(option.label);
-          if (option.label.length > cfg.fieldMax || option.value.length > cfg.fieldMax) optionsTruncated = true;
+          if (option.label.length > cfg.fieldMax || option.value.length > cfg.fieldMax) {
+            optionsTruncated = true;
+            if (!optionsTruncation.includes('field_limit')) optionsTruncation.push('field_limit');
+          }
           options.push({
             label: hidden ? '[redacted]' : clip(option.label),
             value: hidden ? '[redacted]' : clip(option.value),
@@ -1240,6 +1270,8 @@ function snapshotPageFn(
           ...(linkHref && !sensitive && !inRegion ? { href: linkHref } : {}),
           ...(valueClipped && !sensitive && !inRegion ? { value_truncated: true as const } : {}),
           ...(options ? { options, ...(optionsTruncated ? { options_truncated: true } : {}) } : {}),
+          ...(optionsTotal !== undefined ? { options_total: optionsTotal } : {}),
+          ...(optionsTruncation.length ? { options_truncation: optionsTruncation } : {}),
           ...(value !== undefined ? { value } : {}),
           ...(!sensitive && !inRegion
             ? {
@@ -1291,6 +1323,8 @@ function snapshotPageFn(
 }
 
 // Runs inside the page: scrolls an element (or the document's scrolling element) by 80% of its height and reports whether it moved.
+const snapshotWithPrivacy = withPersonalContext(snapshotPageFn);
+
 function scrollByViewport(node: Element, args: { direction: 'up' | 'down'; key: string }): boolean {
   if (!(window as unknown as Record<string, BrowserIntegrity>)[args.key]?.check()) throw new Error('ADL_UNTRUSTED_DOM');
   const element = node as HTMLElement,
@@ -1578,7 +1612,9 @@ class BrowserSession implements AdapterSession {
       request.isNavigationRequest() ||
       !['fetch', 'xhr'].includes(request.resourceType()) ||
       !HELD_METHODS.has(method) ||
-      (url.origin !== this.origin && !this.policy.allowedOrigins.includes(url.origin))
+      (url.origin !== this.origin &&
+        !this.policy.allowAllBrowserOrigins &&
+        !this.policy.allowedOrigins.includes(url.origin))
     )
       return undefined;
     const headers = request.headers();
@@ -1962,7 +1998,9 @@ class BrowserSession implements AdapterSession {
   get origin(): string {
     if (!this.pageValue) return this.initialOrigin;
     const current = new URL(this.pageValue.url()).origin;
-    return this.policy.allowAllOperations || this.redirectOrigins.has(current) ? current : this.initialOrigin;
+    return this.policy.allowAllBrowserOrigins || this.policy.allowAllOperations || this.redirectOrigins.has(current)
+      ? current
+      : this.initialOrigin;
   }
 
   // Granted origins a server redirect took the session to (a sign-in that passes through an identity provider): the session
@@ -1972,7 +2010,9 @@ class BrowserSession implements AdapterSession {
     this.redirectOrigins.add(origin);
   }
   reachable(origin: string): boolean {
-    return origin === this.initialOrigin || this.redirectOrigins.has(origin);
+    return (
+      this.policy.allowAllBrowserOrigins === true || origin === this.initialOrigin || this.redirectOrigins.has(origin)
+    );
   }
   // A target's controls, visual masks and gestures describe its own origin, not one a redirect reached.
   private get onTargetOrigin(): boolean {
@@ -2101,12 +2141,12 @@ class BrowserSession implements AdapterSession {
     signal?: AbortSignal,
   ): Promise<PageSnapshot> {
     try {
-      return await store.evaluate(snapshotPageFn, cfg);
+      return await store.evaluate(snapshotWithPrivacy, cfg);
     } catch (error) {
       if (!(error instanceof Error && error.message.includes('ADL_UNTRUSTED_DOM'))) throw error;
       await this.registerPrototypes(signal);
       try {
-        return await store.evaluate(snapshotPageFn, cfg);
+        return await store.evaluate(snapshotWithPrivacy, cfg);
       } catch (error) {
         if (error instanceof Error && error.message.includes('ADL_UNTRUSTED_DOM'))
           throw new AdlError('E_PRIVACY_BLOCKED', 'untrusted_dom_api');
@@ -2360,10 +2400,11 @@ class BrowserSession implements AdapterSession {
       fieldMax: 512,
       isolatedReadOnly: true,
       secretLabelPattern: SECRET_LABEL_PATTERN,
+      allowPersonalData: this.policy.allowPersonalData,
       personalLabelPattern: PERSONAL_LABEL_PATTERN,
       privacyRules: BROWSER_PRIVACY_RULES,
     };
-    const res = await reader.evaluate<PageSnapshot, typeof cfg>(snapshotPageFn, cfg, combined);
+    const res = await reader.evaluate<PageSnapshot, typeof cfg>(snapshotWithPrivacy, cfg, combined);
     const rawTitle = await reader.evaluate(
       (_store: Store) => {
         const title = Reflect.get(Object.getPrototypeOf(document), 'title', document);
@@ -2449,6 +2490,7 @@ class BrowserSession implements AdapterSession {
       maxDepth: MAX_DOM_DEPTH,
       fieldMax: 512,
       secretLabelPattern: SECRET_LABEL_PATTERN,
+      allowPersonalData: this.policy.allowPersonalData,
       personalLabelPattern: PERSONAL_LABEL_PATTERN,
       privacyRules: BROWSER_PRIVACY_RULES,
     };
@@ -2661,7 +2703,11 @@ class BrowserSession implements AdapterSession {
       const result = await reader.evaluateElement(
         elementId,
         readTextPageFn,
-        { rules: BROWSER_PRIVACY_RULES, pattern: SECRET_LABEL_PATTERN },
+        {
+          rules: BROWSER_PRIVACY_RULES,
+          pattern: SECRET_LABEL_PATTERN,
+          allowPersonalData: this.policy.allowPersonalData,
+        },
         combined,
       );
       this.checkAlive();
@@ -2723,7 +2769,11 @@ class BrowserSession implements AdapterSession {
       result = await isolatedCollect(
         element,
         readTextPageFn,
-        { rules: BROWSER_PRIVACY_RULES, pattern: SECRET_LABEL_PATTERN },
+        {
+          rules: BROWSER_PRIVACY_RULES,
+          pattern: SECRET_LABEL_PATTERN,
+          allowPersonalData: this.policy.allowPersonalData,
+        },
         [],
         frame ?? this.page.mainFrame(),
       );
@@ -2734,6 +2784,79 @@ class BrowserSession implements AdapterSession {
     if (signal.aborted) throw new AdlError('E_CANCELLED');
     if (generation !== this.documentGeneration) throw new AdlError('E_STALE_STATE');
     return this.finishReadText(result, offset, length);
+  }
+
+  async readOptions(
+    elementId: string,
+    query: string,
+    offset: number,
+    limit: number,
+    signal: AbortSignal,
+  ): Promise<OptionsResult> {
+    if (
+      query.length > 512 ||
+      !Number.isInteger(offset) ||
+      offset < 0 ||
+      !Number.isInteger(limit) ||
+      limit < 1 ||
+      limit > 100
+    )
+      throw new AdlError('E_INVALID_ARGUMENT');
+    // Reuse the origin, frame ancestry, privacy and document checks of direct text reads.
+    await this.readText(elementId, 0, 1, signal);
+    const generation = this.documentGeneration;
+    const arg: OptionsPageArgs = {
+      query,
+      offset,
+      limit,
+      allowPersonalData: this.policy.allowPersonalData === true,
+      secretPattern: SECRET_LABEL_PATTERN,
+      personalPattern: PERSONAL_LABEL_PATTERN,
+      rules: BROWSER_PRIVACY_RULES,
+      textRules: TEXT_REDACTION_RULES,
+      personalRules: PERSONAL_DATA_REDACTION_RULES,
+    };
+    let result: OptionsResult | { error: 'missing' | 'protected' | 'unsupported' | 'limit' };
+    if (this.isolatedReadOnly) {
+      result = await (await this.isolatedStore(signal)).evaluateElement(elementId, readOptionsPageFn, arg, signal);
+    } else {
+      let store = this.store!,
+        frame = this.page.mainFrame();
+      if (!elementId.startsWith(this.prefix + '-')) {
+        let found = false;
+        for (const [candidate, value] of this.frameStores) {
+          if (await value.evaluate((s, id) => s.nodes.has(id), elementId)) {
+            store = value;
+            frame = candidate;
+            found = true;
+            break;
+          }
+        }
+        if (!found) throw new AdlError('E_TARGET_NOT_FOUND');
+      }
+      const handle = await store.evaluateHandle((s, id) => s.nodes.get(id) ?? null, elementId);
+      try {
+        const element = handle.asElement() as ElementHandle | null;
+        if (!element) throw new AdlError('E_TARGET_NOT_FOUND');
+        result = await isolatedCollect(element, readOptionsPageFn, arg, [], frame);
+      } finally {
+        await handle.dispose().catch(() => undefined);
+      }
+    }
+    this.checkAlive();
+    if (signal.aborted) throw new AdlError('E_CANCELLED');
+    if (generation !== this.documentGeneration) throw new AdlError('E_STALE_STATE');
+    if ('error' in result)
+      throw new AdlError(
+        result.error === 'protected'
+          ? 'E_PRIVACY_BLOCKED'
+          : result.error === 'limit'
+            ? 'E_RESOURCE_LIMIT'
+            : result.error === 'unsupported'
+              ? 'E_UNSUPPORTED_ACTION'
+              : 'E_TARGET_NOT_FOUND',
+      );
+    return result;
   }
 
   private finishReadText(result: PageTextResult, offset: number, length: number) {
@@ -3953,6 +4076,10 @@ export function browserLaunchFailure(error: unknown): { reason?: 'browser_sandbo
 }
 
 export class BrowserAdapter implements Adapter {
+  private readonly startup = new StartupDiagnostics();
+  startupDiagnostics() {
+    return this.startup.snapshot();
+  }
   private browser: Browser | null = null;
   private launching: Promise<Browser> | null = null;
   private closed = false;
@@ -3966,6 +4093,7 @@ export class BrowserAdapter implements Adapter {
   /** Whether a redirect may take a document to another origin: one the workspace granted, and the guard accepts. */
   private async redirectMayLeave(next: URL): Promise<boolean> {
     if (
+      !this.policy.allowAllBrowserOrigins &&
       !this.policy.allowAllOperations &&
       (!this.policy.allowedOrigins.includes(next.origin) || this.policy.hiddenTargetOrigins?.includes(next.origin))
     )
@@ -4041,6 +4169,7 @@ export class BrowserAdapter implements Adapter {
       deny();
     }
     if (
+      !this.policy.allowAllBrowserOrigins &&
       (!this.policy.allowAllOperations || this.policy.restrictTargets) &&
       !this.policy.allowedOrigins.includes(origin)
     )
@@ -4052,13 +4181,16 @@ export class BrowserAdapter implements Adapter {
     let context: BrowserContext;
     let page: Page;
     let session: BrowserSession | null = null;
+    const startup = this.startup.start();
     try {
       await ensureBrowserPrivacySelectors();
       // Register before the first page can initialize Playwright's injected
       // selector engine (e.g. during fill). Late registration misses that cache.
       await ensurePointSelector();
+      startup.stage('browser_launch');
       const browser = await this.ensureBrowser();
       if (signal.aborted || this.closed) throw new AdlError('E_CANCELLED');
+      startup.stage('context_creation');
       context = await browser.newContext({
         serviceWorkers: 'block',
         acceptDownloads: this.policy.allowAllOperations === true,
@@ -4132,7 +4264,7 @@ export class BrowserAdapter implements Adapter {
             }
             const method = req.method().toUpperCase();
             const resource = !req.isNavigationRequest() && req.resourceType() !== 'document';
-            if (!this.policy.allowAllOperations && u.origin !== active.origin) {
+            if (!this.policy.allowAllBrowserOrigins && !this.policy.allowAllOperations && u.origin !== active.origin) {
               const permitted =
                 (mainNavigation && active.reachable(u.origin)) ||
                 (resource &&
@@ -4346,6 +4478,7 @@ export class BrowserAdapter implements Adapter {
           ws.close({ code: 1008, reason: 'policy' });
         });
       }
+      startup.stage('page_creation');
       page = await context.newPage();
       context.on('page', p => {
         if (p !== page) void p.close().catch(() => undefined);
@@ -4354,11 +4487,17 @@ export class BrowserAdapter implements Adapter {
       page.on('download', d => void d.cancel().catch(() => undefined));
       page.on('dialog', d => void d.dismiss().catch(() => undefined));
       await session.attach(page);
+      startup.stage('navigation');
       await page.goto(config.url, { waitUntil: 'domcontentloaded' });
+      startup.stage('session_initialization');
       await session.sessionReady();
       if (signal.aborted) throw new AdlError('E_CANCELLED');
+      startup.finish(true);
+      process.stderr.write(`adl: browser startup ${JSON.stringify(this.startup.snapshot())}\n`);
       return active;
     } catch (e) {
+      startup.finish(false);
+      process.stderr.write(`adl: browser startup ${JSON.stringify(this.startup.snapshot())}\n`);
       if (session) await session.close().catch(() => undefined);
       const proxyFailure = session?.takeNavigationFailure(config.url);
       if (proxyFailure) throw new AdlError('E_POLICY_DENIED', proxyFailure);

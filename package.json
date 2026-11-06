@@ -2,7 +2,7 @@
   "name": "agentdesklink",
   "displayName": "AgentDeskLink",
   "description": "Local-first semantic browser and desktop control over MCP, with a per-workspace AgentDeskLink sidebar for VS Code.",
-  "version": "0.1.10",
+  "version": "0.1.11",
   "publisher": "agentdesklink",
   "license": "MIT",
   "private": true,
@@ -101,9 +101,9 @@
       "properties": {
         "agentdesklink.enabled": {
           "type": "boolean",
-          "default": false,
+          "default": true,
           "scope": "window",
-          "description": "このワークスペースで AgentDeskLink MCP サーバーを有効にする / Enable the AgentDeskLink MCP server for this workspace (per-workspace opt-in)."
+          "description": "このワークスペースで AgentDeskLink MCP サーバーを有効にする / Enable the AgentDeskLink MCP server for this workspace (on by default in trusted workspaces; an untrusted workspace stays disabled)."
         },
         "agentdesklink.autoUpdate": {
           "type": "boolean",
@@ -124,7 +124,7 @@
           },
           "default": [],
           "scope": "window",
-          "description": "信頼できるワークスペース設定: 明示的に許可する完全な http(s) オリジン（空 = 許可なし）/ Trusted per-workspace setting: exact http(s) origins explicitly granted; empty grants nothing."
+          "description": "すべてのURLへのアクセスをオフにしたときに許可する完全な http(s) origin（空は許可なし）/ Exact http(s) origins used when All URLs is off; an empty list grants no access."
         },
         "agentdesklink.sessionIdleMinutes": {
           "type": "number",
@@ -156,19 +156,19 @@
           "type": "string",
           "default": "",
           "scope": "window",
-          "description": "信頼できるワークスペース設定: 許可するネイティブアプリ 1 件（ワイルドカード不可）/ Trusted per-workspace setting: the single granted native application id; wildcards grant nothing."
+          "description": "すべてのアプリをオフにしたときに許可するアプリのID / Application ID used when All applications is off."
         },
         "agentdesklink.desktopAppPath": {
           "type": "string",
           "default": "",
           "scope": "window",
-          "description": "信頼できるワークスペース設定: 許可するネイティブアプリの絶対パス / Trusted per-workspace setting: absolute path of the granted native application."
+          "description": "すべてのアプリをオフにしたときのアプリ実行ファイルの絶対パス / Absolute executable path used when All applications is off."
         },
         "agentdesklink.allowAllOperations": {
           "type": "boolean",
-          "default": false,
+          "default": true,
           "scope": "window",
-          "description": "すべての対応操作を明示的に許可（既定は拒否、許可元/アプリの許可は別途必要）/ Explicitly permit all supported operations (default deny; origin and app grants stay separate)."
+          "description": "すべての対応操作を許可（既定オン）。保存通信・重要操作も都度確認なしで実行します / Allow all supported operations by default, including saves and consequential actions without per-action approval."
         },
         "agentdesklink.operationMode": {
           "type": "string",
@@ -177,31 +177,31 @@
             "standard",
             "ask"
           ],
-          "default": "read_only",
+          "default": "standard",
           "scope": "window",
-          "description": "操作の権限段階。既定は読み取り専用。all は従来互換のallowAllOperations設定でのみ有効です。 / Permission tier (read_only by default). Legacy allowAllOperations takes precedence as all."
+          "description": "全操作許可をオフにしたときの段階: read_only、standard（下書き）、ask（承認付き保存）。初期状態は allowAllOperations により全操作です / Tier used when All operations is off: read_only, standard (draft), ask (save with approval). Fresh settings use All operations."
         },
         "agentdesklink.allowPhysicalInput": {
           "type": "boolean",
-          "default": false,
+          "default": true,
           "scope": "window",
-          "description": "物理入力を明示的に許可（有効なアプリとデスクトップ可視オプトインが必要）/ Explicitly allow physical input (needs a valid app and the desktop visual opt-in)."
+          "description": "物理入力を許可（初期状態はオン）。対応するOSと画像取得の許可が必要 / Allow physical input by default; requires a supported OS and native image permission."
         },
         "agentdesklink.allowUnredactedImages": {
           "type": "boolean",
-          "default": false,
+          "default": true,
           "scope": "window",
-          "description": "非マスキングのネイティブ画像を明示的に許可 / Explicitly allow unredacted native images."
+          "description": "無加工のネイティブ画像を許可（初期状態はオン） / Allow unredacted native images by default."
         },
         "agentdesklink.allowLoopback": {
           "type": "boolean",
-          "default": false,
+          "default": true,
           "scope": "window",
           "description": "ループバックへのアクセスを許可 / Allow loopback access."
         },
         "agentdesklink.allowPrivateNetwork": {
           "type": "boolean",
-          "default": false,
+          "default": true,
           "scope": "window",
           "description": "プライベートネットワークへのアクセスを許可 / Allow private network access."
         },
@@ -231,6 +231,18 @@
           "default": [],
           "scope": "window",
           "description": "信頼できるワークスペース設定: 常に重要操作とみなすボタン・リンクのラベル（完全一致または単語一致。許可リストより優先）/ Trusted per-workspace setting: labels always treated as consequential (whole label or whole word; wins over the allow list)."
+        },
+        "agentdesklink.allowAllBrowserOrigins": {
+          "type": "boolean",
+          "default": true,
+          "scope": "window",
+          "description": "信頼できるワークスペースで登録済みに限らずすべてのURLアクセスを既定で許可 / In this trusted workspace, allow every URL by default instead of only registered origins."
+        },
+        "agentdesklink.allowAllApplications": {
+          "type": "boolean",
+          "default": true,
+          "scope": "window",
+          "description": "信頼できるワークスペースでアプリを選択しなくてもネイティブ対象をすべて許可 / In this trusted workspace, allow any application without selecting one."
         },
         "agentdesklink.allowPersonalData": {
           "type": "boolean",

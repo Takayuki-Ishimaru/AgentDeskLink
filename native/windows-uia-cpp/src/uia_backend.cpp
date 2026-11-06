@@ -62,6 +62,7 @@ struct Impl {
   bool visual_enabled = false;
   bool lifecycle_enabled = false;
   bool allow_all = false;  // trusted --allow-all: any current-user desktop window
+  bool all_apps = false;   // trusted --all-apps: broaden discovery only
   bool restrict_targets = false;
   bool tier = false;  // trusted --operation-mode standard|ask: vocabulary-gated, no allowlist
   std::unique_ptr<HumanFocusProbe> human_probe;
@@ -154,7 +155,7 @@ std::wstring ExePathOf(DWORD pid) {
 
 // Resolves the target by exact canonical executable path only.
 std::wstring CanonicalPath(const std::wstring& path) {
-  const HANDLE h = CreateFileW(path.c_str(), 0, FILE_SHARE_READ | FILE_SHARE_DELETE, nullptr,
+  const HANDLE h = CreateFileW(path.c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
                                OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
   if (h == INVALID_HANDLE_VALUE) return std::wstring();
   wchar_t buf[4096];
@@ -169,7 +170,7 @@ std::wstring CanonicalPath(const std::wstring& path) {
 // No scoring, no preferred candidate: each window becomes its own target.
 struct EnumContext {
   const std::wstring* want_path;
-  bool allow_all=false;
+  bool all_apps=false;
   DWORD only_pid=0;
   std::vector<HWND> hwnds;
 };
@@ -184,7 +185,7 @@ BOOL CALLBACK CollectCandidates(HWND hwnd, LPARAM lp) {
   if(out->only_pid&&pid!=out->only_pid)return TRUE;
   const std::wstring exe = ExePathOf(pid);
   if (exe.empty()) return TRUE;  // unattributable process: never a target
-  if (!out->allow_all && _wcsicmp(exe.c_str(), g_want_path->c_str()) != 0) return TRUE;
+  if (!out->all_apps && _wcsicmp(exe.c_str(), g_want_path->c_str()) != 0) return TRUE;
   if (out->hwnds.size() < kMaxTargets + 1) out->hwnds.push_back(hwnd);
   return TRUE;
 }
@@ -481,7 +482,12 @@ Status VerifyUniqueLiveElement(Impl* im, SessionState* ss, IUIAutomationElement*
 
 Status Probe(void* ctx, Session& s, FocusProbe& out) {
   Impl* im = reinterpret_cast<Impl*>(ctx);
-  if(im->lifecycle_enabled)return im->human_probe->Sample(out);
+  if(!im->input_monitor.Healthy())return Status::Fail("E_FOCUS_PROBE","human input monitor unavailable");
+  if(im->lifecycle_enabled){
+    Status status=im->human_probe->Sample(out);
+    if(status.ok())out.input_sequence=im->input_monitor.PhysicalSequence();
+    return status;
+  }
   const HWND fg = GetForegroundWindow();
   if (!fg) return Status::Fail("E_FOCUS_PROBE", "cannot sample the foreground window");
   out.foreground = (unsigned long long)(uintptr_t)fg;
@@ -489,6 +495,7 @@ Status Probe(void* ctx, Session& s, FocusProbe& out) {
   if (!GetCursorPos(&p)) return Status::Fail("E_FOCUS_PROBE", "cannot sample the cursor position");
   out.cursor_x = p.x;
   out.cursor_y = p.y;
+  out.input_sequence = im->input_monitor.PhysicalSequence();
   ComPtr<IUIAutomationElement> fe;
   if (FAILED(im->uia->GetFocusedElement(&fe)) || !fe)
     return Status::Fail("E_FOCUS_PROBE", "cannot sample the focused UI Automation element");
@@ -539,7 +546,7 @@ Status RefreshRetained(Impl* im, HWND hwnd, RetainedTarget** out) {
   unsigned long long start = 0;
   const std::wstring exe = ExePathFromHandle(h);
   if (!ProcessStartHandle(h, start) || exe.empty() ||
-      ((!im->allow_all || im->restrict_targets) && exe != im->want_path)) {
+      (!BroadTargetEnumeration(im->all_apps,im->allow_all,im->restrict_targets) && exe != im->want_path)) {
     CloseHandle(h);
     return Status::Fail("E_TARGET_NOT_FOUND", "target process identity could not be verified");
   }
@@ -611,14 +618,14 @@ Status EnumerateTargets(void* ctx, std::vector<TargetObservation>& out, std::str
   if (!init.ok()) return init;
   EnumContext ec;
   ec.want_path = &im->want_path;
-  ec.allow_all = im->allow_all&&!im->restrict_targets;
+  ec.all_apps = BroadTargetEnumeration(im->all_apps,im->allow_all,im->restrict_targets);
   out_app_id=im->app_id;
   if(im->lifecycle_enabled){
     if(!im->owned_process||WaitForSingleObject(im->owned_process,0)!=WAIT_TIMEOUT){PruneRetained(im,{});return Status::Ok();}
     ec.only_pid=im->owned_pid;
   }
   const BOOL enumerated=EnumWindows(CollectCandidates, (LPARAM)&ec);
-  if (im->allow_all && ec.hwnds.size() > kMaxTargets) ec.hwnds.resize(kMaxTargets);
+  if (ec.all_apps && ec.hwnds.size() > kMaxTargets) ec.hwnds.resize(kMaxTargets);
   if (ec.hwnds.size() > kMaxTargets)
     return Status::Fail("E_TARGET_LIMIT", "more than 32 candidate windows; refusing to guess");
   if (!enumerated) return Status::Fail("E_TARGET_NOT_FOUND", "window enumeration failed");
@@ -626,7 +633,7 @@ Status EnumerateTargets(void* ctx, std::vector<TargetObservation>& out, std::str
   for (HWND hwnd : ec.hwnds) {
     RetainedTarget* rt = nullptr;
     Status st = RefreshRetained(im, hwnd, &rt);
-    if (!st.ok()) { if(im->allow_all)continue;return st; }
+    if (!st.ok()) { if(ec.all_apps)continue;return st; }
     TargetObservation o;
     o.window_key = (unsigned long long)(uintptr_t)hwnd;
     o.process_start = rt->start;
@@ -1009,12 +1016,15 @@ void* CreateBackendImpl(const LaunchConfig& cfg) {
   im->app_id = cfg.app_id;
   im->lifecycle_enabled=cfg.lifecycle_enabled;
   im->allow_all=cfg.allow_all;
+  im->all_apps=cfg.all_apps;
   im->restrict_targets=cfg.restrict_targets;
   im->tier=cfg.operation_mode=="standard"||cfg.operation_mode=="ask";
   im->visual_enabled = cfg.visual_enabled&&!cfg.lifecycle_enabled;
   if(cfg.input_cancelled)im->input_cancelled=cfg.input_cancelled;
   if(!ParseInteractiveConfig(cfg.interactive_config,im->input_surfaces,im->interactive_enabled)||
-     (im->interactive_enabled&&(!im->visual_enabled||!im->input_monitor.Start()))){delete im;return nullptr;}
+     (im->interactive_enabled&&!im->visual_enabled)){delete im;return nullptr;}
+  const bool input_monitor_started=im->input_monitor.Start();
+  if(im->interactive_enabled&&!input_monitor_started){delete im;return nullptr;}
   im->want_path = canon;
   if(cfg.lifecycle_enabled){
     if(!OnLifecycleDesktop()||im->interactive_enabled){delete im;return nullptr;}

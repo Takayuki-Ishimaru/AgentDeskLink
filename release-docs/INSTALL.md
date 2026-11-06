@@ -2,12 +2,12 @@
 
 **日本語** | [English](INSTALL_en.md)
 
-対象バージョン: `0.1.10`（ベータ版）
+対象バージョン: `0.1.11`（ベータ版）
 
 ## 必要なもの
 
 - VS Code 1.101 以上。
-- 共通 VSIX `agentdesklink-0.1.10.vsix`。[対応環境と既知の制限](KNOWN_ISSUES.md)を確認してください。
+- 共通 VSIX `agentdesklink-0.1.11.vsix`。[対応環境と既知の制限](KNOWN_ISSUES.md)を確認してください。
 - Chrome がない場合、初回の Chromium 自動取得に必要なネット接続。
 
 1 つの VSIX に macOS / Apple silicon、Windows x64、Linux x64 用の Node.js と画像処理ライブラリを同梱します。macOS/Windows/Linux 用のデスクトップ操作 helper も含みます（Linux は Python 3 スクリプトで、OS の python3-gi などが必要です）。起動時に対応するものを選ぶため、別途ビルドする必要はありません。
@@ -16,13 +16,13 @@
 
 ## インストール
 
-1. リリースページから `agentdesklink-0.1.10.vsix` と `SHA256SUMS` をダウンロードします。
+1. リリースページから `agentdesklink-0.1.11.vsix` と `SHA256SUMS` をダウンロードします。
 2. [更新ガイドの方法](UPDATES.md)で VSIX の SHA-256 を計算し、一覧と一致することを確認します。
 3. VS Code のコマンドパレットで「拡張機能: VSIXからのインストール」を選び、VSIX を指定します。
 4. 利用するフォルダーを開き、内容を確認してワークスペースを信頼します。
 5. 左のアクティビティバーの **AgentDeskLink** を開きます。
-6. 設定パネル上部でブラウザの origin と操作権限を設定します。対象アプリなどは「設定を開く」で指定します。パネル上部の「表示言語」で日英を切り替えられます。下の「初期設定と操作範囲」を参照してください。
-7. 「このワークスペースで MCP を有効にする」をオンにします。
+6. 設定パネルで実効権限を確認します。初期状態は全操作・全URL・全アプリが有効で、個別登録は不要です。必要なら閲覧専用・下書き・承認付き保存へ切り替えます。
+7. MCP は信頼済みワークスペースで既定オンです。以前オフにした場合は「このワークスペースで MCP を有効にする」をオンにします。
 8. VS Code の MCP 管理画面でサーバーの起動を承認します。
 
 ## Claude Codeなど他のAIクライアントで使う
@@ -39,26 +39,34 @@ Claude Code、Claude Desktop、Codex、Cursor、Windsurf、Devin、Gemini CLI、
 
 以下は VS Code 拡張のワークスペース設定です。
 
-MCP はワークスペースごとに既定で無効です。有効にしても対象へのアクセスは許可されません。パネルでブラウザの origin と操作の権限段階を設定します。既定は読み取り専用です。対象アプリ・物理入力・無加工のネイティブ画像の許可は別に設定し、必要な範囲だけ有効にしてください。ポリシー JSON の指定は不要です。
+信頼済みワークスペースでは、MCP・全操作・すべての http(s) URL とアプリ・物理入力・ネイティブ画像・ループバック・プライベートネットワークを既定で有効にします。origin やアプリの個別登録とポリシー JSON は不要です。明示的に保存済みの拒否設定は保持し、閲覧専用など既存の段階指定を新しい全操作の既定値で上書きしません。OS のアクセシビリティ・画面収録権限は必要です。Linux は AT-SPI の意味操作に対応し、画像・物理入力は未対応です。
 
 | 設定 | 指定する内容 |
 | --- | --- |
-| `agentdesklink.browserOrigins` | 許可する完全な `http(s)` origin。例: `https://example.com`。パスやワイルドカードは指定しません |
+| `agentdesklink.allowAllBrowserOrigins` / `agentdesklink.allowAllApplications` | 既定オン。全 http(s) URL／全アプリを対象にします。オフにした側だけ個別の許可リストを使います |
+| `agentdesklink.browserOrigins` | 全URL許可がオフのときに許可する完全な `http(s)` origin。例: `https://example.com`。パスやワイルドカードは指定しません |
 | `agentdesklink.browserResourceOrigins` | CDN など、GET/HEAD のサブリソース読み込みだけを許可する origin。移動先の許可とは別です |
 | `agentdesklink.allowPersonalData` | メール・電話番号などの個人情報の表示を許可します。既定はオフ。認証情報と明示保護領域は保護を維持します |
 | `agentdesklink.desktopAppId` / `agentdesklink.desktopAppPath` | 許可するアプリ 1 件の ID と実行ファイルの絶対パス |
-| `agentdesklink.operationMode` | `read_only`（既定）、`standard`、`ask`。パネルの読み取り専用・標準・都度承認に対応します |
+| `agentdesklink.operationMode` | `read_only`、`standard`（下書き）、`ask`（承認付き保存）。初期状態は `allowAllOperations: true` により全操作です |
 | `agentdesklink.consequentialAllowLabels` / `agentdesklink.consequentialDenyLabels` | 重要操作とみなさない／みなすボタン・リンクのラベル（各最大 64 件、1〜64 文字）。完全一致または単語単位で一致し、日本語は部分一致です。拒否側が優先します。認証情報・実際のフォーム送信・ファイル・ダウンロード・保護領域の判定は変わりません。settings.json で指定します |
-| `agentdesklink.allowAllOperations` | 従来の全操作許可。既定はオフ。有効な場合は権限段階より優先されます。パネルの「すべて許可」は確認画面を経て有効になります |
+| `agentdesklink.allowAllOperations` | 全操作許可。既定オンで、保存通信も利用できます。制限する段階を選ぶとオフになります。後からオンに戻す操作には確認画面があります |
 | `agentdesklink.browserHeadless` | 既定は `true`。手動ログインには `false` で可視ブラウザを使います |
 | `agentdesklink.sessionIdleMinutes` | 操作がないセッションの終了期限。1〜60 分、既定は 15 分です |
 | `agentdesklink.browserProxyServer` | 認証情報・パス・クエリのない HTTP(S) プロキシ origin。既定は空です |
 | `agentdesklink.browserProxyConnectByHostname` | 既定はオフ。ホスト名で許可を判定するプロキシ向けに HTTPS の CONNECT をホスト名で送ります。ローカル DNS/IP 検査と TLS 検証は維持します |
-| `agentdesklink.allowUnredactedImages` | 無加工のネイティブ画像の取得を許可します。既定はオフです |
-| `agentdesklink.allowPhysicalInput` | 物理入力を許可します。対象アプリの指定と `allowUnredactedImages` も必要です。既定はオフです |
-| `agentdesklink.allowLoopback` / `agentdesklink.allowPrivateNetwork` | ループバック／プライベートネットワークへの接続を許可します。既定はオフです |
+| `agentdesklink.allowUnredactedImages` | 無加工のネイティブ画像の取得を許可します。既定オンです（対応OSのみ） |
+| `agentdesklink.allowPhysicalInput` | 物理入力を許可します。既定オンで、`allowUnredactedImages` と対応OSが必要です。全アプリ許可がオンなら個別アプリの登録は不要です |
+| `agentdesklink.allowLoopback` / `agentdesklink.allowPrivateNetwork` | ループバック／プライベートネットワークへの接続を許可します。既定オンです |
 
 設定パネルの「現在の権限」で、適用されている許可を確認できます。観測だけを行う場合は、広い操作権限や物理入力を有効にする必要はありません。
+
+### 用途から選ぶ設定
+
+- **そのまま業務を実行**: 初期設定の「全操作」。URL・アプリの登録と保存ごとの承認は不要です。
+- **閲覧のみ**: 「読み取り専用」を選択。設定済みの閲覧専用はセットアップ完了として扱います。
+- **フォームの下書き**: 「下書き」を選択。書き込みが止まったら `save.state: draft_unsaved` を確認します。
+- **承認付き保存**: 「承認付き保存」を選択。全アプリ許可を解除し、ネイティブ操作は承認ホスト以外のアプリを個別指定します。fetch/XHR は承認後に再実行せず観測し、フォームは承認済みの同一操作だけを再試行します。
 
 ### 権限段階と個別承認
 
