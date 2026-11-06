@@ -2,12 +2,12 @@
 
 [日本語](INSTALL.md) | **English**
 
-Target version: `0.1.10` (beta)
+Target version: `0.1.11` (beta)
 
 ## Requirements
 
 - VS Code 1.101 or newer.
-- The common `agentdesklink-0.1.10.vsix` package. Check the [supported environments and known limitations](KNOWN_ISSUES_en.md).
+- The common `agentdesklink-0.1.11.vsix` package. Check the [supported environments and known limitations](KNOWN_ISSUES_en.md).
 - A network connection for the first Chromium download if Chrome is not installed.
 
 One VSIX bundles Node.js and image-processing libraries for macOS / Apple silicon, Windows x64 and Linux x64. It also includes the macOS, Windows and Linux desktop helpers (the Linux helper is a Python 3 script that needs the OS python3-gi packages). It selects the matching runtime at startup, so no separate build is needed.
@@ -16,13 +16,13 @@ The distribution file is shared across these operating systems. This common VSIX
 
 ## Installation
 
-1. Download `agentdesklink-0.1.10.vsix` and `SHA256SUMS` from the release page.
+1. Download `agentdesklink-0.1.11.vsix` and `SHA256SUMS` from the release page.
 2. Compute the SHA-256 using the [update guide](UPDATES_en.md) and confirm it matches the list.
 3. In the VS Code Command Palette, choose “Extensions: Install from VSIX...” and select the VSIX.
 4. Open the folder you want to use, review its contents and trust the workspace.
 5. Open **AgentDeskLink** in the activity bar on the left.
-6. Configure browser origins and operation permissions near the top of the panel. Use “Open Settings” for the desktop app and other settings. The Language selector switches between Japanese and English. See “Initial settings and scope” below.
-7. Turn on “Enable the AgentDeskLink MCP server for this workspace”.
+6. Review effective permissions. Fresh settings enable all supported operations, all URLs and applications without registration; choose Read only, Draft or Save with approval if needed.
+7. MCP is on by default in trusted workspaces. If previously disabled, turn on Enable MCP.
 8. Approve the server start in the VS Code MCP management view.
 
 ## Use Claude Code and other AI clients
@@ -37,26 +37,34 @@ External clients share the permissions of the workspace where **Enable all** was
 
 The following are workspace settings for the VS Code extension.
 
-MCP is disabled by default for every workspace. Enabling it grants no target access. Set browser origins and the operation permission tier in the panel. Read only is the default. Configure the desktop app, physical input and unredacted native images separately, enabling only the scope you need. No policy JSON is required.
+Trusted workspaces enable MCP, all supported operations, all http(s) URLs and applications, physical input, native images, loopback and private networks by default. No per-origin/application registration or policy JSON is needed. Explicit saved denials and previously selected restricted tiers are preserved. OS accessibility and screen-recording permissions remain necessary. Linux supports AT-SPI semantic control; native capture and physical input remain unsupported.
 
 | Setting | What to configure |
 | --- | --- |
-| `agentdesklink.browserOrigins` | Exact allowed `http(s)` origins, such as `https://example.com`, without paths or wildcards |
+| `agentdesklink.allowAllBrowserOrigins` / `agentdesklink.allowAllApplications` | On by default. Turn off to use individual origin/application grants |
+| `agentdesklink.browserOrigins` | When All URLs is off: exact allowed `http(s)` origins, such as `https://example.com`, without paths or wildcards |
 | `agentdesklink.browserResourceOrigins` | Origins permitted only for GET/HEAD subresources such as CDN assets, separately from navigation grants |
 | `agentdesklink.allowPersonalData` | Reveals personal data such as email and phone numbers. Defaults to off; credentials and protected regions remain protected |
 | `agentdesklink.desktopAppId` / `agentdesklink.desktopAppPath` | The ID and absolute executable path of one allowed app |
-| `agentdesklink.operationMode` | `read_only` (default), `standard` or `ask`, matching Read only, Standard and Ask each time in the panel |
+| `agentdesklink.operationMode` | `read_only`, `standard` (Draft) or `ask` (Save with approval); fresh settings use `allowAllOperations: true` |
 | `agentdesklink.consequentialAllowLabels` / `agentdesklink.consequentialDenyLabels` | Button and link labels never / always treated as consequential (up to 64 entries of 1–64 characters each). Entries match the whole label or a whole word; Japanese entries match as substrings. The deny list wins. Credential, real form-submission, file, download and protected-region checks are unaffected. Set them in settings.json |
-| `agentdesklink.allowAllOperations` | Legacy all-operations grant. Defaults to off and takes precedence over the tier when enabled. Selecting Allow all in the panel requires confirmation |
+| `agentdesklink.allowAllOperations` | All supported operations, on by default, including saves. Selecting a restricted tier turns this off. Turning it back on shows a confirmation |
 | `agentdesklink.browserHeadless` | Defaults to `true`. Set false for a visible browser and manual login |
 | `agentdesklink.sessionIdleMinutes` | Idle session timeout, 1–60 minutes; defaults to 15 |
 | `agentdesklink.browserProxyServer` | HTTP(S) proxy origin without credentials, path or query; defaults to empty |
 | `agentdesklink.browserProxyConnectByHostname` | Off by default; sends HTTPS CONNECT by hostname for proxies that grant hosts by name. Local DNS/IP and TLS checks remain enforced |
-| `agentdesklink.allowUnredactedImages` | Allows unredacted native images. Defaults to off |
-| `agentdesklink.allowPhysicalInput` | Allows physical input. Also requires a configured app and `allowUnredactedImages`. Defaults to off |
-| `agentdesklink.allowLoopback` / `agentdesklink.allowPrivateNetwork` | Allows loopback/private-network connections. Defaults to off |
+| `agentdesklink.allowUnredactedImages` | Allows unredacted native images. On by default on supported platforms |
+| `agentdesklink.allowPhysicalInput` | Physical input is on by default and needs native-image permission and a supported OS. All applications avoids individual registration |
+| `agentdesklink.allowLoopback` / `agentdesklink.allowPrivateNetwork` | Allows loopback/private-network connections. On by default |
 
 Check “Current permissions” in the panel to see the effective grants. Observation alone does not require broad operation permissions or physical input.
+
+### Choose by task
+
+- **Run the task**: keep the default All operations; registration and per-save approval are unnecessary.
+- **View only**: choose Read only; an explicitly configured read-only tier completes setup.
+- **Draft a form**: choose Draft; `save.state: draft_unsaved` identifies blocked saving.
+- **Save with approval**: choose this tier; All applications turns off, and native targets must exclude the approval host. After fetch/XHR approval observe without replaying; a cancelled form submission retries only the approved identical action.
 
 ### Permission tiers and one-shot approvals
 

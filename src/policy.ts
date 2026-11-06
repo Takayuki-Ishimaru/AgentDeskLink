@@ -8,6 +8,7 @@ import {
   TEXT_REDACTION_RULES,
   PERSONAL_DATA_REDACTION_RULES,
   PERSONAL_LABEL_PATTERN,
+  PERSONAL_DATA_RULE_REASONS,
   BROWSER_PRIVACY_RULES,
 } from './privacy.js';
 import { POLICY_LABEL_PATTERN, NATIVE_LABEL_PATTERN, normalizeLabel } from './action-classifier.js';
@@ -107,6 +108,7 @@ const interactiveConfig = z
   );
 const desktopConfig = z
   .object({
+    allowAllApplications: z.boolean().optional(),
     allowAllOperations: z.boolean().optional(),
     restrictTargets: z.boolean().optional(),
     helperPath: absolutePath,
@@ -155,6 +157,7 @@ const policySchema = z
   .object({
     allowAllOperations: z.boolean().optional(),
     restrictTargets: z.boolean().optional(),
+    allowAllBrowserOrigins: z.boolean().optional(),
     browserHeadless: z.boolean().default(true),
     browserProxyServer: z
       .string()
@@ -228,6 +231,7 @@ const policySchema = z
     defaultTokenBudget: z.number().int().min(256).max(8_000).default(1_800),
     maxElements: z.number().int().min(1).max(1_000).default(500),
     actionTimeoutMs: z.number().int().min(100).max(120_000).default(10_000),
+    startupTimeoutMs: z.number().int().min(100).max(120_000).optional(),
     auditPath: z.string().min(1).max(4_096).optional(),
     windows: desktopConfig.optional(),
     macos: desktopConfig.optional(),
@@ -311,6 +315,11 @@ export function parsePolicy(input: unknown): PolicyConfig {
   const hidden = value.browserTargets.filter(t => t.classification !== 'PUBLIC' && t.classification !== 'INTERNAL');
   return {
     ...value,
+    startupTimeoutMs:
+      value.startupTimeoutMs ??
+      (typeof input === 'object' && input !== null && Object.hasOwn(input, 'actionTimeoutMs')
+        ? value.actionTimeoutMs
+        : 30_000),
     ...(hidden.length ? { hiddenTargetOrigins: [...new Set(hidden.map(t => new URL(t.url).origin))] } : {}),
     consequentialAllowLabels: normalizeLabelList(value.consequentialAllowLabels ?? []),
     consequentialDenyLabels: normalizeLabelList(value.consequentialDenyLabels ?? []),
@@ -382,7 +391,11 @@ export async function resolveAllowedAddresses(
       originKey(new URL(o)),
     ),
   );
-  if ((!policy.allowAllOperations || policy.restrictTargets) && !allowed.has(originKey(parsed)))
+  if (
+    !policy.allowAllBrowserOrigins &&
+    (!policy.allowAllOperations || policy.restrictTargets) &&
+    !allowed.has(originKey(parsed))
+  )
     throw new AdlError('E_POLICY_DENIED', 'origin_not_allowed');
 
   const literal = normalizeAddress(hostname);
@@ -592,10 +605,19 @@ export function redactElement(
   pageUrl?: string,
 ): Omit<Element, 'sensitive'> {
   const { sensitive, personal, ...safe } = element;
+  const reasons = new Set<string>();
+  for (const value of [element.name, element.value ?? '']) {
+    if (TEXT_REDACTION_RULES.some(([source]) => new RegExp(source, 'i').test(value))) reasons.add('credential');
+    if (!allowPersonalData)
+      PERSONAL_DATA_REDACTION_RULES.forEach(([source], index) => {
+        if (new RegExp(source, 'i').test(value)) reasons.add(PERSONAL_DATA_RULE_REASONS[index]!);
+      });
+  }
   safe.role = SAFE_ROLES.has(safe.role) ? safe.role : 'generic';
   const isText = BROWSER_PRIVACY_RULES.textRoles.some(role => role === safe.role);
   const secret = sensitive === true || isSensitiveLabel(safe.id) || (!isText && isSensitiveLabel(safe.name));
   if (secret) {
+    reasons.add(safe.protected ? 'protected_region' : 'credential');
     safe.name = safe.protected || isText ? REDACTED : redactString(safe.name, allowPersonalData);
     if (safe.value !== undefined && safe.value !== '') safe.value = REDACTED;
   } else {
@@ -608,8 +630,14 @@ export function redactElement(
     (personal ||
       (/^(textbox|searchbox|combobox)$/.test(safe.role) &&
         new RegExp(PERSONAL_LABEL_PATTERN, 'iu').test(safe.name.normalize('NFKC'))))
-  )
+  ) {
     safe.value = REDACTED;
+    reasons.add('personal_field');
+  }
+  if (!allowPersonalData && personal && isText && safe.name) {
+    safe.name = REDACTED;
+    reasons.add('personal_field');
+  }
   // A pre-redaction length neither describes readable text nor belongs on the wire.
   if (safe.text_length !== undefined && safe.name !== element.name) {
     if (element.name_truncated) delete safe.text_length;
@@ -630,7 +658,68 @@ export function redactElement(
         value: hidden && option.value !== '' ? REDACTED : redactString(option.value, allowPersonalData),
       };
     });
+  if (reasons.size) Object.assign(safe, { redaction_reasons: [...reasons] });
   return safe;
+}
+
+/** Native/synthetic snapshots also retain row/column relationships; do not rely on a flattened row alone. */
+export function redactElements(elements: readonly Element[], allowPersonalData = false, pageUrl?: string): Element[] {
+  if (allowPersonalData) return elements.map(e => redactElement(e, true, pageUrl) as Element);
+  const byId = new Map(elements.map(e => [e.id, e]));
+  const children = new Map<string, Element[]>();
+  for (const e of elements) {
+    if (!e.parent_id) continue;
+    const siblings = children.get(e.parent_id) ?? [];
+    siblings.push(e);
+    children.set(e.parent_id, siblings);
+  }
+  const label = new RegExp(BROWSER_PRIVACY_RULES.personalContextLabelPattern, 'iu');
+  const personal = new Set(elements.filter(e => e.personal).map(e => e.id));
+  const columns = new Map<string, Set<number>>();
+  for (const row of elements.filter(e => e.role === 'row')) {
+    const cells = (children.get(row.id) ?? []).filter(e => /^(cell|columnheader|rowheader)$/.test(e.role));
+    let rowLabel = false;
+    cells.forEach((cell, index) => {
+      if (rowLabel && cell.role !== 'columnheader' && cell.role !== 'rowheader') personal.add(cell.id);
+      if (label.test(cell.name.normalize('NFKC').trim())) {
+        rowLabel = true;
+        if (cell.role === 'columnheader' && row.parent_id) {
+          const indices = columns.get(row.parent_id) ?? new Set<number>();
+          indices.add(index);
+          columns.set(row.parent_id, indices);
+        }
+      }
+    });
+  }
+  for (const row of elements.filter(e => e.role === 'row')) {
+    const indices = row.parent_id ? columns.get(row.parent_id) : undefined;
+    if (!indices) continue;
+    const cells = (children.get(row.id) ?? []).filter(e => /^(cell|columnheader|rowheader)$/.test(e.role));
+    cells.forEach((cell, index) => {
+      if (cell.role === 'cell' && indices.has(index)) personal.add(cell.id);
+    });
+  }
+  const rowNames = new Map<string, string>();
+  for (const row of elements.filter(e => e.role === 'row')) {
+    let name = row.name;
+    for (const cell of children.get(row.id) ?? []) {
+      if (!personal.has(cell.id) || !cell.name) continue;
+      name = name.includes(cell.name) && !cell.name_truncated ? name.split(cell.name).join(REDACTED) : REDACTED;
+    }
+    if (name !== row.name) rowNames.set(row.id, name);
+  }
+  return elements.map(e => {
+    if (rowNames.has(e.id))
+      return {
+        ...redactElement({ ...e, name: rowNames.get(e.id)! }, false, pageUrl),
+        redaction_reasons: ['personal_field'],
+      } as Element;
+    let parent: string | undefined = e.id;
+    for (let depth = 0; parent && depth < 64; depth++, parent = byId.get(parent)?.parent_id) {
+      if (personal.has(parent)) return redactElement({ ...e, personal: true }, false, pageUrl) as Element;
+    }
+    return redactElement(e, false, pageUrl) as Element;
+  });
 }
 
 function assertNoRedacted(value: string): void {

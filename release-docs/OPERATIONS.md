@@ -1,6 +1,6 @@
 # 操作設定と承認 / Operation Settings and Approvals
 
-対象バージョン / Target version: `0.1.10`（ベータ版 / beta）
+対象バージョン / Target version: `0.1.11`（ベータ版 / beta）
 
 [インストールとはじめ方](INSTALL.md) | [Installation and first steps](INSTALL_en.md)
 
@@ -8,7 +8,8 @@
 
 | `agentdesklink.operationMode` | 動作 / Behavior |
 | --- | --- |
-| `read_only`（既定 / default） | 観測・移動・スクロール / Observe, navigate and scroll |
+| `allowAllOperations: true`（既定 / default） | 全対応操作・保存通信。URLとアプリも既定で全対象 / All supported operations and saves; all URL/application access is also the default |
+| `read_only` | 観測・移動・スクロール / Observe, navigate and scroll |
 | `standard` | 通常のブラウザ入力・クリックと JavaScript 内で処理するフォーム・GET の検索フォーム、許可したデスクトップアプリの機密・重要でないコントロールの操作。重要操作は拒否。ページが保存のために送る書き込み通信（fetch / XHR の POST・PUT・PATCH・DELETE）は遮断するため、多くの Web アプリはデータを保存できません / Ordinary browser inputs, clicks, forms handled within JavaScript and GET search forms, plus non-sensitive, non-consequential controls of the granted desktop app; consequential operations denied. Write requests a page sends to save data (fetch / XHR POST, PUT, PATCH, DELETE) are blocked, so most web apps cannot save changes |
 | `ask` | 通常操作に加え、検査可能な重要操作（ブラウザ、およびデスクトップアプリの削除・送信などのコントロール）を VS Code の確認画面で一度ずつ承認。操作中にページが送る書き込み通信は、送信を保留して内容を表示し、承認した内容だけを送信。確認画面でサイトへの書き込みを最長 30 分間まとめて許可することもできる / Ordinary inputs plus native VS Code approval for inspected consequential operations in the browser and on desktop-app controls such as delete or send. A write the page sends during an action is held unsent, shown to the human and sent only as approved; the dialog can also allow further writes to that site for up to 30 minutes |
 
@@ -132,15 +133,15 @@ The default masks Japanese postal codes, numbered addresses and labeled personal
 | --- | --- |
 | `agentdesklink.browserOrigins` | 移動を許可する完全な http(s) origin / Exact origins permitted for navigation |
 | `agentdesklink.browserResourceOrigins` | CDN など GET/HEAD のサブリソース専用。移動・送信の許可にはなりません / GET/HEAD subresources only; grants neither navigation nor submission |
-| `agentdesklink.allowLoopback` / `agentdesklink.allowPrivateNetwork` | 既定はオフ。接続先の正確な origin の許可も必要 / Off by default; exact destination origin grants are also required |
+| `agentdesklink.allowLoopback` / `agentdesklink.allowPrivateNetwork` | 既定オン。URLを限定した場合のみ正確な origin の許可も必要 / On by default; exact origin grants are needed when All URLs is off |
 | `agentdesklink.allowPersonalData` | 既定はオフ。個人情報の表示を許可。認証情報と明示保護は維持 / Off by default; reveals personal data while keeping credentials and protected regions protected |
 | `agentdesklink.browserHeadless` | `true`。`false` で可視起動 / Set false for a visible browser |
 | `agentdesklink.sessionIdleMinutes` | `15`。1〜60 分、利用中は延長 / 1–60 minutes, renewed on use |
 | `agentdesklink.browserProxyServer` | 空 / empty。認証・パス・クエリのない http(s) proxy origin / HTTP(S) proxy origin without credentials, path or query |
 | `agentdesklink.browserProxyConnectByHostname` | 既定はオフ。HTTPS の CONNECT をホスト名で送信。ローカル DNS/IP 検査と TLS 検証は維持 / Off by default; sends HTTPS CONNECT by hostname while preserving local DNS/IP and TLS checks |
 
-許可元はパネル上部で設定します。localhost を追加してもループバック許可は自動で有効になりません。表示言語は日英を切り替えられ、初期値は VS Code の言語に従います。可視起動・アイドル期限・プロキシは「詳細設定」にあります。
-Configure grants near the top of the panel. Adding localhost does not enable loopback permission automatically. Switch Japanese/English at the top; the initial language follows VS Code. Visible launch, idle timeout and proxy settings are under Advanced settings.
+初期状態では全URLを許可し、localhost も利用できます。許可範囲を限定する場合は、パネル上部の「すべてのURL」をオフにして origin を登録します。表示言語は日英を切り替えられ、初期値は VS Code の言語に従います。可視起動・アイドル期限・プロキシは「詳細設定」にあります。
+All URLs and loopback are on by default. Turn off All URLs and configure origins near the top to restrict access. Switch Japanese/English at the top; the initial language follows VS Code. Visible launch, idle timeout and proxy settings are under Advanced settings.
 
 可視ブラウザの手動ログインは `adl_handoff` の `pause` / `resume` を使用します。`ask` では、同じ origin のサイトスクリプト・フォーム通信を最大 120 秒許す専用確認が必要です。自動操作は停止したまま、再開または期限で通信許可を終了します。再開後は再観測し、新しい revision を使用してください。`standard` / `read_only` はこの通信許可を取得できません。
 For a manual login use `adl_handoff` with `pause` / `resume` in a visible browser. Ask requires separate approval for same-origin website scripts and forms to send requests for up to 120 seconds. Automation stays paused; resume or expiry ends the grant. Observe again and use the new revision after resuming. Standard and read-only modes cannot obtain this grant.
@@ -303,3 +304,41 @@ In Ask mode that creates an approval request and returns `request_id` plus the `
 Search forms are the exception and are sent without approval: a submission whose method is GET and that is recognised as a search form (a form with `role="search"`, a form with an input of `type="search"` or named `q`, `query` or `search`, or a control whose name contains `search` or 検索) goes through in Standard and Ask modes as an ordinary page navigation under the same origin grants.
 
 POST forms, controls whose name is consequential (such as "Delete"), forms with a credential field such as a password, and protected regions are not covered. See [known limitations](KNOWN_ISSUES_en.md).
+
+
+## 保存状態と復帰 / Save state and recovery
+
+初期状態の全操作では書き込み通信を許可します。制限する段階を選んだ場合も、入力成功を保存成功とみなしません。操作・承認結果と関連エラーの `save` を確認してください。
+All operations permits writes by default. An applied input is not proof of persistence; use the common `save` fields on action/approval results and related errors.
+
+| `save.state` | 意味 / Meaning | `next_step` と再実行 / Recovery |
+| --- | --- | --- |
+| `draft_unsaved` | 書き込みが止められ未保存 / Saving was blocked | `change_mode`。承認付き保存または全操作へ変更し、状態を確認 / Change the tier and inspect state |
+| `approval_pending` | 承認待ち / Waiting for approval | `wait_for_approval`。フォームが承認済みなら `retry_same_action` / Wait; an approved cancelled form uses retry_same_action |
+| `submitted` | 要求を送信済み。永続化の証明ではない / Request dispatched, persistence unverified | `observe`。fetch/XHRを起こした操作は繰り返さない / Observe without replaying the action |
+| `verification_required` | 結果の再確認が必要 / Verify the result | `observe`。取消しや拒否後も勝手に再送しない / Observe; never blindly resend after cancellation or refusal |
+
+`retry_action` が true の場合だけ、返されたrevisionで承認済みの同一操作を再試行します。fetch/XHRはページのhandlerが既に実行済みです。`sent: false` は全部を送信できたことを示しません。
+Only `retry_action: true` invites retrying the identical approved form at the returned revision. A fetch/XHR handler has already run. `sent: false` never confirms that the full set was dispatched.
+
+## 観測予算・候補検索 / Observation bytes and choice search
+
+`byte_budget`（1024〜32000）は返却するUTF-8 JSON全体の厳密なバイト上限です。`token_budget`（256〜8000）は互換の推定値で、その4倍をバイト上限にします。両方を指定すると引数エラーです。どちらも任意のモデルの実トークン上限ではありません。
+`byte_budget` bounds serialized UTF-8 JSON bytes; the legacy token_budget uses four bytes per unit. The arguments are exclusive and neither enforces a model-specific tokenizer limit.
+
+```json
+{"session_id":"s_…","byte_budget":7200,"options":{"element_id":"e1","query":"候補","offset":0,"limit":50}}
+```
+
+初回の `select` 候補は 100 件までです。`options_total` と `options_truncation` の `source_limit`／`field_limit`／`response_budget` を確認します。応答容量を増やして解消するのは `response_budget` です。上の検索は候補をマスクしてから行い、最大 10,000 件を調べ、`total`・`matched`・`next_offset` を返します。10,000 件を超える場合は `source_limited: true` を返します。祖先要素の保護領域も候補検索に適用します。
+Initial select observations retain 100 choices. Search/paging scans up to 10,000 masked choices, reports total/matched/next_offset and flags source_limited beyond that cap. A larger byte budget repairs response_budget omissions, not source or field limits.
+
+## デスクトップでの同時作業 / Concurrent desktop activity
+
+Windows の意味的操作は、人間の入力に伴うフォーカスやカーソルの変化がある場合も、対象を再確認してから操作します。説明できない変化、入力監視の異常、対象の置き換えでは停止します。停止後は対象を取得し直し、最新の状態を観測してください。背面での意味的操作も、アプリ自身の遅延動作まで含めた完全な非干渉は保証しません。
+
+Windows semantic actions recheck the target when focus or pointer changes accompany human input. Unexplained changes, unavailable input monitoring and target replacement stop operations. Rediscover the target and observe its latest state after a stop. Background semantic actions do not guarantee complete non-interference, including delayed effects from the application itself.
+
+`interactive_desktop` は実際のマウス・キーボードを共有します。人間の操作と並行して使わないでください。
+
+`interactive_desktop` shares the real mouse and keyboard. Do not use it concurrently with a person.

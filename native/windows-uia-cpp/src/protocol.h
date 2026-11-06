@@ -72,6 +72,9 @@ struct FocusProbe {
   std::string focus_identity;
   long long cursor_x = 0;
   long long cursor_y = 0;
+  // Monotonic sequence from the global low-level input hooks. This lets the
+  // protocol attribute focus/cursor changes to human desktop activity.
+  unsigned long long input_sequence = 0;
 };
 
 // Result of the session-less application lifecycle op. Only these three facts

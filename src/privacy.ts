@@ -1,6 +1,8 @@
 // Data-only DOM rules are passed to each serialized page probe and the isolated mask engine.
 // A PUBLIC child never removes an ancestor's explicit protection.
 export const BROWSER_PRIVACY_RULES = {
+  personalContextLabelPattern:
+    '^(?:氏名|お名前|姓名|姓|名|住所|所在地|郵便番号|メール(?:アドレス)?|電話(?:番号)?|full[ _-]?name|given[ _-]?name|family[ _-]?name|name|postal[ _-]?code|zip[ _-]?code|street[ _-]?address|address|e-?mail|phone(?:[ _-]?number)?)[ \\t]*[:：]?[ \\t]*$',
   regionSelector: '[data-adl-sensitive],[data-adl-classification="SECRET" i],[data-adl-classification="UNKNOWN" i]',
   textSkipSelector: 'input,textarea,select,option,optgroup,button,script,style',
   ancestorCap: 128,
@@ -72,15 +74,37 @@ export const TEXT_REDACTION_RULES: ReadonlyArray<readonly [string, string]> = [
 
 /** Personal data is independent from credentials and may be revealed by a trusted opt-in. */
 export const PERSONAL_DATA_REDACTION_RULES: ReadonlyArray<readonly [string, string]> = [
-  ['(?:氏名|お名前|姓名)([ \\t]*[:：=][ \\t]*)[^\\n\\r,，;；<>]{1,80}', '[redacted]'],
-  ['(?:住所|所在地)([ \\t]*[:：=][ \\t]*)[^\\n\\r,，;；<>]{1,160}', '[redacted]'],
-  ['(?<![0-9０-９])〒?[ \\t]*[0-9０-９]{3}[-－][0-9０-９]{4}(?![0-9０-９])', '[redacted]'],
+  // Keep the label, delimiters and field instructions. A row uses the same pipe separator as browser observations.
+  [
+    '((?:氏名|お名前|姓名)[ \\t]*[:：=|][ \\t]*)(?![ \\t]*(?:必須|任意|未入力|入力|漢字で|ひらがなで|カタカナで|全角で|半角で|記入|選択|例[:：]))[^\\n\\r,，;；<>|。]{1,80}',
+    '$1[redacted]',
+  ],
+  [
+    '((?:住所|所在地)[ \\t]*[:：=|][ \\t]*)(?![ \\t]*(?:必須|任意|未入力|入力|記入|選択|例[:：]))[^\\n\\r,，;；<>|。]{1,160}',
+    '$1[redacted]',
+  ],
+  // A labelled product code is not a postal address. Bare and explicitly labelled postal codes remain protected.
+  [
+    '(?<!(?:製品番号|製品コード|商品番号|商品コード|品番|SKU)[ \\t]*[:：=|][ \\t]*)(?<![0-9０-９])〒?[0-9０-９]{3}[-－][0-9０-９]{4}(?![0-9０-９])',
+    '[redacted]',
+  ],
   // Require a prefecture and a numbered street/block; a prefecture mentioned in ordinary prose remains readable.
   [
-    '(?:東京都|北海道|(?:京都|大阪)府|[一-龯]{2,3}県)[^\\s,，;；<>]{1,80}?[0-9０-９]+(?:丁目|番地?|号|[-－])[0-9０-９一-龯ァ-ヶーA-Za-z－-]{0,40}',
+    '(?:東京都|北海道|(?:京都|大阪)府|[一-龯]{2,3}県)[^\\s,，;；<>|0-9０-９]{1,30}?(?:市|区|町|村|郡)[^\\s,，;；<>|0-9０-９]{0,30}[0-9０-９]+(?:丁目|番地?|号|[-－])[0-9０-９一-龯ァ-ヶーA-Za-z－-]{0,40}',
     '[redacted]',
   ],
   ['[a-z0-9._%+-]+@[a-z0-9.-]+\\.[a-z]{2,}', '[redacted]'],
   ['\\b(?:employee|emp|staff|user|member)[ _-]?(?:id|no|number)\\s*[:=]\\s*[^\\s,;&]+', '[redacted]'],
   ['(?<![a-z0-9])(?:\\+\\d{1,3}[ -]?)?(?:\\(\\d{2,4}\\)|\\d{2,4})[ -]\\d{2,4}[ -]\\d{3,4}(?!\\d)', '[redacted]'],
 ];
+
+/** Stable explanations only; never include the original personal value in diagnostics. */
+export const PERSONAL_DATA_RULE_REASONS = [
+  'personal_name',
+  'personal_address',
+  'postal_code',
+  'personal_address',
+  'email',
+  'personal_identifier',
+  'phone',
+] as const;

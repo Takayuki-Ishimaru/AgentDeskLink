@@ -803,6 +803,28 @@ function hostState(over = {}) {
     status: { mcpError, runtimeError: '', desktopError: '', ...status },
   };
 }
+
+test('broad URL and application defaults are shown and can be turned off', async () => {
+  const p = panel('en');
+  p.state(
+    hostState({
+      origins: [],
+      mode: 'all',
+      flags: { allowAllBrowserOrigins: true, allowAllApplications: true },
+      settings: { allowAllBrowserOrigins: true, allowAllApplications: true },
+    }),
+  );
+  assert.match(p.get('ai-summary').textContent, /all websites/);
+  assert.match(p.get('ai-summary-extra').textContent, /all desktop applications/);
+  assert.equal(p.get('setup-checklist').hidden, true);
+  assert.equal(p.get('allow-all-browser-origins').checked, true);
+  p.get('allow-all-browser-origins').checked = false;
+  await p.get('allow-all-browser-origins').trigger('change');
+  assert.deepEqual(JSON.parse(JSON.stringify(p.messages.at(-1))), {
+    type: 'setAllowAllBrowserOrigins',
+    enabled: false,
+  });
+});
 const summaryOf = p => p.get('ai-summary').textContent;
 
 test('the summary states what the AI can do for read only, standard, ask and allow-all, and nothing more', () => {
@@ -824,7 +846,7 @@ test('the summary states what the AI can do for read only, standard, ask and all
     'AI は example.com を閲覧し、通常のクリックや入力ができます。送信や削除などの重要な操作と、ページが保存のために送る通信は、VS Code の確認画面で内容を承認した場合のみ実行されます（都度承認）。',
   );
   p.state(hostState({ mode: 'read_only', effectiveMode: 'all' }));
-  assert.match(summaryOf(p), /^AI は example\.com で、確認なしにあらゆる操作.*（すべて許可・旧設定）。$/);
+  assert.match(summaryOf(p), /^AI は example\.com で、確認なしにあらゆる操作.*（全操作）。$/);
   const en = panel('en');
   en.state(hostState({ mode: 'read_only' }));
   assert.equal(summaryOf(en), 'The AI can view example.com. It cannot click or type (read only).');
@@ -1114,6 +1136,11 @@ test('the checklist is shown on a fresh install, states done and to-do in words,
   assert.equal(p.get('setup-checklist').hidden, false, 'read only keeps the third step open');
   assert.equal(p.get('setup-state-tier').textContent, '未完了');
   assert.equal(p.get('setup-progress').textContent, '2/3 完了');
+  const confirmedReadOnly = hostState({ enabled: true, origins: ['https://example.com'], mode: 'read_only' });
+  confirmedReadOnly.settings.operationModeConfirmed = true;
+  p.state(confirmedReadOnly);
+  assert.equal(p.get('setup-progress').textContent, '3/3 完了');
+  assert.equal(p.get('setup-checklist').hidden, true, 'an explicitly configured read-only tier completes setup');
   p.state(hostState({ enabled: true, origins: ['https://example.com'], mode: 'standard' }));
   assert.equal(p.get('setup-checklist').hidden, true, 'complete setup hides the checklist');
   assert.equal(p.get('setup-reopen').hidden, true);

@@ -103,6 +103,7 @@ export class ApprovalBroker implements vscode.Disposable {
     private readonly ownerLabel: () => string,
     private readonly allowedOrigins: () => string[],
     private readonly allowedApplications: () => string[],
+    private readonly allowAllOrigins: () => boolean,
   ) {
     this.server = http.createServer(
       (req, res) => void this.handle(req, res).catch(() => this.reply(res, 400, { error: 'invalid request' })),
@@ -115,8 +116,9 @@ export class ApprovalBroker implements vscode.Disposable {
     ownerLabel: () => string,
     allowedOrigins: () => string[],
     allowedApplications: () => string[] = () => [],
+    allowAllOrigins: () => boolean = () => false,
   ): Promise<ApprovalBroker> {
-    const broker = new ApprovalBroker(contextCurrent, ownerLabel, allowedOrigins, allowedApplications);
+    const broker = new ApprovalBroker(contextCurrent, ownerLabel, allowedOrigins, allowedApplications, allowAllOrigins);
     await new Promise<void>((resolve, reject) => {
       broker.server.once('error', reject);
       broker.server.listen(0, '127.0.0.1', () => {
@@ -131,6 +133,20 @@ export class ApprovalBroker implements vscode.Disposable {
       });
     });
     return broker;
+  }
+  private originAllowed(origin: string): boolean {
+    try {
+      const url = new URL(origin);
+      return (
+        ['http:', 'https:'].includes(url.protocol) &&
+        url.origin === origin &&
+        !url.username &&
+        !url.password &&
+        (this.allowAllOrigins() || this.allowedOrigins().includes(origin))
+      );
+    } catch {
+      return false;
+    }
   }
   /** Pass these values only to the extension-managed MCP child process. */
   env(epoch: string): Record<string, string> {
@@ -378,7 +394,7 @@ export class ApprovalBroker implements vscode.Disposable {
           u.origin !== origin ||
           u.username ||
           u.password ||
-          !this.allowedOrigins().includes(origin)
+          !this.originAllowed(origin)
         )
           return;
       } catch {
@@ -443,7 +459,7 @@ export class ApprovalBroker implements vscode.Disposable {
           u.origin !== scope.origin ||
           u.username ||
           u.password ||
-          !this.allowedOrigins().includes(scope.origin)
+          !this.originAllowed(scope.origin)
         )
           return;
       } catch {
@@ -483,7 +499,7 @@ export class ApprovalBroker implements vscode.Disposable {
     const desktop = entry.summary.surface === 'desktop';
     const granted = desktop
       ? this.allowedApplications().includes(entry.summary.application ?? '')
-      : this.allowedOrigins().includes(entry.summary.origin ?? '');
+      : this.originAllowed(entry.summary.origin ?? '');
     if (
       entry.status !== 'pending' ||
       entry.epoch !== this.epoch ||
@@ -587,7 +603,7 @@ export class ApprovalBroker implements vscode.Disposable {
         entry.generation === this.generation &&
         this.contextCurrent();
       if (current && picked === labels.approve) entry.status = 'approved';
-      else if (current && scope && picked === labels.allowSite && this.allowedOrigins().includes(scope.origin)) {
+      else if (current && scope && picked === labels.allowSite && this.originAllowed(scope.origin)) {
         // The human approves this request and creates the standing grant in one choice; this request counts as the grant's first use.
         entry.status = 'approved';
         entry.grantedBy = this.createGrant(entry, scope.origin).id;
@@ -631,7 +647,7 @@ export class ApprovalBroker implements vscode.Disposable {
       entry.generation !== this.generation ||
       entry.expiresAt <= Date.now() ||
       !this.contextCurrent() ||
-      !this.allowedOrigins().includes(scope.origin)
+      !this.originAllowed(scope.origin)
     )
       return undefined;
     // pruneGrants() just ended every grant that is not live, and nothing awaits in between.
@@ -645,7 +661,7 @@ export class ApprovalBroker implements vscode.Disposable {
       grant.expiresAt > Date.now() &&
       grant.generation === this.generation &&
       grant.epoch === this.epoch &&
-      this.allowedOrigins().includes(grant.origin)
+      this.originAllowed(grant.origin)
     );
   }
   private useGrant(entry: Entry, grant: SiteGrant): void {

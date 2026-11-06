@@ -199,6 +199,7 @@ test('action result fields: network_blocked / subresources_blocked / write_block
       'network_blocked',
       'subresources_blocked',
       'write_blocked',
+      'save',
       'warnings',
       'observation',
     ]);

@@ -1,4 +1,6 @@
 #include "protocol.h"
+#include "uia_backend.h"
+#include "input_attribution.h"
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
@@ -360,6 +362,99 @@ void T_focus_change_invalidates() {
   CHECK(!s.open);
   CHECK_EQ(std::to_string(f.n_close), "1");
   CHECK_EQ(Code(adl::HandleRequest(SnapReq(sid), s, b, c, sd)), "E_NO_SESSION");
+}
+
+void T_human_desktop_change_is_attributed_and_keeps_session() {
+  g_test="physical_human_focus_and_cursor_change_during_action_is_allowed";
+  Fake f;Session s;s.target_id=kTarget;Backend b=MakeBackend(f);ControlsTable c=MakeControls();bool shutdown=false;
+  auto sid=OpenAndSnap(f,s,b,c,{MakeElem("FindButton","button")});const auto eid=s.elements.front().id;
+  FocusProbe before;before.foreground=100;before.focus_identity="old-focus";before.cursor_x=5;before.input_sequence=10;
+  FocusProbe human=before;human.foreground=200;human.focus_identity="new-focus";human.cursor_x=60;human.input_sequence=11;
+  f.probes={before,human};f.Reset();
+  auto r=HandleRequest(ActReq(sid,eid,s.revision,json({{"action","click"}})),s,b,c,shutdown);
+  CHECK_EQ(Code(r),"OK");CHECK(s.open);CHECK(!s.invalidated);CHECK_EQ(f.n_act,1);CHECK(f.n_revalidate>=2);
+}
+
+void T_delayed_human_desktop_change_is_attributed() {
+  g_test="delayed_human_focus_change_during_100ms_guard_is_allowed";
+  Fake f;Session s;s.target_id=kTarget;Backend b=MakeBackend(f);ControlsTable c=MakeControls();bool shutdown=false;
+  auto sid=OpenAndSnap(f,s,b,c,{MakeElem("FindButton","button")});const auto eid=s.elements.front().id;
+  FocusProbe before;before.foreground=100;before.focus_identity="old-focus";before.input_sequence=20;
+  FocusProbe human=before;human.foreground=200;human.focus_identity="new-focus";human.input_sequence=21;
+  f.probes={before,before,human};f.Reset();
+  auto r=HandleRequest(ActReq(sid,eid,s.revision,json({{"action","click"}})),s,b,c,shutdown);
+  CHECK_EQ(Code(r),"OK");CHECK(s.open);CHECK(!s.invalidated);CHECK(f.n_probe>=3);CHECK(f.n_revalidate>=2);
+}
+
+void T_input_without_state_change_is_preserved_for_delayed_focus() {
+  g_test="physical_input_without_immediate_state_change_remains_attributable";
+  Fake f;Session s;s.target_id=kTarget;Backend b=MakeBackend(f);ControlsTable c=MakeControls();bool shutdown=false;
+  auto sid=OpenAndSnap(f,s,b,c,{MakeElem("FindButton","button")});const auto eid=s.elements.front().id;
+  FocusProbe before;before.foreground=100;before.focus_identity="old-focus";before.input_sequence=3;
+  FocusProbe input=before;input.input_sequence=4;
+  FocusProbe focus=input;focus.focus_identity="new-focus";
+  f.probes={before,input,focus};f.Reset();
+  auto r=HandleRequest(ActReq(sid,eid,s.revision,json({{"action","click"}})),s,b,c,shutdown);
+  CHECK_EQ(Code(r),"OK");CHECK(s.open);CHECK(!s.invalidated);CHECK(f.n_probe>=3);
+}
+
+void T_one_input_can_explain_later_changes_in_other_categories() {
+  g_test="cursor_then_delayed_foreground_and_focus_share_one_physical_input";
+  Fake f;Session s;s.target_id=kTarget;Backend b=MakeBackend(f);ControlsTable c=MakeControls();bool shutdown=false;
+  auto sid=OpenAndSnap(f,s,b,c,{MakeElem("FindButton","button")});const auto eid=s.elements.front().id;
+  FocusProbe before;before.foreground=100;before.focus_identity="old-focus";before.cursor_x=5;before.input_sequence=8;
+  FocusProbe cursor=before;cursor.cursor_x=50;cursor.input_sequence=9;
+  FocusProbe focus=cursor;focus.foreground=200;focus.focus_identity="new-focus";
+  f.probes={before,cursor,focus};f.Reset();
+  auto r=HandleRequest(ActReq(sid,eid,s.revision,json({{"action","click"}})),s,b,c,shutdown);
+  CHECK_EQ(Code(r),"OK");CHECK(s.open);CHECK(!s.invalidated);CHECK(f.n_probe>=3);CHECK(f.n_revalidate>=3);
+}
+
+void T_second_focus_change_needs_new_input() {
+  g_test="second_focus_change_of_same_category_needs_new_physical_input";
+  Fake f;Session s;s.target_id=kTarget;Backend b=MakeBackend(f);ControlsTable c=MakeControls();bool shutdown=false;
+  auto sid=OpenAndSnap(f,s,b,c,{MakeElem("FindButton","button")});const auto eid=s.elements.front().id;
+  FocusProbe before;before.foreground=100;before.focus_identity="old-focus";before.input_sequence=12;
+  FocusProbe first=before;first.focus_identity="first-focus";first.input_sequence=13;
+  FocusProbe second=first;second.focus_identity="second-focus";
+  f.probes={before,first,second};f.Reset();
+  auto r=HandleRequest(ActReq(sid,eid,s.revision,json({{"action","click"}})),s,b,c,shutdown);
+  CHECK_EQ(Code(r),"E_FOCUS_CHANGED");CHECK(MayExec(r));CHECK(s.invalidated);CHECK(!s.open);CHECK_EQ(f.n_close,1);
+}
+
+void T_pre_action_input_cannot_attribute_state_change() {
+  g_test="input_already_present_before_action_cannot_be_reused";
+  Fake f;Session s;s.target_id=kTarget;Backend b=MakeBackend(f);ControlsTable c=MakeControls();bool shutdown=false;
+  auto sid=OpenAndSnap(f,s,b,c,{MakeElem("FindButton","button")});const auto eid=s.elements.front().id;
+  FocusProbe before;before.foreground=100;before.focus_identity="old-focus";before.input_sequence=21;
+  FocusProbe changed=before;changed.focus_identity="new-focus";
+  f.probes={before,changed};f.Reset();
+  auto r=HandleRequest(ActReq(sid,eid,s.revision,json({{"action","click"}})),s,b,c,shutdown);
+  CHECK_EQ(Code(r),"E_FOCUS_CHANGED");CHECK(MayExec(r));CHECK(s.invalidated);CHECK(!s.open);CHECK_EQ(f.n_close,1);
+}
+
+void T_later_provider_focus_change_still_fails_after_human_input() {
+  g_test="later_provider_focus_change_is_not_masked_by_prior_human_input";
+  Fake f;Session s;s.target_id=kTarget;Backend b=MakeBackend(f);ControlsTable c=MakeControls();bool shutdown=false;
+  auto sid=OpenAndSnap(f,s,b,c,{MakeElem("FindButton","button")});const auto eid=s.elements.front().id;
+  FocusProbe before;before.foreground=100;before.focus_identity="old-focus";before.input_sequence=4;
+  FocusProbe human=before;human.foreground=200;human.focus_identity="human-focus";human.input_sequence=5;
+  FocusProbe provider=human;provider.focus_identity="provider-focus";
+  f.probes={before,human,provider};f.Reset();
+  auto r=HandleRequest(ActReq(sid,eid,s.revision,json({{"action","click"}})),s,b,c,shutdown);
+  CHECK_EQ(Code(r),"E_FOCUS_CHANGED");CHECK(s.invalidated);CHECK(!s.open);CHECK_EQ(f.n_close,1);
+}
+
+void T_human_change_requires_original_target_revalidation() {
+  g_test="human_focus_change_closes_session_if_original_target_no_longer_valid";
+  Fake f;Session s;s.target_id=kTarget;Backend b=MakeBackend(f);ControlsTable c=MakeControls();bool shutdown=false;
+  auto sid=OpenAndSnap(f,s,b,c,{MakeElem("FindButton","button")});const auto eid=s.elements.front().id;
+  FocusProbe before;before.foreground=100;before.focus_identity="old-focus";
+  FocusProbe human=before;human.foreground=200;human.focus_identity="human-focus";human.input_sequence=1;
+  f.probes={before,human};f.Reset();
+  b.revalidate=[](void* p,Session&){auto& fake=*static_cast<Fake*>(p);++fake.n_revalidate;return fake.n_revalidate==1?Status::Ok():Status::Fail("E_TARGET_NOT_FOUND","original target closed");};
+  auto r=HandleRequest(ActReq(sid,eid,s.revision,json({{"action","click"}})),s,b,c,shutdown);
+  CHECK_EQ(Code(r),"E_FOCUS_CHANGED");CHECK(MayExec(r));CHECK(s.invalidated);CHECK(!s.open);CHECK_EQ(f.n_close,1);
 }
 
 void T_failed_action_uncertainty() {
@@ -996,6 +1091,28 @@ void T_allow_all_keeps_state_guards() {
   CHECK(!s.open);
 }
 
+void T_all_apps_broadens_discovery_without_mutation_grant() {
+  g_test="all_apps_broadens_target_enumeration_without_allow_all_controls";
+  ControlsTable controls;
+  CHECK(BroadTargetEnumeration(true,false,false));
+  CHECK(BroadTargetEnumeration(true,false,true));
+  CHECK(!BroadTargetEnumeration(false,false,false));
+  CHECK(BroadTargetEnumeration(false,true,false));
+  CHECK(!BroadTargetEnumeration(false,true,true));
+  CHECK(!controls.allow_all);
+}
+
+void T_injected_input_does_not_attribute_human_state_change() {
+  g_test="physical_input_attribution_excludes_injected_events";
+  constexpr std::uint32_t mouse_injected=0x00000001;
+  constexpr std::uint32_t keyboard_injected=0x00000010;
+  CHECK(IsPhysicalInput(0,mouse_injected));
+  CHECK(IsPhysicalInput(0,keyboard_injected));
+  CHECK(!IsPhysicalInput(mouse_injected,mouse_injected));
+  CHECK(!IsPhysicalInput(keyboard_injected,keyboard_injected));
+  CHECK(!IsPhysicalInput(mouse_injected|0x00000002,mouse_injected));
+}
+
 // --- trusted --operation-mode standard|ask tiers (argv only; approved is the one protocol field) ---
 void T_standard_tier_vocabulary_gates() {
   g_test = "standard_tier_permits_ordinary_refuses_consequential_and_sensitive";
@@ -1097,6 +1214,14 @@ const TestCase kTests[] = {
     {"separator_names_cannot_collide_signature", T_separator_collision},
     {"successful_fill_and_click_delegate_exactly_once", T_success_delegates_once},
     {"post_probe_change_invalidates_with_uncertainty", T_focus_change_invalidates},
+    {"physical_human_focus_cursor_change_is_attributed", T_human_desktop_change_is_attributed_and_keeps_session},
+    {"delayed_human_focus_change_during_guard_is_attributed", T_delayed_human_desktop_change_is_attributed},
+    {"physical_input_without_immediate_state_change_is_preserved", T_input_without_state_change_is_preserved_for_delayed_focus},
+    {"one_input_can_explain_delayed_other_categories", T_one_input_can_explain_later_changes_in_other_categories},
+    {"second_same_category_change_requires_new_input", T_second_focus_change_needs_new_input},
+    {"pre_action_input_cannot_be_reused", T_pre_action_input_cannot_attribute_state_change},
+    {"later_provider_focus_change_not_masked_by_human_input", T_later_provider_focus_change_still_fails_after_human_input},
+    {"human_focus_change_revalidates_original_target", T_human_change_requires_original_target_revalidation},
     {"delayed_post_probe_change_invalidates_with_uncertainty", T_delayed_focus_change_invalidates},
     {"failed_action_may_have_executed_invalidates", T_failed_action_uncertainty},
     {"snapshot_output_bounded_to_64KiB_with_flag", T_output_truncation},
@@ -1112,6 +1237,8 @@ const TestCase kTests[] = {
     {"allow_all_defaults_false_and_strict_denies_unlisted_submit", T_allow_all_default_and_strict_denial},
     {"allow_all_empty_table_permits_supported_enabled_action", T_allow_all_permits_unlisted_controls},
     {"allow_all_still_denies_disabled_stale_unknown_and_unsupported", T_allow_all_keeps_state_guards},
+    {"all_apps_broadens_discovery_without_mutation_grant", T_all_apps_broadens_discovery_without_mutation_grant},
+    {"physical_input_attribution_excludes_injected_events", T_injected_input_does_not_attribute_human_state_change},
 };
 
 }  // namespace

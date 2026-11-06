@@ -36,14 +36,24 @@ export interface Settings {
   allowUnredactedImages: boolean;
   allowLoopback: boolean;
   allowPrivateNetwork: boolean;
+  allowAllBrowserOrigins: boolean;
+  allowAllApplications: boolean;
   consequentialAllowLabels: string[];
   consequentialDenyLabels: string[];
 }
 
 export function readSettings(): Settings {
   const c = vscode.workspace.getConfiguration('agentdesklink');
+  const selectedMode = c.inspect?.<OperationMode>('operationMode');
+  const selectedAll = c.inspect?.<boolean>('allowAllOperations');
+  const explicitMode = selectedMode?.workspaceFolderValue ?? selectedMode?.workspaceValue ?? selectedMode?.globalValue;
+  const explicitAll = selectedAll?.workspaceFolderValue ?? selectedAll?.workspaceValue ?? selectedAll?.globalValue;
+  const configured = (key: string) => {
+    const value = c.inspect?.<boolean>(key);
+    return value?.workspaceFolderValue ?? value?.workspaceValue ?? value?.globalValue;
+  };
   return {
-    enabled: c.get<boolean>('enabled', false),
+    enabled: c.get<boolean>('enabled', true),
     syncClients: c.get<boolean>('syncClients', false),
     autoUpdate: c.get<boolean>('autoUpdate', true),
     checkForUpdates: c.get<boolean>('checkForUpdates', true),
@@ -51,17 +61,26 @@ export function readSettings(): Settings {
     browserHeadless: c.get<boolean>('browserHeadless', true),
     browserProxyServer: c.get<string>('browserProxyServer', ''),
     browserProxyConnectByHostname: c.get<boolean>('browserProxyConnectByHostname', false),
-    operationMode: c.get<OperationMode>('operationMode', 'read_only'),
+    operationMode: c.get<OperationMode>('operationMode', 'standard'),
     browserOrigins: c.get<string[]>('browserOrigins', []),
     browserResourceOrigins: c.get<string[]>('browserResourceOrigins', []),
     allowPersonalData: c.get<boolean>('allowPersonalData', false),
     desktopAppId: c.get<string>('desktopAppId', ''),
     desktopAppPath: c.get<string>('desktopAppPath', ''),
-    allowAllOperations: c.get<boolean>('allowAllOperations', false),
-    allowPhysicalInput: c.get<boolean>('allowPhysicalInput', false),
-    allowUnredactedImages: c.get<boolean>('allowUnredactedImages', false),
-    allowLoopback: c.get<boolean>('allowLoopback', false),
-    allowPrivateNetwork: c.get<boolean>('allowPrivateNetwork', false),
+    allowAllOperations:
+      explicitMode !== undefined && explicitAll === undefined ? false : c.get<boolean>('allowAllOperations', true),
+    allowPhysicalInput:
+      explicitMode !== undefined && explicitAll !== true && configured('allowPhysicalInput') === undefined
+        ? false
+        : c.get<boolean>('allowPhysicalInput', true),
+    allowUnredactedImages: c.get<boolean>('allowUnredactedImages', true),
+    allowLoopback: c.get<boolean>('allowLoopback', true),
+    allowPrivateNetwork: c.get<boolean>('allowPrivateNetwork', true),
+    allowAllBrowserOrigins: c.get<boolean>('allowAllBrowserOrigins', true),
+    allowAllApplications:
+      explicitMode === 'ask' && explicitAll !== true && configured('allowAllApplications') === undefined
+        ? false
+        : c.get<boolean>('allowAllApplications', true),
     consequentialAllowLabels: c.get<string[]>('consequentialAllowLabels', []),
     consequentialDenyLabels: c.get<string[]>('consequentialDenyLabels', []),
   };
@@ -81,6 +100,8 @@ function grantInput(s: Settings): ExtensionPermissions {
     allowUnredactedImages: s.allowUnredactedImages,
     allowLoopback: s.allowLoopback,
     allowPrivateNetwork: s.allowPrivateNetwork,
+    allowAllBrowserOrigins: s.allowAllBrowserOrigins,
+    allowAllApplications: s.allowAllApplications,
     consequentialAllowLabels: s.consequentialAllowLabels,
     consequentialDenyLabels: s.consequentialDenyLabels,
   };

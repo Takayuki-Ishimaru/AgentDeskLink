@@ -11,6 +11,37 @@ import { initializeOperationState, readOperationState, writeOperationState } fro
 const payload = (result: unknown): any => JSON.parse((result as { content: { text: string }[] }).content[0]!.text);
 
 test(
+  'standalone fresh defaults allow URLs and operations, while an explicitly empty envelope denies them',
+  { timeout: 15000 },
+  async () => {
+    const env = Object.fromEntries(
+      Object.entries(process.env).filter(
+        (entry): entry is [string, string] => entry[1] !== undefined && !entry[0].startsWith('ADL_'),
+      ),
+    );
+    for (const empty of [false, true]) {
+      const client = new Client({ name: 'fresh-defaults', version: '1' }, { versionNegotiation: { mode: 'legacy' } });
+      const transport = new StdioClientTransport({
+        command: process.execPath,
+        args: ['dist/src/server.js'],
+        cwd: process.cwd(),
+        stderr: 'pipe',
+        env: { ...env, ...(empty ? { ADL_MCP_PERMISSIONS: '' } : {}) },
+      });
+      try {
+        await client.connect(transport);
+        transport.stderr?.on('data', () => {});
+        const result = payload(await client.callTool({ name: 'adl_capabilities', arguments: {} }));
+        assert.equal(result.permissions.all_operations, !empty);
+        assert.equal(result.permissions.origins === 'all_allowed', !empty);
+      } finally {
+        await client.close();
+      }
+    }
+  },
+);
+
+test(
   'real stdio legacy blanket flag and malformed permissions grant no target access',
   { timeout: 15000 },
   async () => {

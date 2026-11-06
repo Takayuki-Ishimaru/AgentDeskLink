@@ -2,9 +2,11 @@
 
 [日本語](KNOWN_ISSUES.md) | **English**
 
-Target version: `0.1.10`
+Target version: `0.1.11`
 
 This beta is provided for a limited range of use. It is not guaranteed to work with every application or operating system configuration.
+
+Fresh trusted-workspace settings permit all supported operations, all http(s) URLs and applications, and native images and physical input on supported operating systems. These grants do not add unsupported features or replace operating system permissions. Use the panel to narrow permissions when needed.
 
 ## Reading and action limitations
 
@@ -14,6 +16,8 @@ This beta is provided for a limited range of use. It is not guaranteed to work w
 - Replacement DOM nodes receive new IDs. Matching by name alone could silently retarget an action.
 - Returning an action diff can take up to 400 ms. Check the next observation for save results or other messages that appear later. Paragraph, link and list-item content can partly overlap in the response.
 - Personal-data masking uses known formats and labels; arbitrary names and addresses cannot all be recognized.
+- Initial `select` observations retain at most 100 choices. Search and pagination with `options` scan up to 10,000 choices and return `source_limited: true` beyond that cap. A larger response capacity can resolve `response_budget` in `options_truncation`, but cannot recover `source_limit` or `field_limit` omissions.
+- `byte_budget` limits UTF-8 JSON bytes. The legacy `token_budget` sets a byte limit four times its value; it does not guarantee the token count of a particular AI model.
 
 ## Supported environments
 
@@ -43,6 +47,8 @@ Ubuntu's user-namespace restrictions may require additional sandbox setup for au
 - Emergency stop applies to extension-managed servers and cannot undo processing already dispatched to an application. Stop manually launched servers through their MCP host.
 
 ## Browser approvals and manual interaction
+
+The write-holding and blocking rules below apply when All operations is off. All operations permits writes as well. Target scope, explicitly protected regions and operating system limitations still apply.
 
 - The form-submission approval covers one inspected URL-encoded form POST. Multipart and files remain unsupported, and page handlers that change the payload cause refusal.
 - In Ask mode, a fetch / XHR write (POST, PUT, PATCH, DELETE) the page sends during an action is held unsent, and you can approve it after reviewing its content (`request_requires_approval`; the AI waits with `adl_approvals` and does not repeat the action). This covers writes from the main frame to the session origin or an allowed origin, with no body or a JSON, URL-encoded or text/plain body of at most 64 KiB. At most 4 requests per action and 25 lines in all are shown.

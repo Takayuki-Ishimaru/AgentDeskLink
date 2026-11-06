@@ -232,15 +232,17 @@ def usage(message):
 
 
 def parse_args(argv):
-    opts = {'app_id': None, 'app_path': None, 'allow_all': False, 'controls': None, 'mode': None, 'release': False}
+    opts = {'app_id': None, 'app_path': None, 'allow_all': False, 'all_apps': False, 'controls': None, 'mode': None, 'release': False}
     i = 0
     while i < len(argv):
         arg = argv[i]
         if arg == '--release-input':
             opts['release'] = True
-        elif arg in ('--allow-all', '--restrict-targets', '--visual-enabled', '--lifecycle-enabled'):
+        elif arg in ('--allow-all', '--all-apps', '--restrict-targets', '--visual-enabled', '--lifecycle-enabled'):
             if arg == '--allow-all':
                 opts['allow_all'] = True
+            elif arg == '--all-apps':
+                opts['all_apps'] = True
         elif arg in ('--app-id', '--app-path', '--controls-file', '--operation-mode', '--interactive-config'):
             if i + 1 >= len(argv):
                 usage('missing value for ' + arg)
@@ -391,10 +393,11 @@ class Prerequisites:
 
 
 class Backend:
-    def __init__(self, prereq, app_id, app_path):
+    def __init__(self, prereq, app_id, app_path, all_apps=False):
         self.prereq = prereq
         self.app_id = app_id
         self.app_path = os.path.realpath(app_path)
+        self.all_apps = all_apps
         self.targets = {}
         self.sessions = {}
         self._toolkit_gtk4 = {}  # application accessible -> is GTK 4 (is_enabled needs it per node without a round trip each time)
@@ -544,13 +547,13 @@ class Backend:
         found = []
         for app in self.apps():
             try:
-                if (app.get_name() or '') != self.app_id:
+                if not self.all_apps and (app.get_name() or '') != self.app_id:
                     continue
                 pid = app.get_process_id()
             except Exception:
                 continue
             identity = proc_identity(pid)
-            if identity is None or identity[0] != self.app_path:
+            if identity is None or (not self.all_apps and identity[0] != self.app_path):
                 continue
             found.append((pid, identity[1], app))
         return found
@@ -560,7 +563,7 @@ class Backend:
         if target is None:
             raise HelperError('E_NO_TARGET', 'unknown target')
         identity = proc_identity(target['pid'])
-        if identity is None or identity != (self.app_path, target['start']):
+        if identity is None or identity != (target.get('path', self.app_path), target['start']):
             self.drop_target(target_id)
             raise HelperError('E_TARGET_NOT_FOUND', 'the application process ended or was replaced')
         window = target['window']
@@ -583,7 +586,7 @@ class Backend:
         window = target['window']
         bounds = self.extents(window) or {'x': 0, 'y': 0, 'width': 0, 'height': 0}
         bounds['coordinate_space'] = 'desktop_physical_pixels'
-        return {'target_id': target['id'], 'application_id': self.app_id, 'label': self.name(window),
+        return {'target_id': target['id'], 'application_id': target.get('application_id', self.app_id), 'label': self.name(window),
                 'window': {'bounds': bounds, 'display_ids': display_ids_for(target['pid']), 'minimized': self.has(window, 'ICONIFIED')}}
 
     # ---- operations -----------------------------------------------------------
@@ -597,11 +600,18 @@ class Backend:
                         continue
                 except Exception:
                     continue
-                existing = next((t for t in self.targets.values() if t['pid'] == pid and t['start'] == start and t['window'] == window), None)
+                identity = proc_identity(pid)
+                if identity is None or identity[1] != start or (not self.all_apps and identity[0] != self.app_path):
+                    continue
+                existing = next((t for t in self.targets.values() if t['pid'] == pid and t['start'] == start and t.get('path', self.app_path) == identity[0] and t['window'] == window), None)
                 target = existing or {'id': 't_' + secrets.token_hex(12), 'pid': pid, 'start': start, 'app': app, 'window': window}
+                target['path'] = identity[0]
+                target['application_id'] = (app.get_name() or identity[0].rsplit('/', 1)[-1])[:128] if self.all_apps else self.app_id
                 seen[target['id']] = target
                 if len(seen) >= MAX_TARGETS:
                     break
+            if len(seen) >= MAX_TARGETS:
+                break
         for target_id in list(self.targets):
             if target_id not in seen:
                 self.drop_target(target_id)
@@ -1150,7 +1160,7 @@ def main():
     controls = load_controls(opts['controls']) if opts['controls'] is not None else None
     policy = Policy(opts['allow_all'], controls, opts['mode'])
     prereq = Prerequisites()
-    backend = Backend(prereq, opts['app_id'], opts['app_path'])
+    backend = Backend(prereq, opts['app_id'], opts['app_path'], opts['all_apps'])
     stdin = sys.stdin.buffer
     buffer = b''
     while True:

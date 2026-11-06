@@ -12,10 +12,10 @@ AgentDeskLink is an MCP server that connects AI agents to your local browser and
 
 [Get started](release-docs/INSTALL_en.md) · [What you can do](#what-you-can-do) · [Supported environments](#supported-environments) · [Release guide](release-docs/README_en.md) · [MIT License](LICENSE)
 
-> **0.1.10 / Beta**\
+> **0.1.11 / Beta**\
 > This beta is intended for a limited range of use. Before installing, review [supported environments and known limitations](release-docs/KNOWN_ISSUES_en.md).
 
-This version adds a read-only compatibility path for pages such as GitHub. It also improves deep-page reading and access to body text, concealed-text handling, Japanese personal-data masking, close/discard approvals, approval dialogs and error guidance. See [what changed](release-docs/RELEASE_NOTES_en.md) and the [operation settings and approval guide](release-docs/OPERATIONS.md).
+This version enables all operations by default in trusted workspaces and improves task-based permission selection and save-state guidance. It also adds long choice-list search and byte limits for observations, and improves personal-data masking in tables and definition lists and desktop discovery. See [what changed](release-docs/RELEASE_NOTES_en.md) and the [operation settings and approval guide](release-docs/OPERATIONS.md).
 
 ## What you can do
 
@@ -30,11 +30,11 @@ Drag inside the browser, touch swipes and timestamped continuous frame capture a
 
 ## Get started in VS Code
 
-1. Download the common `agentdesklink-0.1.10.vsix` package, then install it with "Extensions: Install from VSIX".
+1. Download the common `agentdesklink-0.1.11.vsix` package, then install it with "Extensions: Install from VSIX".
 2. Open a folder and trust the workspace.
 3. Open **AgentDeskLink** in the activity bar.
-4. Choose **Open Settings** and configure the allowed browser origins or desktop app and the operation permissions you need.
-5. Turn on **Enable MCP for this workspace**, then start the server from the MCP management view.
+4. Choose **Open Settings** and review Current permissions. All operations, all URLs and all applications are enabled by default. Choose Read only, Draft or Save with approval and narrow the targets when needed.
+5. MCP is on by default in a trusted workspace. If previously disabled, turn on **Enable MCP for this workspace**, then start the server from the MCP management view.
 
 **No separate Node.js installation or helper build is required.** The same VSIX includes the runtimes for all supported operating systems and selects one automatically at startup. Chrome runs in a dedicated profile, and if it is not found a dedicated Chromium is downloaded automatically on first use.
 
@@ -58,20 +58,20 @@ Clients share the permissions of the workspace where you last explicitly enabled
 
 On macOS and Windows you can also check the state of, launch and normally close the apps you have allowed. Apps launched on Windows are placed on a dedicated Win32 desktop. Launching and closing are available when explicitly permitted in a CLI policy.
 
-Linux desktop control is observation plus click / fill / check / select / scroll through the accessibility API (AT-SPI2) only. Physical input, window images and application launch/quit are unsupported and listed under `platform_unsupported` in `adl_capabilities`. The application ID is the AT-SPI application name and the path is the absolute executable (`readlink /proc/<pid>/exe`); see [Linux setup](release-docs/INSTALL_en.md#per-operating-system-preparation).
+Linux desktop control is observation plus click / fill / check / select / scroll through the accessibility API (AT-SPI2) only. Physical input, window images and application launch/quit are unsupported and listed under `platform_unsupported` in `adl_capabilities`. To limit targets with All applications off, use the AT-SPI application name as the application ID and the absolute executable path (`readlink /proc/<pid>/exe`); see [Linux setup](release-docs/INSTALL_en.md#per-operating-system-preparation).
 
 Which actions are available depends on your OS, app and display setup. See [supported environments and known limitations](release-docs/KNOWN_ISSUES_en.md) for details.
 
 ## Decide how far it can reach
 
-- **Off by default.** MCP connection permission is separate from target access. Configure browser origins and the desktop app per workspace. Physical input and unredacted native images each default to off.
+- **Ready to operate by default.** Trusted workspaces enable MCP, all supported operations, all http(s) URLs and applications, physical input, native images, loopback and private networks. Explicit existing denials are preserved. OS accessibility and screen-recording permissions are still required.
 - **No configuration file is required.** The VS Code extension uses its bundled profile. When launching the CLI directly, configure targets and actions in a policy JSON.
 - **Keep it apart from your everyday browser.** No human profile or sign-in state is shared.
 - **Physical input uses a dedicated mode.** `interactive_desktop` uses your real mouse and keyboard, so do not run it alongside your own input.
 
-Choose **Read only / Standard / Ask**. Standard permits ordinary input, clicks and forms handled within JavaScript. Real GET/POST form submissions require approval, and Ask asks only when a submission actually happens (GET search forms are the exception and are sent without approval). Standard also blocks the write requests a page sends to save data (fetch / XHR POST, PUT, PATCH, DELETE), so most web apps cannot save changes. Ask holds such a write the page sends during an action before it leaves, shows its method, URL and body (secrets masked) and sends only the approved content, once. Consequential actions are recognised by the control's verb (delete, send, pay, unsubscribe, log out…) and by real form submissions; links that only navigate within the same origin and a dialog's Cancel are ordinary. Adjust the classification with `consequentialAllowLabels` / `consequentialDenyLabels`. Ask binds each approval to the exact target, input and form contents. In the main document, unrelated clock updates preserve approval; target, form or document changes, expiry and emergency stop invalidate it. Open Shadow DOM and same-origin iframes are supported. The same tiers apply to native actions in the granted desktop app (macOS, Windows and Linux): Standard operates only non-sensitive, non-consequential controls, and Ask approves consequential controls such as delete or send one at a time, bound to the target, control name and observed revision. Sensitive controls such as password fields are never operated, even with approval. Closed shadow roots and out-of-process iframe proofs remain unsupported. The legacy explicit all-operations setting takes precedence when enabled.
+Fresh settings use **All operations**. Choose **Read only / Draft (Standard) / Save with approval (Ask)** to restrict operations; the following describes those restricted modes. Standard permits ordinary input, clicks and forms handled within JavaScript. Real GET/POST form submissions require approval, and Ask asks only when a submission actually happens (GET search forms are the exception and are sent without approval). Standard also blocks the write requests a page sends to save data (fetch / XHR POST, PUT, PATCH, DELETE), so most web apps cannot save changes. Ask holds such a write the page sends during an action before it leaves, shows its method, URL and body (secrets masked) and sends only the approved content, once. Consequential actions are recognised by the control's verb (delete, send, pay, unsubscribe, log out…) and by real form submissions; links that only navigate within the same origin and a dialog's Cancel are ordinary. Adjust the classification with `consequentialAllowLabels` / `consequentialDenyLabels`. Ask binds each approval to the exact target, input and form contents. In the main document, unrelated clock updates preserve approval; target, form or document changes, expiry and emergency stop invalidate it. Open Shadow DOM and same-origin iframes are supported. The same tiers apply to native actions in the granted desktop app (macOS, Windows and Linux): Standard operates only non-sensitive, non-consequential controls, and Ask approves consequential controls such as delete or send one at a time, bound to the target, control name and observed revision. Sensitive controls such as password fields are never operated, even with approval. Closed shadow roots and out-of-process iframe proofs remain unsupported. All operations is on by default. Selecting a narrower tier turns it and physical input off. Save with approval also turns off All applications so the AI cannot operate its approval host.
 
-Configure trusted grants near the top of the panel. `browserOrigins` grants navigation targets; `browserResourceOrigins` separately grants CDN assets for GET/HEAD loading. Localhost needs both its exact origin and `allowLoopback`. Personal data is masked by default; explicitly enable `allowPersonalData` to reveal email addresses and phone numbers. Credentials and explicitly protected regions remain protected.
+Origin registration is unnecessary while All URLs is on; turn it off to restrict access. `browserOrigins` grants navigation targets; `browserResourceOrigins` separately grants CDN assets for GET/HEAD loading. Localhost is on by default; when origins are restricted it needs an exact origin and `allowLoopback`. Personal data is masked by default; explicitly enable `allowPersonalData` to reveal email addresses and phone numbers. Credentials and explicitly protected regions remain protected.
 
 Use `adl_observe` with `text: {element_id, offset, length}` to read beyond a clipped name. Offsets refer to redacted text. `adl_act` with `include_diff: true` returns immediate changes and switches to a full observation (`reset: true`) after a navigation. `network_blocked` means the action's own traffic was blocked; unrelated subresource blocks are counted in `subresources_blocked`. `write_blocked: true` means a write the page sent was blocked, so what the screen shows was not saved. `ok: true` acknowledges input, not application success or that anything was saved. After an action the server waits until the requests it started have finished and the page has stopped changing (at most 400 ms) before computing the diff. Warnings are reported once, and an action response carries only the blocks that action caused. In Standard mode, writes such as fetch POST remain blocked even for search.
 
@@ -85,7 +85,7 @@ Bundled Node starts with `--use-system-ca`. Destination DNS/IP validation remain
 
 Browser regions marked `data-adl-sensitive` or `data-adl-classification="SECRET"` / `"UNKNOWN"` protect their descendants as well. Neither a child marked `PUBLIC` nor `allowAllOperations` removes that protection. Semantic observations redact protected content, and actions within these regions are denied. Browser captures and retained crops mask them. These explicit markers complement automatic detection.
 
-If a select candidate list exceeds the observation budget, the control retains its name and current state and reports `options_truncated: true`. Reobserve with `scope: "id:<element_id>"` and a larger `token_budget` to retrieve candidates, or omit `options` from `include`. At most 100 candidates are collected; reaching that source limit or clipping candidate text also sets this flag. Check it even when the last cursor page has `truncated: false`.
+Select observations report `options_total` and `options_truncation` (`source_limit`, `field_limit`, `response_budget`). Use `options: {element_id, query, offset, limit}` in `adl_observe` to search and page live choices beyond the initial 100. `byte_budget` caps serialized UTF-8 JSON bytes; the legacy `token_budget` is one quarter of that byte cap, not an actual tokenizer limit. They are mutually exclusive.
 
 ## Try it from source
 

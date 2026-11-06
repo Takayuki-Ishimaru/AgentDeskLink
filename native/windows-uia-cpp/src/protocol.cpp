@@ -423,18 +423,39 @@ std::string DoAct(const json& rid, const json& doc, Session& s, const Backend& b
   // Providers may enqueue an asynchronous handler after Invoke returns.
   // Observe the bounded completion interval; never replay the semantic action.
   const auto settled=std::chrono::steady_clock::now()+std::chrono::milliseconds(act_status.ok()||act_status.may_have_executed ? 100 : 0);
+  FocusProbe previous=before;
+  auto last_foreground_input=before.input_sequence;
+  auto last_focus_input=before.input_sequence;
+  auto last_cursor_input=before.input_sequence;
   for (;;) {
     Status post_probe=b.probe(b.ctx,s,after);
     if (!post_probe.ok()) {
       s.invalidated=true;b.close(b.ctx,s);s.open=false;
       return Err(rid,post_probe.code,StatusErr(post_probe),true);
     }
-    if (before.foreground!=after.foreground || before.focus_identity!=after.focus_identity ||
-        before.cursor_x!=after.cursor_x || before.cursor_y!=after.cursor_y) {
-      s.invalidated=true;b.close(b.ctx,s);s.open=false;
-      return Err(rid,"E_FOCUS_CHANGED","foreground, focus or cursor changed during completion; session invalidated",true);
+    const bool foreground_changed=previous.foreground!=after.foreground;
+    const bool focus_changed=previous.focus_identity!=after.focus_identity;
+    const bool cursor_changed=previous.cursor_x!=after.cursor_x || previous.cursor_y!=after.cursor_y;
+    if (foreground_changed || focus_changed || cursor_changed) {
+      // Coexist with ordinary human desktop activity only when independent
+      // low-level hooks observed untagged input for every changed state category,
+      // and the original bound target still revalidates. Keep attribution per
+      // category: an input event may precede its focus update by one or more
+      // probes, and one event can explain separate cursor/focus/foreground
+      // updates while a second update of the same category still needs new input.
+      if ((foreground_changed && after.input_sequence<=last_foreground_input) ||
+          (focus_changed && after.input_sequence<=last_focus_input) ||
+          (cursor_changed && after.input_sequence<=last_cursor_input) ||
+          !b.revalidate(b.ctx, s).ok()) {
+        s.invalidated=true;b.close(b.ctx,s);s.open=false;
+        return Err(rid,"E_FOCUS_CHANGED","foreground, focus or cursor changed without attributable human input; session invalidated",true);
+      }
+      if(foreground_changed)last_foreground_input=after.input_sequence;
+      if(focus_changed)last_focus_input=after.input_sequence;
+      if(cursor_changed)last_cursor_input=after.input_sequence;
     }
     if(std::chrono::steady_clock::now()>=settled)break;
+    previous=after;
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
   }
   if (!act_status.ok()) {

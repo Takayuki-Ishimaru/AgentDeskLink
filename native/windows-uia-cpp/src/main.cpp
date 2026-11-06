@@ -122,6 +122,8 @@ int Run(int argc, char** argv) {
       cfg.lifecycle_enabled = true;
     } else if (a == "--allow-all") {
       cfg.allow_all = true;
+    } else if (a == "--all-apps") {
+      cfg.all_apps = true;
     } else if (a == "--restrict-targets") {
       cfg.restrict_targets = true;
     } else if (a == "--lifecycle-worker") {
