@@ -516,9 +516,8 @@ test('ask: a navigation aborts the held write silently', { timeout: 60000 }, asy
 test('ask: a page that navigates away right after its write never gets it sent', { timeout: 60000 }, async () => {
   const f = await fixture();
   try {
-    // "Save and leave" posts and then navigates 50 ms after the click. Usually the document that asked is gone before the window
-    // closes (nothing to hand over, and no write block: the request died with its document); on a slow machine the commit can come
-    // later, and then the set it handed over dies with the document. Either way nothing is sent.
+    // "Save and leave" posts and navigates 50 ms later. The request can be denied before the new document commits, silently
+    // abandoned when the document changes, or returned as a hold that dies with the document. None of those paths may send it.
     const outcome = await f.click('Save and leave').then(
       value => ({ value }),
       (error: unknown) => ({ error }),
@@ -527,11 +526,17 @@ test('ask: a page that navigates away right after its write never gets it sent',
     if ('error' in outcome) {
       assert.ok(outcome.error instanceof HeldWritesError, String(outcome.error));
       id = outcome.error.hold.id;
-    } else assert.deepEqual(blocksOf(outcome.value), [], 'no write block');
+    }
     await until(async () => (await f.session.snapshot()).title === 'Other', 'the page to have left');
     await sleep(200);
     sentNothing(f.requests);
     assert.equal(f.session.heldWritesAlive!(id ?? 'anything'), false);
+    if ('value' in outcome) {
+      const blocks = blocksOf(outcome.value);
+      if (blocks.length) {
+        assert.deepEqual(blocks, [{ code: 'request_denied', count: 1, method: 'POST', resource_type: 'fetch' }]);
+      }
+    }
   } finally {
     await f.close();
   }

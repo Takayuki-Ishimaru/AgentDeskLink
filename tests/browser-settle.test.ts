@@ -160,7 +160,28 @@ test(
   { timeout: 60000 },
   async () => {
     const f = await fixture(
-      `<!doctype html><p id="tick">0</p><button onclick="window.clicked=true">Go</button><script>setInterval(()=>{document.getElementById('tick').textContent=String(Math.random())},10)</script>`,
+      `<!doctype html><p id="tick">0</p><button id="go">Go</button>
+      <script>
+        const tick = document.getElementById('tick');
+        document.getElementById('go').onclick = () => {
+          // Keep producing mutations past the assertion's upper bound. Posted tasks yield to
+          // the browser's other work without relying on its background timer frequency.
+          const end = performance.now() + ${3 * SETTLE_MAX_MS};
+          const channel = new MessageChannel();
+          let count = 0;
+          const mutate = () => {
+            if (performance.now() >= end) {
+              channel.port1.close();
+              channel.port2.close();
+              return;
+            }
+            tick.textContent = String(++count);
+            channel.port2.postMessage(null);
+          };
+          channel.port1.onmessage = mutate;
+          mutate();
+        };
+      </script>`,
     );
     try {
       const { timing } = await f.act('Go');
