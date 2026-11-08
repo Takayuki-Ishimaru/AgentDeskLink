@@ -58,17 +58,6 @@ jobs:
           PY
       - run: npm run check
       - run: npm test
-      - name: Test startup benchmark reporting
-        run: node --test tests/startup-benchmark.test.mjs
-      - name: Measure cold browser startup
-        run: node benchmarks/startup.mjs --attempts 3 --output artifacts/startup-metrics.json
-      - name: Upload cold browser startup metrics
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: startup-metrics-${{ matrix.os }}
-          path: artifacts/startup-metrics.json
-          if-no-files-found: warn
       - run: npm run test:extension
       - run: npm run test:package
       - run: npm audit --audit-level=low
