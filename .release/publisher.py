@@ -478,6 +478,8 @@ def main(argv=None) -> int:
     parser.add_argument("--notes", type=Path)
     parser.add_argument("--out", type=Path)
     parser.add_argument("--plan", type=Path)
+    parser.add_argument("--review", type=Path)
+    parser.add_argument("--gitleaks", default="gitleaks")
     args = parser.parse_args(argv)
     cfg = load_config(args.config)
     if cfg.get("repo") != REPO or cfg.get("version") != VERSION:
@@ -497,6 +499,16 @@ def main(argv=None) -> int:
     actual = subprocess.check_output(["git", "-C", str(args.source), "rev-parse", "HEAD"], text=True).strip()
     if actual != cfg["source_sha"]:
         _fail("source checkout is not the validated commit")
+    if args.review is None or args.notes is None:
+        _fail("publishing requires the private human review and the reviewed release notes")
+    from release_preflight import verify_publication
+
+    assets_dir = Path(plan["assets"][VSIX_NAME]["path"]).resolve().parent
+    reviewed = verify_publication(args.source, assets_dir, args.notes, args.review, args.gitleaks)
+    if reviewed["source_sha"] != cfg["source_sha"] or reviewed["release_note_sha256"] != cfg["body_sha"]:
+        _fail("review does not match the publication source and notes")
+    if reviewed["asset_sha256"] != {name: asset["sha256"] for name, asset in plan["assets"].items()}:
+        _fail("review does not match the publication assets")
     result = publish(plan, GhApi(plan["repo"]))
     print(json.dumps(result))
     return 0
