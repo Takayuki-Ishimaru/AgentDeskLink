@@ -1,6 +1,7 @@
 export type SaveState = {
   state: 'draft_unsaved' | 'approval_pending' | 'submitted' | 'verification_required';
-  next_step: 'wait_for_approval' | 'retry_same_action' | 'observe' | 'change_mode';
+  /** explicit_save asks the caller to use the page's Save control in a new action. */
+  next_step: 'wait_for_approval' | 'retry_same_action' | 'observe' | 'change_mode' | 'explicit_save';
   retry_action: boolean;
 };
 
@@ -20,7 +21,9 @@ export function saveAfterError(reason?: string, approved = false): SaveState | u
       next_step: approved ? 'retry_same_action' : 'wait_for_approval',
       retry_action: approved,
     };
-  if (reason === 'method_requires_approval' || reason === 'background_write_blocked')
+  if (reason === 'background_write_blocked')
+    return { state: 'draft_unsaved', next_step: 'explicit_save', retry_action: false };
+  if (reason === 'method_requires_approval')
     return { state: 'draft_unsaved', next_step: 'change_mode', retry_action: false };
   return undefined;
 }

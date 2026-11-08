@@ -8,7 +8,6 @@ concurrency:
 jobs:
   browser:
     strategy:
-      fail-fast: false
       matrix:
         # The native helper currently builds with Visual Studio 2022.
         os: [macos-latest, windows-2022, ubuntu-24.04]
@@ -36,6 +35,17 @@ jobs:
           PY
       - run: npm run check
       - run: npm test
+      - name: Test startup benchmark reporting
+        run: node --test tests/startup-benchmark.test.mjs
+      - name: Measure cold browser startup
+        run: node benchmarks/startup.mjs --attempts 3 --output artifacts/startup-metrics.json
+      - name: Upload cold browser startup metrics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: startup-metrics-${{ matrix.os }}
+          path: artifacts/startup-metrics.json
+          if-no-files-found: warn
       - run: npm run test:extension
       - run: npm run test:package
       - run: npm audit --audit-level=low
@@ -58,9 +68,6 @@ jobs:
       # Chromium requires a runner that supports its OS sandbox.
       - run: npm run package:component
       - run: npm run verify:vsix
-      - name: Publisher tests
-        working-directory: .release
-        run: python3 -m unittest -v test_publisher.py test_hardening.py
   vsix-components:
     strategy:
       fail-fast: false

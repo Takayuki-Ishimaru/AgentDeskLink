@@ -2,11 +2,11 @@
 
 [日本語](UPDATES.md) | **English**
 
-Target version: `0.1.11`
+Target version: `0.1.12`
 
 ## Updating from 0.1.2 or earlier
 
-A common VSIX has been used since version 0.1.3. This version uses `agentdesklink-0.1.11.vsix`. The updater in 0.1.2 and earlier does not recognize this filename. Download the common VSIX and `SHA256SUMS` from the official release page, verify the hash and install the VSIX manually. Reload the VS Code window after installation.
+A common VSIX has been used since version 0.1.3. This version uses `agentdesklink-0.1.12.vsix`. The updater in 0.1.2 and earlier does not recognize this filename. Download the common VSIX and `SHA256SUMS` from the official release page, verify the hash and install the VSIX manually. Reload the VS Code window after installation.
 
 After updating, follow the [installation guide](INSTALL_en.md) to review effective permissions. Trusted workspaces allow all operations, all URLs and all applications by default. Select a restricted tier and narrow the targets when needed. Explicit saved denials and existing restricted tiers are preserved.
 
@@ -37,7 +37,7 @@ Authenticated distribution sources are unsupported. If automatic updates are una
 This release attaches one VSIX:
 
 ```text
-agentdesklink-0.1.11.vsix
+agentdesklink-0.1.12.vsix
 ```
 
 The updater identifies it by this name, GitHub's `sha256:` digest and its canonical `https://github.com/Takayuki-Ishimaru/AgentDeskLink/releases/download/<tag>/<filename>` URL. It does not read a custom update-information file such as `update.json`.
@@ -49,19 +49,19 @@ Compare the SHA-256 of your downloaded file with the release's `SHA256SUMS`. Run
 macOS:
 
 ```sh
-shasum -a 256 agentdesklink-0.1.11.vsix
+shasum -a 256 agentdesklink-0.1.12.vsix
 ```
 
 Windows PowerShell:
 
 ```powershell
-Get-FileHash -Algorithm SHA256 .\agentdesklink-0.1.11.vsix | Format-List Hash
+Get-FileHash -Algorithm SHA256 .\agentdesklink-0.1.12.vsix | Format-List Hash
 ```
 
 Linux:
 
 ```sh
-sha256sum agentdesklink-0.1.11.vsix
+sha256sum agentdesklink-0.1.12.vsix
 ```
 
 If the hashes differ, do not install the file. Download it again from the official repository's release page.

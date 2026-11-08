@@ -173,7 +173,7 @@ type Store = {
   activity: number;
 };
 
-type BlockEntry = NetworkWarning & { seq: number };
+type BlockEntry = NetworkWarning & { seq: number; held?: true };
 
 /** A write request the network route keeps paused until a human decides on it (ask mode); bodies stay in the adapter. */
 type PausedWrite = {
@@ -227,7 +227,8 @@ type WriteWindow = {
 };
 
 /** The route's decision for a write: the code to block with (setId: the set whose hold ended, when there was one), or the permit to continue with. */
-type HoldVerdict = { block: string; setId?: string } | { expires: number | undefined; paused: PausedWrite };
+type HoldWindow = Pick<WriteWindow, 'id' | 'replacements'>;
+type HoldVerdict = { block: string; window?: HoldWindow } | { expires: number | undefined; paused: PausedWrite };
 
 /** Request classes that carry an action's own effect: main-frame fetch/XHR/document requests the page was not already making. */
 const SETTLE_RESOURCE_TYPES = new Set(['fetch', 'xhr', 'document']);
@@ -1122,7 +1123,8 @@ function snapshotPageFn(
         rawVal = edited.text;
       }
       if (rawVal.length > 4096) throw new Error('Snapshot field limit');
-      const value = isPassword ? undefined : clip(rawVal);
+      const hidePersonalChoices = tag === 'select' && personal && !cfg.allowPersonalData;
+      const value = isPassword ? undefined : hidePersonalChoices && rawVal ? '[redacted]' : clip(rawVal);
       const valueClipped = !isPassword && (rawVal.length > cfg.fieldMax || edited?.overflow === true);
       const hiddenText =
         (!sensitive &&
@@ -1269,7 +1271,15 @@ function snapshotPageFn(
           ...(textLength !== undefined && !inRegion && !concealedProse ? { text_length: textLength } : {}),
           ...(linkHref && !sensitive && !inRegion ? { href: linkHref } : {}),
           ...(valueClipped && !sensitive && !inRegion ? { value_truncated: true as const } : {}),
-          ...(options ? { options, ...(optionsTruncated ? { options_truncated: true } : {}) } : {}),
+          ...(options
+            ? {
+                // Keep the private evidence above sensitive to changes in option identities.
+                options: hidePersonalChoices
+                  ? options.map(option => ({ ...option, label: '[redacted]', value: '[redacted]' }))
+                  : options,
+                ...(optionsTruncated ? { options_truncated: true } : {}),
+              }
+            : {}),
           ...(optionsTotal !== undefined ? { options_total: optionsTotal } : {}),
           ...(optionsTruncation.length ? { options_truncation: optionsTruncation } : {}),
           ...(value !== undefined ? { value } : {}),
@@ -1380,10 +1390,11 @@ class BrowserSession implements AdapterSession {
   /** Main-frame navigations that replaced the document (not same-document ones): a write window opened before one cannot hand its holds over. */
   private documentReplacements = 0;
   /**
-   * windowId: the write window a hold's verdict belongs to; a verdict ending an earlier action's hold (a denial arriving while a later
+   * window: the write window a hold's verdict belongs to; a verdict ending an earlier action's hold (a denial arriving while a later
    * action runs) is not that action's block, so it goes to the document when the current window is another one.
    */
-  recordNetworkBlock(code: string, origin?: string, resource_type = 'other', method = 'GET', windowId?: string) {
+  recordNetworkBlock(code: string, origin?: string, resource_type = 'other', method = 'GET', window?: HoldWindow) {
+    if (window && window.replacements !== this.documentReplacements) return;
     if (origin) {
       try {
         origin = new URL(origin).origin;
@@ -1395,18 +1406,15 @@ class BrowserSession implements AdapterSession {
     const seq = ++this.blockSeq;
     // While an action's window lives its blocks belong to that action's result; any other block belongs to the document and is reported once by an observation.
     const ww = this.writeWindow;
-    this.addBlock(
-      ww && !ww.collected && (windowId === undefined || ww.id === windowId) ? ww.blocked : this.networkBlocks,
-      key,
-      {
-        code,
-        count: 1,
-        ...(origin ? { origin } : {}),
-        resource_type,
-        method,
-        seq,
-      },
-    );
+    this.addBlock(ww && !ww.collected && (!window || ww.id === window.id) ? ww.blocked : this.networkBlocks, key, {
+      code,
+      count: 1,
+      ...(origin ? { origin } : {}),
+      resource_type,
+      method,
+      seq,
+      ...(window ? { held: true } : {}),
+    });
   }
   /** Adds a block to a sink: the same block merges into its entry (count, latest occurrence); each class keeps up to 8 distinct entries, further ones only raise an existing entry's count, so action attribution never loses a block. */
   private addBlock(sink: Map<string, BlockEntry>, key: string, entry: BlockEntry): void {
@@ -1414,6 +1422,7 @@ class BrowserSession implements AdapterSession {
     if (old) {
       old.count = Math.min(old.count + entry.count, 999999);
       old.seq = Math.max(old.seq, entry.seq);
+      if (entry.held) old.held = true;
       return;
     }
     const action = isActionNetworkBlock(entry),
@@ -1595,7 +1604,7 @@ class BrowserSession implements AdapterSession {
     ww.collected = true;
     // The same order as the observation's list: what the action itself set in motion first.
     return [...ww.blocked.values()]
-      .map(({ seq: _seq, ...warning }) => warning)
+      .map(({ seq: _seq, held: _held, ...warning }) => warning)
       .sort((a, b) => Number(isActionNetworkBlock(b)) - Number(isActionNetworkBlock(a)));
   }
   /** The request as a human could be asked about it, or undefined when it cannot be described completely (or is not holdable at all). */
@@ -1722,7 +1731,7 @@ class BrowserSession implements AdapterSession {
     }
     const verdict = await decision;
     // Not counted as a containment block: a hold that ended is the human's or the page's doing. The block belongs to this set's window.
-    if (verdict !== 'release') return { block: verdict, setId: ww.id };
+    if (verdict !== 'release') return { block: verdict, window: ww };
     return { expires: paused.releaseExpires, paused };
   }
   /** A released request is about to be sent: it passed the guard, DNS and the expiry re-check. */
@@ -2045,7 +2054,9 @@ class BrowserSession implements AdapterSession {
       this.navigationPending = undefined;
       if (!pending) return;
       this.documentReplacements++;
-      for (const [key, warning] of this.networkBlocks) if (warning.seq <= pending.seq) this.networkBlocks.delete(key);
+      // Chromium can cancel an old held request after the navigation starts but before it commits.
+      for (const [key, warning] of this.networkBlocks)
+        if (warning.held || warning.seq <= pending.seq) this.networkBlocks.delete(key);
       this.abortAllHolds(DOCUMENT_REPLACED);
     });
     page.on('request', request => {
@@ -2058,8 +2069,7 @@ class BrowserSession implements AdapterSession {
     page.on('requestfinished', request => this.noteRequestEnd(request));
     page.on('requestfailed', request => {
       if (this.navigationPending?.request === request) this.navigationPending = undefined;
-      // A request the route still holds is gone once the page cancelled it. Playwright reports no failure for a navigation that
-      // replaces the document under a held request, which the framenavigated handler above covers.
+      // A request the route still holds is gone once the page cancels it. This may arrive before framenavigated.
       this.abandonHeld(request);
       this.noteRequestEnd(request);
     });
@@ -2440,7 +2450,7 @@ class BrowserSession implements AdapterSession {
     const url = redactUrl(urlBefore, this.policy.allowPersonalData),
       title = redactString(rawTitle, this.policy.allowPersonalData);
     const warnings = [...this.networkBlocks.values()]
-      .map(({ seq: _seq, ...warning }) => warning)
+      .map(({ seq: _seq, held: _held, ...warning }) => warning)
       .sort((a, b) => Number(isActionNetworkBlock(b)) - Number(isActionNetworkBlock(a)));
     const warningSeq = this.blockSeq;
     const httpStatus =
@@ -2632,7 +2642,7 @@ class BrowserSession implements AdapterSession {
     // The blocks no observation has reported yet, those of an action first. Reporting never changes the revision (the fingerprint
     // hashes blockSeq), a new block does.
     const warnings = [...this.networkBlocks.values()]
-      .map(({ seq: _seq, ...warning }) => warning)
+      .map(({ seq: _seq, held: _held, ...warning }) => warning)
       .sort((a, b) => Number(isActionNetworkBlock(b)) - Number(isActionNetworkBlock(a)));
     const warningSeq = this.blockSeq;
     const digest = (value: string) => crypto.createHash('sha256').update(value).digest('hex');
@@ -4053,7 +4063,10 @@ class BrowserSession implements AdapterSession {
 }
 
 /** Maps a failed Chromium launch to an ErrorReason and one bounded stderr line; stdout is the MCP protocol and stays untouched. */
-export function browserLaunchFailure(error: unknown): { reason?: 'browser_sandbox_unavailable'; log: string } {
+export function browserLaunchFailure(error: unknown): {
+  reason?: 'browser_sandbox_unavailable' | 'browser_executable_missing';
+  log: string;
+} {
   const message = error instanceof Error ? error.message : String(error ?? '');
   const head = message
     .split('\n')
@@ -4072,7 +4085,12 @@ export function browserLaunchFailure(error: unknown): { reason?: 'browser_sandbo
         reason: 'browser_sandbox_unavailable',
         log: `adl: Chromium launch failed: ${head} | The Chromium sandbox could not start: run the MCP server as a non-root user, or on Ubuntu 24.04 allow unprivileged user namespaces for the AppArmor profile (sysctl kernel.apparmor_restrict_unprivileged_userns=0).`,
       }
-    : { log: `adl: Chromium launch failed: ${head}` };
+    : {
+        ...(/executable does not exist|failed to launch[^\n]*\bENOENT\b/i.test(message)
+          ? { reason: 'browser_executable_missing' as const }
+          : {}),
+        log: `adl: Chromium launch failed: ${head}`,
+      };
 }
 
 export class BrowserAdapter implements Adapter {
@@ -4216,7 +4234,7 @@ export class BrowserAdapter implements Adapter {
       // Hard network boundary, installed before the first page exists.
       if (routesNetwork(this.policy)) {
         await context.route('**/*', async (route: Route) => {
-          const block = async (code: string, origin?: string, windowId?: string) => {
+          const block = async (code: string, origin?: string, window?: HoldWindow) => {
             let kind = 'other',
               verb = 'GET';
             try {
@@ -4224,7 +4242,7 @@ export class BrowserAdapter implements Adapter {
               kind = networkResourceType(blocked);
               verb = networkMethod(blocked.method());
             } catch {}
-            active.recordNetworkBlock(code, origin, kind, verb, windowId);
+            active.recordNetworkBlock(code, origin, kind, verb, window);
             await route.abort().catch(() => undefined);
           };
           // The write a human released: however this handler ends, the request is done with the route (heldWriteOutcome).
@@ -4303,7 +4321,7 @@ export class BrowserAdapter implements Adapter {
                   if ('block' in verdict)
                     return verdict.block === DOCUMENT_REPLACED
                       ? route.abort('aborted').catch(() => undefined)
-                      : block(verdict.block, undefined, verdict.setId);
+                      : block(verdict.block, undefined, verdict.window);
                   approvedExpires = verdict.expires ?? 0; // no expiry on a release fails closed at dispatch
                   releasedWrite = verdict.paused;
                 } else {

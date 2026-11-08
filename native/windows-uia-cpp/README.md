@@ -16,7 +16,7 @@ The helper is bound at launch to one configured application ID and exact full ex
 
 Each policy entry must name one supported UIA role as well as its allowed actions. The role is checked both in the snapshot and again during the bounded live-tree match before dispatch.
 
-Build with Visual Studio 2022 Build Tools, the Windows SDK, CMake 3.24 or newer, and .NET 8 for the fixture. CMake fetches nlohmann/json at the pinned 3.11.3 commit `9cca280a4d0ccf0c08f47a99aa71d1b0e52f8d03`; no ATL component is required.
+Build with Visual Studio 2022 Build Tools, the Windows SDK, CMake 3.24 or newer, and .NET 8 for the fixture. CMake fetches nlohmann/json at the pinned 3.12.0 release commit `55f93686c01528224f448c19128836e7df245f72`. The build requires no ATL component.
 
 ```powershell
 cmake -S . -B build -G "Visual Studio 17 2022" -A x64

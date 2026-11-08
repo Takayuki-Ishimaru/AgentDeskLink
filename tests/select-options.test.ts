@@ -104,6 +104,10 @@ test('option search uses masked labels and values and refuses protected controls
     const before = await f.engine.observe(f.session.session_id, { byte_budget: 32000 });
     const normal = before.elements!.find(e => e.role === 'combobox' && e.name === '色')!;
     const person = before.elements!.find(e => e.role === 'combobox' && e.name === '氏名')!;
+    assert.equal(person.value, '[redacted]');
+    assert.equal(person.options?.[0]?.label, '[redacted]');
+    assert.equal(person.options?.[0]?.value ?? person.options?.[0]?.label, '[redacted]');
+    assert.ok(!JSON.stringify(before).includes('架空'));
     const hidden = await f.engine.observe(f.session.session_id, {
       options: { element_id: normal.id, query: 'PRIVATE_CANARY' },
     });
@@ -125,25 +129,45 @@ test('option search uses masked labels and values and refuses protected controls
   }
 });
 
+test('personal select opt-in is consistent between capture and option search', { timeout: 30000 }, async () => {
+  const html =
+    '<select aria-label="Contact" autocomplete="section-order name"><option value="person-id">架空 表子</option></select>';
+  for (const allowPersonalData of [false, true]) {
+    const f = await fixture(html, { allowPersonalData });
+    try {
+      const initial = await f.engine.observe(f.session.session_id);
+      const select = initial.elements!.find(e => e.role === 'combobox' && e.name === 'Contact')!;
+      assert.equal(select.value, allowPersonalData ? 'person-id' : '[redacted]');
+      assert.equal(select.options?.[0]?.label, allowPersonalData ? '架空 表子' : '[redacted]');
+      const queried = await f.engine.observe(f.session.session_id, {
+        options: { element_id: select.id, query: 'person-id' },
+      });
+      assert.equal(queried.options?.matched, allowPersonalData ? 1 : 0);
+    } finally {
+      await f.close();
+    }
+  }
+});
+
 test(
   'Japanese table and definition-list values stay masked in observations and direct reads',
   { timeout: 30000 },
   async () => {
     const f = await fixture(
-      '<main aria-label="本文"><table><tr><th>氏名</th><th>状態</th></tr><tr><td><span>架空 表子</span></td><td>完了</td></tr></table><table><tr><th scope="row">住所</th><td>架空住所CANARY</td></tr></table><dl><dt>電話番号</dt><dd>PHONE_CANARY</dd></dl><p>氏名：必須項目です。漢字で入力してください。</p><p>製品番号：123-4567</p><p>東京都内で2026-11-04開催の勉強会</p></main>',
+      '<main aria-label="本文"><table><tr><th>氏名</th><th>状態</th></tr><tr><td><span>架空 表子</span></td><td>完了</td></tr></table><table><tr><th scope="row">住所</th><td>架空住所CANARY</td></tr></table><dl><dt>電話番号</dt><dd>PHONE_CANARY</dd></dl><p>電話番号：090-1234-5678</p><p>電話番号：09012345678</p><p>電話番号：０９０－１２３４－５６７８</p><p>氏名：必須項目です。漢字で入力してください。</p><p>製品番号：123-4567</p><p>東京都内で2026-11-04開催の勉強会</p></main>',
       { allowAllOperations: false, operationMode: 'read_only' },
     );
     try {
       const before = await f.engine.observe(f.session.session_id, { byte_budget: 32000 });
       const serialized = JSON.stringify(before);
-      for (const hidden of ['架空 表子', '架空住所CANARY', 'PHONE_CANARY'])
+      for (const hidden of ['架空 表子', '架空住所CANARY', 'PHONE_CANARY', '5678', '５６７８'])
         assert.ok(!serialized.includes(hidden), hidden);
       assert.ok(serialized.includes('必須項目'));
       assert.ok(serialized.includes('製品番号：123-4567'));
       assert.ok(serialized.includes('2026-11-04'));
       const main = before.elements!.find(e => e.role === 'main')!;
       const text = await f.engine.observe(f.session.session_id, { byte_budget: 32000, text: { element_id: main.id } });
-      for (const hidden of ['架空 表子', '架空住所CANARY', 'PHONE_CANARY'])
+      for (const hidden of ['架空 表子', '架空住所CANARY', 'PHONE_CANARY', '5678', '５６７８'])
         assert.ok(!JSON.stringify(text).includes(hidden), hidden);
       assert.ok(text.text?.content.includes('必須項目'));
       assert.equal(f.browser.startupDiagnostics().first_attempt_succeeded, true);

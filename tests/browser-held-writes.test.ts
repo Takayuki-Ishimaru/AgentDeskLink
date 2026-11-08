@@ -397,7 +397,7 @@ test(
     }),
 );
 
-test('ask: adl_execute stops at the step that held a write and leaves the rest unexecuted', { timeout: 120000 }, () =>
+test('ask: adl_execute exposes the resume point after a real browser write is released', { timeout: 120000 }, () =>
   scenario({ mode: 'ask' }, async (f, broker) => {
     const observed = await f.observe();
     const ids = ['Save JSON', 'Save XHR'].map(name => observed.elements!.find(e => e.name === name)!.id);
@@ -405,20 +405,31 @@ test('ask: adl_execute stops at the step that held a write and leaves the rest u
       ids.map(element_id => ({ session_id: f.id, action: 'click' as const, element_id })),
       { [f.id]: observed.revision },
     );
-    let task = f.engine.task(started.task_id);
-    for (; task.status === 'queued' || task.status === 'running'; task = f.engine.task(started.task_id))
-      await sleep(25);
-    assert.equal(task.status, 'failed', JSON.stringify(task));
+    const read = () => f.engine.task(started.task_id);
+    await until(() => read().status === 'blocked_on_approval', 'the batch to reach its approval');
+    const task = read();
     assert.deepEqual(
       task.results.map(r => r.status),
-      ['failed', 'not_executed'],
+      ['blocked_on_approval', 'not_executed'],
     );
-    assert.equal(task.error?.reason, 'request_requires_approval');
-    assert.equal(task.error?.retryable, false);
-    assert.equal(task.error?.request_id, broker.latest()!.request_id);
+    const id = broker.latest()!.request_id;
+    assert.equal(task.pending_request_id, id);
+    assert.equal(task.next_step_index, 1);
     assert.deepEqual(await f.calls(), { saveJson: 1 }, 'the second step never ran');
     assert.equal(broker.state.posts, 1);
     sentNothing(f.requests);
+    approve(broker, id);
+    assert.equal((await rows(f, id, 30000))[0]?.sent, true);
+    const resumed = read();
+    assert.equal(resumed.status, 'ready_to_resume');
+    assert.equal(resumed.pending_request_id, undefined);
+    assert.equal(resumed.next_step_index, 1);
+    assert.deepEqual(
+      resumed.results.map(r => r.status),
+      ['completed', 'not_executed'],
+    );
+    assert.equal(f.requests.length, 1);
+    assert.deepEqual(await f.calls(), { saveJson: 1 }, 'neither step was replayed');
   }),
 );
 

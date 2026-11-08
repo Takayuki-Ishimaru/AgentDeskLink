@@ -72,6 +72,14 @@ export const TEXT_REDACTION_RULES: ReadonlyArray<readonly [string, string]> = [
   ['(?<![a-z0-9/+=])(?=[a-z0-9/+]{0,39}[0-9])(?=[a-z0-9/+]{0,39}[g-z])[a-z0-9/+]{40}(?![a-z0-9/+=])', '[redacted]'],
 ];
 
+const PRODUCT_CODE_PREFIX = '(?:製品番号|製品コード|商品番号|商品コード|型番|品番|\\bSKU)[ \\t]*[:：=|][ \\t]*';
+const PHONE_LABEL_PREFIX =
+  '(?:電話(?:番号)?|携帯(?:電話)?(?:番号)?|\\bTEL\\.?|\\bphone(?:[ _-]?number)?)[ \\t]*[:：=|][ \\t]*';
+const DECIMAL = '[0-9０-９]';
+const PHONE_DASH = '[-－‐‑‒–—―−ー]';
+const PHONE_SEPARATOR = `(?:[ \\t]{0,4}${PHONE_DASH}[ \\t]{0,4}|[ \\t]{1,4})`;
+const SEPARATED_PHONE = `(?:[+＋]${DECIMAL}{1,3}${PHONE_SEPARATOR}?)?(?:[（(]${DECIMAL}{2,4}[）)]|${DECIMAL}{2,4})${PHONE_SEPARATOR}${DECIMAL}{2,4}${PHONE_SEPARATOR}${DECIMAL}{3,4}`;
+
 /** Personal data is independent from credentials and may be revealed by a trusted opt-in. */
 export const PERSONAL_DATA_REDACTION_RULES: ReadonlyArray<readonly [string, string]> = [
   // Keep the label, delimiters and field instructions. A row uses the same pipe separator as browser observations.
@@ -83,9 +91,12 @@ export const PERSONAL_DATA_REDACTION_RULES: ReadonlyArray<readonly [string, stri
     '((?:住所|所在地)[ \\t]*[:：=|][ \\t]*)(?![ \\t]*(?:必須|任意|未入力|入力|記入|選択|例[:：]))[^\\n\\r,，;；<>|。]{1,160}',
     '$1[redacted]',
   ],
-  // A labelled product code is not a postal address. Bare and explicitly labelled postal codes remain protected.
+  // A phone label supplies context for an unseparated number. Separated numbers also have a recognizable shape.
+  [`(${PHONE_LABEL_PREFIX})(?:${SEPARATED_PHONE}|[+＋]?${DECIMAL}{10,15})(?!${DECIMAL})`, '$1[redacted]'],
+  [`(?<!${PRODUCT_CODE_PREFIX})(?<![a-z0-9０-９+＋(（])${SEPARATED_PHONE}(?!${DECIMAL})`, '[redacted]'],
+  // Match a standalone postal code rather than the first two groups of a longer phone number.
   [
-    '(?<!(?:製品番号|製品コード|商品番号|商品コード|品番|SKU)[ \\t]*[:：=|][ \\t]*)(?<![0-9０-９])〒?[0-9０-９]{3}[-－][0-9０-９]{4}(?![0-9０-９])',
+    `(?<!${PRODUCT_CODE_PREFIX})(?<!${DECIMAL})〒?${DECIMAL}{3}[-－]${DECIMAL}{4}(?!${DECIMAL}|${PHONE_SEPARATOR}${DECIMAL})`,
     '[redacted]',
   ],
   // Require a prefecture and a numbered street/block; a prefecture mentioned in ordinary prose remains readable.
@@ -95,16 +106,16 @@ export const PERSONAL_DATA_REDACTION_RULES: ReadonlyArray<readonly [string, stri
   ],
   ['[a-z0-9._%+-]+@[a-z0-9.-]+\\.[a-z]{2,}', '[redacted]'],
   ['\\b(?:employee|emp|staff|user|member)[ _-]?(?:id|no|number)\\s*[:=]\\s*[^\\s,;&]+', '[redacted]'],
-  ['(?<![a-z0-9])(?:\\+\\d{1,3}[ -]?)?(?:\\(\\d{2,4}\\)|\\d{2,4})[ -]\\d{2,4}[ -]\\d{3,4}(?!\\d)', '[redacted]'],
 ];
 
 /** Stable explanations only; never include the original personal value in diagnostics. */
 export const PERSONAL_DATA_RULE_REASONS = [
   'personal_name',
   'personal_address',
+  'phone',
+  'phone',
   'postal_code',
   'personal_address',
   'email',
   'personal_identifier',
-  'phone',
 ] as const;

@@ -85,11 +85,12 @@ type Session = {
 export type Step = Action & { session_id: string; expected_revision?: number; condition?: Condition };
 type Task = {
   id: string;
-  status: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
+  status: 'queued' | 'running' | 'blocked_on_approval' | 'ready_to_resume' | 'completed' | 'failed' | 'cancelled';
   controller: AbortController;
   results: Record<string, unknown>[];
   error?: ReturnType<typeof safeError>;
-  created: number;
+  touched: number;
+  approval?: { requestId: string; sessionId: string; stepIndex: number; createdHold: boolean; ended?: EndedApproval };
 };
 type ApprovalProof = {
   proof: string;
@@ -157,10 +158,14 @@ type ApprovalRow = {
   granted?: ApprovalGrantedBy;
 };
 /** The agent's error for write requests held for a human: the handler has run, the request id is the way forward (never an identical retry). */
-function heldRequestError(requestId: string) {
-  const error = new AdlError('E_APPROVAL_REQUIRED', 'request_requires_approval', { page_script_ran: true });
-  error.requestId = requestId;
-  return error;
+class HeldRequestPendingError extends AdlError {
+  constructor(
+    requestId: string,
+    readonly createdHold = false,
+  ) {
+    super('E_APPROVAL_REQUIRED', 'request_requires_approval', { page_script_ran: true });
+    this.requestId = requestId;
+  }
 }
 const HELD_DETAIL_LINES = 25;
 const HELD_DETAIL_BYTES = 8192;
@@ -421,7 +426,7 @@ export class Engine {
         sessions: this.startup.snapshot(),
         ...(this.adapters.browser.startupDiagnostics ? { browser: this.adapters.browser.startupDiagnostics() } : {}),
       },
-      version: '0.1.11',
+      version: '0.1.12',
       transport: 'stdio',
       observation_budget: {
         unit: 'utf8_json_bytes',
@@ -756,7 +761,11 @@ export class Engine {
   ) {
     for (const [id, ended] of this.approvalEnded) if (ended.expires <= Date.now()) this.approvalEnded.delete(id);
     while (this.approvalEnded.size >= 128) this.approvalEnded.delete(this.approvalEnded.keys().next().value!);
-    this.approvalEnded.set(entry.request_id, { expires: entry.expires_at, status, summary: entry.summary, ...extra });
+    const ended = { expires: entry.expires_at, status, summary: entry.summary, ...extra };
+    this.approvalEnded.set(entry.request_id, ended);
+    if (entry.hold)
+      for (const task of this.tasks.values())
+        if (task.approval?.requestId === entry.request_id) task.approval.ended = ended;
   }
   /** Whether the broker approved this request through a standing site grant: only a request the engine itself offered the grant for (summary.grant) can be. */
   private grantedBy(entry: PendingApproval, reply: ApprovalReply): ApprovalGrantedBy | undefined {
@@ -1777,20 +1786,11 @@ export class Engine {
   }
   /** The row of a request that ended. Released held writes also report the page request's answer, waiting briefly for one that is still on its way. */
   private async endedRow(requestId: string, ended: EndedApproval, signal?: AbortSignal): Promise<ApprovalRow> {
-    const adapter = ended.hold?.adapter;
-    const outcome = () => (ended.hold ? adapter?.heldWriteOutcome?.(ended.hold.id) : undefined);
-    if (ended.sent && !ended.outcomeKnown && adapter?.heldWriteOutcome) {
+    if (ended.sent && !ended.outcomeKnown && ended.hold?.adapter.heldWriteOutcome) {
       // Only for a short while after the release: a request that is never answered does not slow every later report.
       const until = (ended.sentAt ?? 0) + HELD_RESPONSE_WAIT_MS;
-      while (!outcome() && Date.now() < until && !signal?.aborted)
+      while (!this.readHeldOutcome(ended) && Date.now() < until && !signal?.aborted)
         await delay(25, undefined, signal ? { signal } : undefined).catch(() => undefined);
-      const result = outcome();
-      if (result) {
-        ended.outcomeKnown = true;
-        if (result.response_status !== undefined) ended.response_status = result.response_status;
-        // Released is not sent: a request refused at dispatch (guard, DNS, the expiry re-check) never left, and a set is sent whole or not at all.
-        if ((result.refused ?? 0) > 0) ended.sent = false;
-      }
     }
     return {
       request_id: requestId,
@@ -1801,6 +1801,16 @@ export class Engine {
       ...(ended.response_status !== undefined ? { response_status: ended.response_status } : {}),
       ...(ended.granted ? { granted: ended.granted } : {}),
     };
+  }
+  private readHeldOutcome(ended: EndedApproval) {
+    if (!ended.sent || ended.outcomeKnown || !ended.hold?.adapter.heldWriteOutcome) return true;
+    const outcome = ended.hold.adapter.heldWriteOutcome(ended.hold.id);
+    if (!outcome) return false;
+    ended.outcomeKnown = true;
+    if (outcome.response_status !== undefined) ended.response_status = outcome.response_status;
+    // A released request can still be refused before dispatch by the guard, DNS or the expiry re-check.
+    if ((outcome.refused ?? 0) > 0) ended.sent = false;
+    return true;
   }
   /** Creates (or resolves) the approval for an action: always throws E_APPROVAL_REQUIRED with the new request id, or returns the expiry of the approval it consumed. */
   private async approvalFor(
@@ -2163,7 +2173,7 @@ export class Engine {
           await this.settleHold(entry, 'invalidated', true);
           throw unexpected;
         }
-        throw heldRequestError(entry.request_id);
+        throw new HeldRequestPendingError(entry.request_id, true);
       }
       await abort('invalidated');
       // The handler has run even though no request could be opened (another approval is pending, a limit, the broker): say so.
@@ -2314,7 +2324,7 @@ export class Engine {
       // The identical action while its writes are held for a human: the same request, nothing is dispatched again (the page's handler has run).
       const holding = this.approvalPending.get(s.id);
       if (holding?.hold && holding.hold.dispatchKey === this.requestKeyFor(s, action, true))
-        throw heldRequestError(holding.request_id);
+        throw new HeldRequestPendingError(holding.request_id);
       liveProof = await s.adapter.prepareAction(action, signal ?? this.master.signal);
       if (element?.sensitive) liveProof = { ...liveProof, risk: 'credential' };
       const sensitiveValue = typeof action.value === 'string' && describeApprovalValue(action.value).kind === 'secret';
@@ -2724,7 +2734,10 @@ export class Engine {
       this.validateAction(step, this.get(step.session_id).target.surface);
     }
     if (this.tasks.size >= 128) {
-      const done = [...this.tasks.values()].find(t => !['queued', 'running'].includes(t.status));
+      const done = [...this.tasks.values()].find(t => {
+        this.updateTaskApproval(t);
+        return !['queued', 'running', 'blocked_on_approval'].includes(t.status);
+      });
       if (done) this.tasks.delete(done.id);
       else throw new AdlError('E_RESOURCE_LIMIT', 'task_limit', { limit: 128 });
     }
@@ -2733,7 +2746,7 @@ export class Engine {
       status: 'queued',
       controller: new AbortController(),
       results: [],
-      created: Date.now(),
+      touched: Date.now(),
     };
     this.tasks.set(task.id, task);
     void Promise.resolve()
@@ -2759,6 +2772,26 @@ export class Engine {
             });
             task.results.push({ step_index, status: 'completed', ...result });
           } catch (error) {
+            if (error instanceof HeldRequestPendingError) {
+              const requestId = error.requestId!;
+              task.approval = {
+                requestId,
+                sessionId: step.session_id,
+                stepIndex: step_index,
+                createdHold: error.createdHold,
+                ended: this.approvalEnded.get(requestId),
+              };
+              task.status = 'blocked_on_approval';
+              task.results.push({
+                step_index,
+                status: 'blocked_on_approval',
+                save: saveAfterApproval('pending', undefined),
+              });
+              for (let i = step_index + 1; i < steps.length; i++)
+                task.results.push({ step_index: i, status: 'not_executed' });
+              if (task.controller.signal.aborted) this.cancelTaskApproval(task);
+              return;
+            }
             task.results.push({ step_index, status: 'failed', error: safeError(error) });
             throw error;
           }
@@ -2773,19 +2806,81 @@ export class Engine {
       });
     return { ok: true, task_id: task.id, status: task.status };
   }
+  private updateTaskApproval(task: Task) {
+    const approval = task.approval;
+    const ended = approval?.ended;
+    if (!ended) return;
+    const outcomeKnown = this.readHeldOutcome(ended);
+    if (!outcomeKnown && Date.now() < (ended.sentAt ?? 0) + HELD_RESPONSE_WAIT_MS) return;
+    const result = task.results[approval.stepIndex]!;
+    const save = outcomeKnown ? saveAfterApproval(ended.status, ended.sent) : saveAfterAction(false);
+    if (!ended.sent) {
+      if (task.status === 'blocked_on_approval' || task.status === 'ready_to_resume' || task.status === 'completed') {
+        task.status = 'failed';
+        task.touched = Date.now();
+        task.error = {
+          ...safeError(approvalRefusal(ended.status)),
+          retryable: false,
+          page_script_ran: true,
+          request_id: approval.requestId,
+          save,
+        };
+      }
+      Object.assign(result, { status: 'failed', save, ...(task.error ? { error: task.error } : {}) });
+    } else {
+      if (task.status === 'blocked_on_approval') {
+        task.status = approval.stepIndex + 1 < task.results.length ? 'ready_to_resume' : 'completed';
+        task.touched = Date.now();
+      }
+      Object.assign(result, { status: 'completed', save });
+    }
+  }
+  private cancelTaskApproval(task: Task) {
+    const approval = task.approval!;
+    const pending = this.approvalPending.get(approval.sessionId);
+    task.status = 'cancelled';
+    task.touched = Date.now();
+    if (approval.createdHold && pending?.hold && pending.request_id === approval.requestId)
+      void this.settleHold(pending, 'invalidated', true).catch(() => undefined);
+  }
   task(task_id: string, command: 'status' | 'cancel' = 'status') {
     const t = this.tasks.get(task_id);
-    if (!t || (!['queued', 'running'].includes(t.status) && Date.now() - t.created > this.policy.sessionTtlMs)) {
+    if (t) this.updateTaskApproval(t);
+    if (
+      !t ||
+      (!['queued', 'running', 'blocked_on_approval'].includes(t.status) &&
+        Date.now() - t.touched > this.policy.sessionTtlMs)
+    ) {
       this.tasks.delete(task_id);
       throw new AdlError('E_TARGET_NOT_FOUND');
     }
     if (command === 'cancel' && ['queued', 'running'].includes(t.status)) t.controller.abort();
+    if (command === 'cancel' && ['blocked_on_approval', 'ready_to_resume'].includes(t.status))
+      this.cancelTaskApproval(t);
+    const approval = t.approval;
+    const ended = approval?.ended;
+    const next = approval ? approval.stepIndex + 1 : t.results.length;
     return {
       ok: true,
       task_id: t.id,
       status: t.status,
       results: t.results.map(r => ({ ...r })),
       ...(t.error ? { error: t.error } : {}),
+      ...(approval
+        ? {
+            approval: {
+              request_id: approval.requestId,
+              status: ended?.status ?? 'pending',
+              ...(ended && (ended.outcomeKnown || !ended.sent || !ended.hold?.adapter.heldWriteOutcome)
+                ? { sent: ended.sent }
+                : {}),
+            },
+          }
+        : {}),
+      ...(approval && !ended && t.status === 'blocked_on_approval' ? { pending_request_id: approval.requestId } : {}),
+      ...(['blocked_on_approval', 'ready_to_resume'].includes(t.status) && next < t.results.length
+        ? { next_step_index: next }
+        : {}),
     };
   }
   close(session_id: string) {

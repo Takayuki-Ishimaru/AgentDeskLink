@@ -608,10 +608,15 @@ export function redactElement(
   const reasons = new Set<string>();
   for (const value of [element.name, element.value ?? '']) {
     if (TEXT_REDACTION_RULES.some(([source]) => new RegExp(source, 'i').test(value))) reasons.add('credential');
-    if (!allowPersonalData)
-      PERSONAL_DATA_REDACTION_RULES.forEach(([source], index) => {
-        if (new RegExp(source, 'i').test(value)) reasons.add(PERSONAL_DATA_RULE_REASONS[index]!);
+    if (!allowPersonalData) {
+      // Diagnose on the text each earlier rule leaves, so a phone reports phone and not also postal_code.
+      let rest = value;
+      PERSONAL_DATA_REDACTION_RULES.forEach(([source, replacement], index) => {
+        if (!new RegExp(source, 'i').test(rest)) return;
+        reasons.add(PERSONAL_DATA_RULE_REASONS[index]!);
+        rest = rest.replace(new RegExp(source, 'gi'), replacement);
       });
+    }
   }
   safe.role = SAFE_ROLES.has(safe.role) ? safe.role : 'generic';
   const isText = BROWSER_PRIVACY_RULES.textRoles.some(role => role === safe.role);
@@ -624,13 +629,12 @@ export function redactElement(
     safe.name = redactString(safe.name, allowPersonalData);
     if (safe.value !== undefined) safe.value = redactString(safe.value, allowPersonalData);
   }
-  if (
+  const personalField =
     !allowPersonalData &&
-    safe.value &&
-    (personal ||
-      (/^(textbox|searchbox|combobox)$/.test(safe.role) &&
-        new RegExp(PERSONAL_LABEL_PATTERN, 'iu').test(safe.name.normalize('NFKC'))))
-  ) {
+    (personal === true ||
+      ((safe.options || /^(textbox|searchbox|combobox|listbox)$/.test(safe.role)) &&
+        new RegExp(PERSONAL_LABEL_PATTERN, 'iu').test(element.name.normalize('NFKC'))));
+  if (personalField && safe.value) {
     safe.value = REDACTED;
     reasons.add('personal_field');
   }
@@ -649,9 +653,13 @@ export function redactElement(
     if (href) safe.href = href;
     else delete safe.href;
   }
+  // A personal choice hides its label and its identifier alike; selected/disabled metadata survives. Opt-in reveals them.
+  if (personalField && safe.options?.length) reasons.add('personal_field');
   if (safe.options)
     safe.options = safe.options.map(option => {
-      const hidden = secret || isSensitiveLabel(option.label);
+      const secretOption = isSensitiveLabel(option.label);
+      if (secretOption) reasons.add('credential');
+      const hidden = secret || personalField || secretOption;
       return {
         ...option,
         label: hidden ? REDACTED : redactString(option.label, allowPersonalData),

@@ -77,6 +77,7 @@ function optionsPage(
     hints.some(h => secret.test(h.normalize('NFKC'))) ||
     (!arg.allowPersonalData &&
       (hints.some(h => personal.test(h.normalize('NFKC'))) ||
+        /(?:^|\s)name(?:$|\s)/i.test(attr('autocomplete')) ||
         personalContext(root, arg.rules.personalContextLabelPattern)));
   const redact = (text: string): string => {
     for (const [source, replacement] of [...arg.textRules, ...(arg.allowPersonalData ? [] : arg.personalRules)])

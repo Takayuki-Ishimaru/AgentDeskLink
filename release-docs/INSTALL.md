@@ -2,12 +2,12 @@
 
 **日本語** | [English](INSTALL_en.md)
 
-対象バージョン: `0.1.11`（ベータ版）
+対象バージョン: `0.1.12`（ベータ版）
 
 ## 必要なもの
 
 - VS Code 1.101 以上。
-- 共通 VSIX `agentdesklink-0.1.11.vsix`。[対応環境と既知の制限](KNOWN_ISSUES.md)を確認してください。
+- 共通 VSIX `agentdesklink-0.1.12.vsix`。[対応環境と既知の制限](KNOWN_ISSUES.md)を確認してください。
 - Chrome がない場合、初回の Chromium 自動取得に必要なネット接続。
 
 1 つの VSIX に macOS / Apple silicon、Windows x64、Linux x64 用の Node.js と画像処理ライブラリを同梱します。macOS/Windows/Linux 用のデスクトップ操作 helper も含みます（Linux は Python 3 スクリプトで、OS の python3-gi などが必要です）。起動時に対応するものを選ぶため、別途ビルドする必要はありません。
@@ -16,12 +16,12 @@
 
 ## インストール
 
-1. リリースページから `agentdesklink-0.1.11.vsix` と `SHA256SUMS` をダウンロードします。
+1. リリースページから `agentdesklink-0.1.12.vsix` と `SHA256SUMS` をダウンロードします。
 2. [更新ガイドの方法](UPDATES.md)で VSIX の SHA-256 を計算し、一覧と一致することを確認します。
 3. VS Code のコマンドパレットで「拡張機能: VSIXからのインストール」を選び、VSIX を指定します。
 4. 利用するフォルダーを開き、内容を確認してワークスペースを信頼します。
 5. 左のアクティビティバーの **AgentDeskLink** を開きます。
-6. 設定パネルで実効権限を確認します。初期状態は全操作・全URL・全アプリが有効で、個別登録は不要です。必要なら閲覧専用・下書き・承認付き保存へ切り替えます。
+6. 設定パネルで実効権限を確認します。新規設定では全操作・全 URL・全アプリが有効です。旧設定を引き継いだ場合は、以前の権限が適用されます。必要なら読み取り専用・通常操作・個別承認へ切り替えます。
 7. MCP は信頼済みワークスペースで既定オンです。以前オフにした場合は「このワークスペースで MCP を有効にする」をオンにします。
 8. VS Code の MCP 管理画面でサーバーの起動を承認します。
 
@@ -48,7 +48,7 @@ Claude Code、Claude Desktop、Codex、Cursor、Windsurf、Devin、Gemini CLI、
 | `agentdesklink.browserResourceOrigins` | CDN など、GET/HEAD のサブリソース読み込みだけを許可する origin。移動先の許可とは別です |
 | `agentdesklink.allowPersonalData` | メール・電話番号などの個人情報の表示を許可します。既定はオフ。認証情報と明示保護領域は保護を維持します |
 | `agentdesklink.desktopAppId` / `agentdesklink.desktopAppPath` | 許可するアプリ 1 件の ID と実行ファイルの絶対パス |
-| `agentdesklink.operationMode` | `read_only`、`standard`（下書き）、`ask`（承認付き保存）。初期状態は `allowAllOperations: true` により全操作です |
+| `agentdesklink.operationMode` | `read_only`、`standard`（通常操作）、`ask`（個別承認）。保存通信の制御はブラウザに適用されます |
 | `agentdesklink.consequentialAllowLabels` / `agentdesklink.consequentialDenyLabels` | 重要操作とみなさない／みなすボタン・リンクのラベル（各最大 64 件、1〜64 文字）。完全一致または単語単位で一致し、日本語は部分一致です。拒否側が優先します。認証情報・実際のフォーム送信・ファイル・ダウンロード・保護領域の判定は変わりません。settings.json で指定します |
 | `agentdesklink.allowAllOperations` | 全操作許可。既定オンで、保存通信も利用できます。制限する段階を選ぶとオフになります。後からオンに戻す操作には確認画面があります |
 | `agentdesklink.browserHeadless` | 既定は `true`。手動ログインには `false` で可視ブラウザを使います |
@@ -65,8 +65,8 @@ Claude Code、Claude Desktop、Codex、Cursor、Windsurf、Devin、Gemini CLI、
 
 - **そのまま業務を実行**: 初期設定の「全操作」。URL・アプリの登録と保存ごとの承認は不要です。
 - **閲覧のみ**: 「読み取り専用」を選択。設定済みの閲覧専用はセットアップ完了として扱います。
-- **フォームの下書き**: 「下書き」を選択。書き込みが止まったら `save.state: draft_unsaved` を確認します。
-- **承認付き保存**: 「承認付き保存」を選択。全アプリ許可を解除し、ネイティブ操作は承認ホスト以外のアプリを個別指定します。fetch/XHR は承認後に再実行せず観測し、フォームは承認済みの同一操作だけを再試行します。
+- **ブラウザでフォームの下書き**。「通常操作」を選び、書き込みが止まったら `save.state: draft_unsaved` を確認します。
+- **ブラウザで承認付き保存**。「個別承認」を選びます。デスクトップ操作も使う場合は、全アプリ許可を解除し、承認ホスト以外のアプリを個別指定します。fetch/XHR の承認後は観測に進み、フォームは承認済みの同一操作だけを再試行します。
 
 ### 権限段階と個別承認
 

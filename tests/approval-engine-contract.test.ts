@@ -1322,7 +1322,7 @@ test('held writes: an emergency stop between approval and release sends nothing'
   }
 });
 
-test('held writes: adl_execute stops at the step that held a write and leaves the rest unexecuted', async () => {
+test('held writes: a batch reports approval progress and a resume point without replaying the write', async () => {
   const f = await heldFixture();
   try {
     const started = f.engine.execute(
@@ -1332,22 +1332,72 @@ test('held writes: adl_execute stops at the step that held a write and leaves th
       ],
       { [f.session.session_id]: 1 },
     );
-    let task = f.engine.task(started.task_id);
-    for (; task.status === 'queued' || task.status === 'running'; task = f.engine.task(started.task_id))
-      await new Promise(resolve => setTimeout(resolve, 20));
-    assert.equal(task.status, 'failed');
+    const read = () => f.engine.task(started.task_id);
+    await f.until(() => read().status === 'blocked_on_approval');
+    const task = read();
     assert.deepEqual(
       task.results.map(r => r.status),
-      ['failed', 'not_executed'],
+      ['blocked_on_approval', 'not_executed'],
     );
-    assert.equal(task.error?.reason, 'request_requires_approval');
-    assert.equal(task.error?.retryable, false);
-    assert.equal(task.error?.request_id, f.broker!.latest()!.request_id);
+    const request = f.broker!.latest()!;
+    assert.equal(task.pending_request_id, request.request_id);
+    assert.equal(task.next_step_index, 1);
+    assert.deepEqual(task.approval, { request_id: request.request_id, status: 'pending' });
+    f.state.outcome = { dispatched: 1, refused: 0 };
+    request.status = 'approved';
+    const [a, b] = await Promise.all([f.engine.approvals(request.request_id), f.engine.approvals(request.request_id)]);
+    assert.deepEqual(rows(a), [['consumed', true]]);
+    assert.deepEqual(rows(b), [['consumed', true]]);
+    const ready = read();
+    assert.equal(ready.status, 'ready_to_resume');
+    assert.equal(ready.pending_request_id, undefined);
+    assert.equal(ready.next_step_index, 1);
+    assert.deepEqual(ready.approval, { request_id: request.request_id, status: 'consumed', sent: true });
+    assert.deepEqual(
+      ready.results.map(r => r.status),
+      ['completed', 'not_executed'],
+    );
+    assert.deepEqual(ready.results[0]?.save, { state: 'submitted', next_step: 'observe', retry_action: false });
     assert.equal(f.state.acts, 1);
+    assert.equal(f.state.released.length, 1);
   } finally {
     await f.close();
   }
 });
+
+for (const decision of ['denied', 'expired', 'refused_at_dispatch', 'cancelled', 'completed'] as const)
+  test(`held writes: single-step batch handles ${decision}`, async () => {
+    const f = await heldFixture();
+    try {
+      const session_id = f.session.session_id;
+      const { task_id } = f.engine.execute([{ session_id, ...f.action }], { [session_id]: 1 });
+      const read = () => f.engine.task(task_id);
+      await f.until(() => read().status === 'blocked_on_approval');
+      const request = f.broker!.latest()!;
+      if (decision === 'cancelled') assert.equal(f.engine.task(task_id, 'cancel').status, 'cancelled');
+      else {
+        request.status = decision === 'denied' || decision === 'expired' ? decision : 'approved';
+        f.state.outcome = decision === 'refused_at_dispatch' ? { dispatched: 0, refused: 1 } : { dispatched: 1 };
+      }
+      await f.engine.approvals(request.request_id);
+      const end = read();
+      assert.equal(end.next_step_index, undefined);
+      assert.equal(end.pending_request_id, undefined);
+      assert.equal(end.status, decision === 'completed' || decision === 'cancelled' ? decision : 'failed');
+      assert.equal(end.approval?.sent, decision === 'completed');
+      if (decision === 'denied') assert.equal(end.error?.reason, 'approval_denied');
+      if (decision === 'expired') {
+        assert.equal(end.error?.reason, 'approval_expired');
+        assert.equal(end.error?.retryable, false);
+        assert.equal(end.error?.page_script_ran, true);
+      }
+      if (decision === 'refused_at_dispatch') assert.equal(end.error?.reason, 'approval_invalidated');
+      assert.equal(f.state.acts, 1);
+      assert.equal(f.state.released.length, decision === 'completed' || decision === 'refused_at_dispatch' ? 1 : 0);
+    } finally {
+      await f.close();
+    }
+  });
 
 // Concurrency crossings: the engine's watcher, adl_approvals and the session lifecycle all act on the same hold.
 test(

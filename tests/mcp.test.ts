@@ -92,6 +92,30 @@ for (const mode of ['legacy', 'modern'] as const)
       const observe = tools.tools.find(t => t.name === 'adl_observe')!;
       assert.ok(JSON.stringify(observe.inputSchema).includes('within:<element_id>'));
       assert.match(observe.description ?? '', /main\/article\/region id reads all its text/);
+      const includeFields = [
+        'id',
+        'role',
+        'name',
+        'value',
+        'enabled',
+        'checked',
+        'selected',
+        'expanded',
+        'options',
+        'options_total',
+        'options_truncation',
+        'redaction_reasons',
+        'parent_id',
+        'name_truncated',
+        'text_length',
+        'href',
+        'value_truncated',
+        'min',
+        'max',
+        'step',
+      ];
+      const includeEnum = (observe.inputSchema as any).properties.include.items.enum as string[];
+      assert.deepEqual(includeEnum, includeFields);
       // The advertised schemas are lean; the server still validates every call against the full schema.
       for (const tool of tools.tools) {
         const advertised = JSON.stringify(tool.inputSchema);
@@ -116,6 +140,13 @@ for (const mode of ['legacy', 'modern'] as const)
         },
       ])
         assert.ok((await client.callTool(bad)).isError, JSON.stringify(bad));
+      const allIncluded = payload(
+        await client.callTool({
+          name: 'adl_observe',
+          arguments: { session_id: 'missing', include: [...includeFields, ...includeFields.slice(0, 3)] },
+        }),
+      );
+      assert.notEqual(allIncluded.error?.code, 'E_INVALID_ARGUMENT', 'all fields and duplicate names pass validation');
       const targets = payload(await client.callTool({ name: 'adl_targets', arguments: {} }));
       assert.deepEqual(targets.targets, []);
       assert.deepEqual(payload(await client.callTool({ name: 'adl_sessions', arguments: {} })).sessions, []);

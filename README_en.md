@@ -12,7 +12,7 @@ AgentDeskLink is an MCP server that connects AI agents to your local browser and
 
 [Get started](release-docs/INSTALL_en.md) · [What you can do](#what-you-can-do) · [Supported environments](#supported-environments) · [Release guide](release-docs/README_en.md) · [MIT License](LICENSE)
 
-> **0.1.11 / Beta**\
+> **0.1.12 / Beta**\
 > This beta is intended for a limited range of use. Before installing, review [supported environments and known limitations](release-docs/KNOWN_ISSUES_en.md).
 
 This version enables all operations by default in trusted workspaces and improves task-based permission selection and save-state guidance. It also adds long choice-list search and byte limits for observations, and improves personal-data masking in tables and definition lists and desktop discovery. See [what changed](release-docs/RELEASE_NOTES_en.md) and the [operation settings and approval guide](release-docs/OPERATIONS.md).
@@ -30,10 +30,10 @@ Drag inside the browser, touch swipes and timestamped continuous frame capture a
 
 ## Get started in VS Code
 
-1. Download the common `agentdesklink-0.1.11.vsix` package, then install it with "Extensions: Install from VSIX".
+1. Download the common `agentdesklink-0.1.12.vsix` package, then install it with "Extensions: Install from VSIX".
 2. Open a folder and trust the workspace.
 3. Open **AgentDeskLink** in the activity bar.
-4. Choose **Open Settings** and review Current permissions. All operations, all URLs and all applications are enabled by default. Choose Read only, Draft or Save with approval and narrow the targets when needed.
+4. Choose **Open Settings** and review Current permissions. Fresh setups enable all operations, URLs and applications. Existing setups keep their previous permissions. Choose Read only, Standard or Ask and narrow the targets when needed.
 5. MCP is on by default in a trusted workspace. If previously disabled, turn on **Enable MCP for this workspace**, then start the server from the MCP management view.
 
 **No separate Node.js installation or helper build is required.** The same VSIX includes the runtimes for all supported operating systems and selects one automatically at startup. Chrome runs in a dedicated profile, and if it is not found a dedicated Chromium is downloaded automatically on first use.

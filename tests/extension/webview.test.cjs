@@ -827,7 +827,7 @@ test('broad URL and application defaults are shown and can be turned off', async
 });
 const summaryOf = p => p.get('ai-summary').textContent;
 
-test('the summary states what the AI can do for read only, standard, ask and allow-all, and nothing more', () => {
+test('the summary states what the AI can do for read only, standard, ask and allow-all, and nothing more', async () => {
   const p = panel('ja');
   p.state(hostState({ mode: 'read_only' }));
   assert.equal(
@@ -838,12 +838,12 @@ test('the summary states what the AI can do for read only, standard, ask and all
   p.state(hostState({ mode: 'standard' }));
   assert.equal(
     summaryOf(p),
-    'AI は example.com を閲覧し、通常のクリックや入力ができます。送信や削除などの重要な操作と、ページが保存のために送る通信は止められるため、多くのアプリではデータを保存できません（標準）。',
+    'ブラウザーでは example.com を閲覧し、通常のクリックや入力ができます。送信などの重要な操作と、ページが保存のために送る通信はブロックされるため、変更を保存できない場合があります。デスクトップでは通常操作を実行でき、保存や自動保存が発生することがあります（標準）。',
   );
   p.state(hostState({ mode: 'ask' }));
   assert.equal(
     summaryOf(p),
-    'AI は example.com を閲覧し、通常のクリックや入力ができます。送信や削除などの重要な操作と、ページが保存のために送る通信は、VS Code の確認画面で内容を承認した場合のみ実行されます（都度承認）。',
+    'ブラウザーでは example.com を閲覧し、通常のクリックや入力ができます。送信などの重要な操作と、ページが保存のために送る通信は、VS Code の確認画面で内容を承認した場合のみ実行されます。デスクトップでは通常操作を実行でき、削除や送信などの重要なネイティブ操作の前に確認します。通常操作に伴う保存や自動保存は発生することがあります（都度承認）。',
   );
   p.state(hostState({ mode: 'read_only', effectiveMode: 'all' }));
   assert.match(summaryOf(p), /^AI は example\.com で、確認なしにあらゆる操作.*（全操作）。$/);
@@ -853,10 +853,16 @@ test('the summary states what the AI can do for read only, standard, ask and all
   en.state(hostState({ mode: 'standard' }));
   assert.match(
     summaryOf(en),
-    /^The AI can view example\.com and click or type in ordinary controls\..*most apps cannot save changes \(standard\)\.$/,
+    /^In the browser, the AI can view example\.com and use ordinary controls\..*On desktop, ordinary actions remain available and may save or autosave data \(standard\)\.$/,
   );
   en.state(hostState({ mode: 'ask' }));
-  assert.match(summaryOf(en), /run only after you approve each one in VS Code \(ask each time\)\.$/);
+  assert.match(
+    summaryOf(en),
+    /On desktop, ordinary actions remain available; approval is requested before consequential native actions.*\(ask each time\)\.$/,
+  );
+  const html = await panelHtml();
+  assert.match(html, /New trusted workspaces start with all operations/);
+  assert.match(html, /confirmation dialog appears when you manually switch from a limited mode to All operations/i);
 });
 
 test('the summary covers emergency stop, disabled MCP, missing origins and an untrusted workspace without claiming access', () => {
@@ -940,7 +946,7 @@ test('the summary is re-rendered when the display language changes and posts not
   const messages = p.messages.length;
   p.get('ui-language').value = 'en';
   await p.get('ui-language').trigger('change');
-  assert.match(summaryOf(p), /^The AI can view example\.com and click or type/);
+  assert.match(summaryOf(p), /^In the browser, the AI can view example\.com and use ordinary controls\./);
   assert.equal(p.get('ai-summary-extra').textContent, 'Also on: desktop app app.id.');
   assert.equal(p.messages.length, messages);
 });
@@ -957,7 +963,7 @@ const grantRow = (over = {}) => ({
   ...over,
 });
 const ASK_SENTENCE =
-  'AI は example.com を閲覧し、通常のクリックや入力ができます。送信や削除などの重要な操作と、ページが保存のために送る通信は、VS Code の確認画面で内容を承認した場合のみ実行されます（都度承認）。';
+  'ブラウザーでは example.com を閲覧し、通常のクリックや入力ができます。送信などの重要な操作と、ページが保存のために送る通信は、VS Code の確認画面で内容を承認した場合のみ実行されます。デスクトップでは通常操作を実行でき、削除や送信などの重要なネイティブ操作の前に確認します。通常操作に伴う保存や自動保存は発生することがあります（都度承認）。';
 // A webview whose timers only record their callbacks, so the 30-second refresh can be run by hand and nothing stays pending.
 function timedPanel(language = 'ja') {
   const scheduled = [];
@@ -1344,7 +1350,7 @@ test('the emergency stop, the permission tier and the summary are never inside a
   }
   // The Allow-all warning is not attached to a collapsed control, so it stays in the always-visible part.
   const visible = html.replace(/<details\b[\s\S]*?<\/details>/g, '');
-  assert.match(visible, /Allow all lets the AI submit forms, delete, buy or pay/);
+  assert.match(visible, /All operations lets the AI submit forms, delete, buy or pay/);
   // Error lines inside groups are revealed by the script when they have text (see the auto-open test).
   for (const id of ['clients-error', 'desktop-error', 'runtime-settings-error'])
     assert.ok(

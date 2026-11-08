@@ -399,6 +399,7 @@ export type ErrorReason =
   | 'platform_unsupported'
   | 'capture_not_enabled'
   | 'browser_sandbox_unavailable'
+  | 'browser_executable_missing'
   | 'request_requires_approval'
   | 'request_not_approvable'
   | 'background_write_blocked'
@@ -495,6 +496,8 @@ const ERROR_REASON_MESSAGES: Record<ErrorReason, string> = {
     'Image capture is not enabled for this target. Desktop apps: enable agentdesklink.allowUnredactedImages in the trusted workspace settings. Policy-file browser targets: set browserTargets[].visual.enabled.',
   browser_sandbox_unavailable:
     'Chromium could not start its sandbox. The MCP server log names the launch error and the remedy.',
+  browser_executable_missing:
+    'The configured Chromium executable was not found. Check browser setup in the extension log or install Chromium for this Playwright version.',
   desktop_focus_changed:
     'The desktop target lost focus or its window may have closed, so the session was closed. Check the screen, rediscover the target with adl_targets, then open a new session with adl_open and observe.',
   request_requires_approval:
@@ -502,7 +505,7 @@ const ERROR_REASON_MESSAGES: Record<ErrorReason, string> = {
   request_not_approvable:
     'The page sent a write request that cannot be shown to a human for approval (multipart or file upload, binary, streamed or oversized body, a synchronous XHR the page waits for, a beacon or embedded frame, or more than 4 requests from one action), so it was blocked before it left. There is no automatic way to send it; what the screen shows was not saved.',
   background_write_blocked:
-    'A write request that started outside any action (a timer, autosave or beacon) was blocked before it left; only writes the page sends while an action runs can be held for approval. Trigger the save with an explicit control (for example its Save button) so that it belongs to an action.',
+    'A write request that started outside any action (for example, a timer-based autosave or beacon) was blocked before it left. Only writes the page sends while an action runs can be held for approval. To save, use the page’s explicit Save control while performing an action; the background write itself cannot be approved or retried.',
   contained_request_blocked:
     'This control ran with the network closed to new requests (Delete/Remove containment) and started a new read request or navigation that cannot be attributed to it, so it was stopped; its handler has run. Writes it sends are held for approval in ask mode. If the control is known to be harmless in this workspace, list its label in agentdesklink.consequentialAllowLabels.',
   tls_handshake_failed:

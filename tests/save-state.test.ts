@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { AdlError, safeError } from '../src/types.js';
-import { saveAfterAction, saveAfterApproval } from '../src/save-state.js';
+import { saveAfterAction, saveAfterApproval, saveAfterError } from '../src/save-state.js';
 
 test('held fetch and blocked forms have distinct deterministic recovery after approval', () => {
   assert.deepEqual(safeError(new AdlError('E_APPROVAL_REQUIRED', 'request_requires_approval')).save, {
@@ -29,4 +29,16 @@ test('unsaved, sent and uncertain outcomes never invite replaying a dispatched a
     assert.equal(saveAfterApproval(status, false).retry_action, false);
   assert.equal(saveAfterApproval('approved', undefined).next_step, 'retry_same_action');
   assert.equal(safeError(new AdlError('E_CANCELLED')).save, undefined);
+});
+
+test('background writes direct the caller to an explicit Save action, not a mode change', () => {
+  assert.deepEqual(saveAfterError('background_write_blocked'), {
+    state: 'draft_unsaved',
+    next_step: 'explicit_save',
+    retry_action: false,
+  });
+  assert.equal(saveAfterError('method_requires_approval')?.next_step, 'change_mode');
+  const message = safeError(new AdlError('E_POLICY_DENIED', 'background_write_blocked'));
+  assert.match(message.safe_message, /explicit Save control/i);
+  assert.equal(message.save?.next_step, 'explicit_save');
 });

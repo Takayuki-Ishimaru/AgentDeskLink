@@ -443,7 +443,7 @@
     const sites = flag('allowAllBrowserOrigins') ? {ja:'すべてのWebサイト',en:'all websites'} : sitesText(origins), mode = currentMode();
     if (mode === 'all') return { ja: `AI は ${sites.ja} で、確認なしにあらゆる操作（送信・削除・購入・認証情報の入力を含む）を実行できます（全操作）。`, en: `The AI can perform any action on ${sites.en} without asking, including submitting forms, deleting, buying and entering credentials (all operations).` };
     if (mode === 'ask') {
-      const text = { ja: `AI は ${sites.ja} を閲覧し、通常のクリックや入力ができます。送信や削除などの重要な操作と、ページが保存のために送る通信は、VS Code の確認画面で内容を承認した場合のみ実行されます（都度承認）。`, en: `The AI can view ${sites.en} and click or type in ordinary controls. Consequential actions such as submitting or deleting, and the requests a page sends to save data, run only after you approve each one in VS Code (ask each time).` };
+      const text = { ja: `ブラウザーでは ${sites.ja} を閲覧し、通常のクリックや入力ができます。送信などの重要な操作と、ページが保存のために送る通信は、VS Code の確認画面で内容を承認した場合のみ実行されます。デスクトップでは通常操作を実行でき、削除や送信などの重要なネイティブ操作の前に確認します。通常操作に伴う保存や自動保存は発生することがあります（都度承認）。`, en: `In the browser, the AI can view ${sites.en} and use ordinary controls. Consequential actions such as submitting, and requests the page sends to save data, run only after you approve them in VS Code. On desktop, ordinary actions remain available; approval is requested before consequential native actions such as delete or send. Ordinary desktop actions may save or autosave data (ask each time).` };
       // A standing grant is only ever created by the host's approval dialog; it is named here so the sentence stays true while one is active.
       const n = liveGrants().length;
       if (n > 0) {
@@ -452,7 +452,7 @@
       }
       return text;
     }
-    if (mode === 'standard') return { ja: `AI は ${sites.ja} を閲覧し、通常のクリックや入力ができます。送信や削除などの重要な操作と、ページが保存のために送る通信は止められるため、多くのアプリではデータを保存できません（標準）。`, en: `The AI can view ${sites.en} and click or type in ordinary controls. Consequential actions such as submitting or deleting, and the requests a page sends to save data, are blocked, so most apps cannot save changes (standard).` };
+    if (mode === 'standard') return { ja: `ブラウザーでは ${sites.ja} を閲覧し、通常のクリックや入力ができます。送信などの重要な操作と、ページが保存のために送る通信はブロックされるため、変更を保存できない場合があります。デスクトップでは通常操作を実行でき、保存や自動保存が発生することがあります（標準）。`, en: `In the browser, the AI can view ${sites.en} and use ordinary controls. Consequential actions such as submitting and requests the page sends to save data are blocked, so changes may not be saved. On desktop, ordinary actions remain available and may save or autosave data (standard).` };
     return { ja: `AI は ${sites.ja} を閲覧できます。クリックや入力はできません（読み取り専用）。`, en: `The AI can view ${sites.en}. It cannot click or type (read only).` };
   }
   // Grants outside the browser sentence that are on right now, so they stay visible while their toggles sit in collapsed groups.

@@ -2,11 +2,11 @@
 
 **日本語** | [English](UPDATES_en.md)
 
-対象バージョン: `0.1.11`
+対象バージョン: `0.1.12`
 
 ## 0.1.2 以前からの更新
 
-0.1.3 から OS 共通の VSIX を配布しています。この版のファイル名は `agentdesklink-0.1.11.vsix` です。0.1.2 以前の更新機能はこのファイル名に対応していないため、公式リリースページから共通 VSIX と `SHA256SUMS` を取得し、ハッシュを確認して手動でインストールしてください。インストール後は VS Code のウィンドウを再読み込みします。
+0.1.3 から OS 共通の VSIX を配布しています。この版のファイル名は `agentdesklink-0.1.12.vsix` です。0.1.2 以前の更新機能はこのファイル名に対応していないため、公式リリースページから共通 VSIX と `SHA256SUMS` を取得し、ハッシュを確認して手動でインストールしてください。インストール後は VS Code のウィンドウを再読み込みします。
 
 更新後は[インストールガイド](INSTALL.md)に従い、実効権限を確認してください。信頼済みワークスペースでは全操作・全 URL・全アプリを既定で許可します。必要に応じて権限段階と対象範囲を絞ってください。明示的に保存済みの拒否設定と既存の制限する段階は保持します。
 
@@ -37,7 +37,7 @@
 このリリースに添付する VSIX は 1 つです。
 
 ```text
-agentdesklink-0.1.11.vsix
+agentdesklink-0.1.12.vsix
 ```
 
 拡張機能はこの名前と GitHub が返す `sha256:` ダイジェスト、`https://github.com/Takayuki-Ishimaru/AgentDeskLink/releases/download/<タグ>/<配布ファイル名>` の正規 URL を使って配布ファイルを特定します。独自の更新情報ファイル（`update.json` など）は読みません。
@@ -49,19 +49,19 @@ agentdesklink-0.1.11.vsix
 macOS:
 
 ```sh
-shasum -a 256 agentdesklink-0.1.11.vsix
+shasum -a 256 agentdesklink-0.1.12.vsix
 ```
 
 Windows PowerShell:
 
 ```powershell
-Get-FileHash -Algorithm SHA256 .\agentdesklink-0.1.11.vsix | Format-List Hash
+Get-FileHash -Algorithm SHA256 .\agentdesklink-0.1.12.vsix | Format-List Hash
 ```
 
 Linux:
 
 ```sh
-sha256sum agentdesklink-0.1.11.vsix
+sha256sum agentdesklink-0.1.12.vsix
 ```
 
 一覧と一致しない場合は、そのファイルをインストールせず、公式リポジトリのリリースページから取得し直してください。

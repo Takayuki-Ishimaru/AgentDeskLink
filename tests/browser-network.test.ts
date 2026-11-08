@@ -267,7 +267,6 @@ test('direct connection and TLS failures surface as specific transport reasons, 
   }
 });
 
-
 test(
   'browser open reports TLS certificate and connection failures without endpoint details',
   { timeout: 20000 },

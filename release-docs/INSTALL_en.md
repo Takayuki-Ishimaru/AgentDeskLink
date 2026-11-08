@@ -2,12 +2,12 @@
 
 [日本語](INSTALL.md) | **English**
 
-Target version: `0.1.11` (beta)
+Target version: `0.1.12` (beta)
 
 ## Requirements
 
 - VS Code 1.101 or newer.
-- The common `agentdesklink-0.1.11.vsix` package. Check the [supported environments and known limitations](KNOWN_ISSUES_en.md).
+- The common `agentdesklink-0.1.12.vsix` package. Check the [supported environments and known limitations](KNOWN_ISSUES_en.md).
 - A network connection for the first Chromium download if Chrome is not installed.
 
 One VSIX bundles Node.js and image-processing libraries for macOS / Apple silicon, Windows x64 and Linux x64. It also includes the macOS, Windows and Linux desktop helpers (the Linux helper is a Python 3 script that needs the OS python3-gi packages). It selects the matching runtime at startup, so no separate build is needed.
@@ -16,12 +16,12 @@ The distribution file is shared across these operating systems. This common VSIX
 
 ## Installation
 
-1. Download `agentdesklink-0.1.11.vsix` and `SHA256SUMS` from the release page.
+1. Download `agentdesklink-0.1.12.vsix` and `SHA256SUMS` from the release page.
 2. Compute the SHA-256 using the [update guide](UPDATES_en.md) and confirm it matches the list.
 3. In the VS Code Command Palette, choose “Extensions: Install from VSIX...” and select the VSIX.
 4. Open the folder you want to use, review its contents and trust the workspace.
 5. Open **AgentDeskLink** in the activity bar on the left.
-6. Review effective permissions. Fresh settings enable all supported operations, all URLs and applications without registration; choose Read only, Draft or Save with approval if needed.
+6. Review effective permissions. Fresh settings enable all supported operations, URLs and applications. Existing setups keep their previous permissions. Choose Read only, Standard or Ask if needed.
 7. MCP is on by default in trusted workspaces. If previously disabled, turn on Enable MCP.
 8. Approve the server start in the VS Code MCP management view.
 
@@ -46,7 +46,7 @@ Trusted workspaces enable MCP, all supported operations, all http(s) URLs and ap
 | `agentdesklink.browserResourceOrigins` | Origins permitted only for GET/HEAD subresources such as CDN assets, separately from navigation grants |
 | `agentdesklink.allowPersonalData` | Reveals personal data such as email and phone numbers. Defaults to off; credentials and protected regions remain protected |
 | `agentdesklink.desktopAppId` / `agentdesklink.desktopAppPath` | The ID and absolute executable path of one allowed app |
-| `agentdesklink.operationMode` | `read_only`, `standard` (Draft) or `ask` (Save with approval); fresh settings use `allowAllOperations: true` |
+| `agentdesklink.operationMode` | `read_only`, `standard` (ordinary actions), or `ask` (per-action approval). Write-request controls apply to the browser. |
 | `agentdesklink.consequentialAllowLabels` / `agentdesklink.consequentialDenyLabels` | Button and link labels never / always treated as consequential (up to 64 entries of 1–64 characters each). Entries match the whole label or a whole word; Japanese entries match as substrings. The deny list wins. Credential, real form-submission, file, download and protected-region checks are unaffected. Set them in settings.json |
 | `agentdesklink.allowAllOperations` | All supported operations, on by default, including saves. Selecting a restricted tier turns this off. Turning it back on shows a confirmation |
 | `agentdesklink.browserHeadless` | Defaults to `true`. Set false for a visible browser and manual login |
@@ -63,8 +63,8 @@ Check “Current permissions” in the panel to see the effective grants. Observ
 
 - **Run the task**: keep the default All operations; registration and per-save approval are unnecessary.
 - **View only**: choose Read only; an explicitly configured read-only tier completes setup.
-- **Draft a form**: choose Draft; `save.state: draft_unsaved` identifies blocked saving.
-- **Save with approval**: choose this tier; All applications turns off, and native targets must exclude the approval host. After fetch/XHR approval observe without replaying; a cancelled form submission retries only the approved identical action.
+- **Draft a browser form**. Choose Standard. `save.state: draft_unsaved` identifies a blocked write.
+- **Approve browser saves**. Choose Ask. This turns off All applications. For desktop operations, select an app other than the approval host. After fetch/XHR approval, observe the result. For a cancelled form submission, retry only the approved identical action.
 
 ### Permission tiers and one-shot approvals
 

@@ -101,7 +101,7 @@ test('capture without an image opt-in names capture_not_enabled', async () => {
   }
 });
 
-test('browser launch failures map sandbox errors to a reason and a bounded log line', () => {
+test('browser launch failures distinguish missing Chromium from an unavailable sandbox', () => {
   const sandbox = browserLaunchFailure(
     new Error('browserType.launch: Target page, context or browser has been closed\nNo usable sandbox! ...'),
   );
@@ -112,9 +112,10 @@ test('browser launch failures map sandbox errors to a reason and a bounded log l
   const root = browserLaunchFailure(new Error('Running as root without --no-sandbox is not supported.'));
   assert.equal(root.reason, 'browser_sandbox_unavailable');
   const other = browserLaunchFailure(new Error('Executable does not exist at /nowhere/chrome'));
-  assert.equal(other.reason, undefined);
+  assert.equal(other.reason, 'browser_executable_missing');
   assert.match(other.log, /Executable does not exist/);
   const huge = browserLaunchFailure(new Error('x'.repeat(10000)));
+  assert.equal(huge.reason, undefined);
   assert.ok(huge.log.length < 1200);
   assert.equal(
     safeError(new AdlError('E_BACKEND_UNAVAILABLE', 'browser_sandbox_unavailable')).reason,

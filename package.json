@@ -2,7 +2,7 @@
   "name": "agentdesklink",
   "displayName": "AgentDeskLink",
   "description": "Local-first semantic browser and desktop control over MCP, with a per-workspace AgentDeskLink sidebar for VS Code.",
-  "version": "0.1.11",
+  "version": "0.1.12",
   "publisher": "agentdesklink",
   "license": "MIT",
   "private": true,
@@ -179,7 +179,7 @@
           ],
           "default": "standard",
           "scope": "window",
-          "description": "全操作許可をオフにしたときの段階: read_only、standard（下書き）、ask（承認付き保存）。初期状態は allowAllOperations により全操作です / Tier used when All operations is off: read_only, standard (draft), ask (save with approval). Fresh settings use All operations."
+          "description": "全操作許可をオフにしたときの段階: read_only、standard（通常操作）、ask（個別承認）。書き込み通信の制御はブラウザに適用します。 / Tier used when All operations is off: read_only, standard (ordinary actions), or ask (per-action approval). Write-request controls apply to the browser."
         },
         "agentdesklink.allowPhysicalInput": {
           "type": "boolean",
@@ -294,6 +294,8 @@
     "test:package": "node --test --test-concurrency=1 --test-timeout=10000 --test-force-exit tests/package-runtime.test.mjs tests/release-package.test.mjs tests/universal-*.test.mjs",
     "test:live": "npm run build:tsc && node --test --test-timeout=120000 --test-force-exit scripts/python-docs-live.mjs",
     "test:github-live": "npm run build:tsc && node --test --test-timeout=120000 --test-force-exit scripts/github-live.mjs",
+    "test:business": "node --test --test-timeout=5000 --test-force-exit tests/business-scenarios-model.test.mjs tests/business-scenarios-actor.test.mjs",
+    "measure:business:macos": "npm run build:tsc && node benchmarks/acceptance/build-macos.mjs && node benchmarks/acceptance/run.mjs --mode matrix",
     "verify:vsix": "node scripts/verify-vsix.mjs",
     "package:vsix": "npm run build && node scripts/package-vsix.mjs",
     "start": "node dist/src/server.js",
@@ -302,11 +304,11 @@
     "package:component": "npm run build && node scripts/package-vsix.mjs --component"
   },
   "dependencies": {
-    "@modelcontextprotocol/server": "2.3.1",
-    "ipaddr.js": "2.3.0",
+    "@modelcontextprotocol/server": "2.4.0",
+    "ipaddr.js": "2.5.0",
     "jsonc-parser": "3.3.1",
-    "playwright": "1.64.1",
-    "semver": "7.6.3",
+    "playwright": "1.65.0",
+    "semver": "7.8.6",
     "sharp": "0.35.5",
     "smol-toml": "1.9.1",
     "zod": "4.6.7"
@@ -321,7 +323,7 @@
     }
   },
   "devDependencies": {
-    "@modelcontextprotocol/client": "2.3.1",
+    "@modelcontextprotocol/client": "2.4.0",
     "@types/node": "24.10.1",
     "@types/semver": "7.5.8",
     "@types/vscode": "1.101.0",

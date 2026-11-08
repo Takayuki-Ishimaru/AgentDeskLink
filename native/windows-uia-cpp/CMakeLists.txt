@@ -14,12 +14,12 @@ endif()
 add_test(NAME rich_edit_value_contract COMMAND adl_value_text_tests)
 set_tests_properties(rich_edit_value_contract PROPERTIES TIMEOUT 10)
 
-# --- nlohmann/json pinned to the verified 3.11.3 commit ---------------------
+# --- nlohmann/json pinned to the verified 3.12.0 release commit ------------
 include(FetchContent)
 FetchContent_Declare(
   nlohmann_json
   GIT_REPOSITORY https://github.com/nlohmann/json.git
-  GIT_TAG 9cca280a4d0ccf0c08f47a99aa71d1b0e52f8d03
+  GIT_TAG 55f93686c01528224f448c19128836e7df245f72
   GIT_SHALLOW FALSE)
 
 # --- protocol contract tests (cross-platform, fake backend, no UIA) ---------

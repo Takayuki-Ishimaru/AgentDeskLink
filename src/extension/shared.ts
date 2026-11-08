@@ -16,6 +16,57 @@ import {
 export { parsePermissionsEnv };
 export type { ExtensionPermissions };
 
+const LEGACY_SETTINGS = [
+  'enabled',
+  'syncClients',
+  'operationMode',
+  'allowAllOperations',
+  'browserOrigins',
+  'browserResourceOrigins',
+  'desktopAppId',
+  'desktopAppPath',
+  'allowPhysicalInput',
+  'allowUnredactedImages',
+  'allowLoopback',
+  'allowPrivateNetwork',
+  'allowPersonalData',
+  'sessionIdleMinutes',
+  'browserHeadless',
+  'browserProxyServer',
+  'browserProxyConnectByHostname',
+  'consequentialAllowLabels',
+  'consequentialDenyLabels',
+  'autoUpdate',
+  'checkForUpdates',
+];
+const DEFAULTS_STATE = 'agentdesklink.permissionDefaults.v011';
+type PermissionDefaults = 'legacy' | 'fresh';
+let legacyDefaults = false;
+
+// An earlier activation leaves the operation-control file even with default settings.
+// Persist the initial profile decision before creating that file for this activation.
+export async function initializePermissionDefaults(context: vscode.ExtensionContext, previousActivation: boolean) {
+  const profile = context.globalState.get<PermissionDefaults>(DEFAULTS_STATE);
+  const previousProfile = profile === 'legacy' || (!profile && previousActivation);
+  const saved = context.workspaceState.get<PermissionDefaults>(DEFAULTS_STATE);
+  const configuration = vscode.workspace.getConfiguration('agentdesklink');
+  const existing = LEGACY_SETTINGS.some(key => {
+    const value = configuration.inspect(key);
+    return (
+      value?.globalValue !== undefined ||
+      value?.workspaceValue !== undefined ||
+      value?.workspaceFolderValue !== undefined
+    );
+  });
+  legacyDefaults = saved ? saved === 'legacy' : previousProfile || existing;
+  try {
+    if (!profile) await context.globalState.update(DEFAULTS_STATE, previousProfile ? 'legacy' : 'fresh');
+    if (!saved) await context.workspaceState.update(DEFAULTS_STATE, legacyDefaults ? 'legacy' : 'fresh');
+  } catch (error) {
+    log.line(`Could not persist permission defaults: ${String(error)}`);
+  }
+}
+
 export interface Settings {
   enabled: boolean;
   syncClients: boolean;
@@ -44,16 +95,15 @@ export interface Settings {
 
 export function readSettings(): Settings {
   const c = vscode.workspace.getConfiguration('agentdesklink');
-  const selectedMode = c.inspect?.<OperationMode>('operationMode');
-  const selectedAll = c.inspect?.<boolean>('allowAllOperations');
-  const explicitMode = selectedMode?.workspaceFolderValue ?? selectedMode?.workspaceValue ?? selectedMode?.globalValue;
-  const explicitAll = selectedAll?.workspaceFolderValue ?? selectedAll?.workspaceValue ?? selectedAll?.globalValue;
-  const configured = (key: string) => {
-    const value = c.inspect?.<boolean>(key);
+  const explicit = <T>(key: string): T | undefined => {
+    const value = c.inspect?.<T>(key);
     return value?.workspaceFolderValue ?? value?.workspaceValue ?? value?.globalValue;
   };
+  const permission = <T>(key: string, fresh: T, legacy: T): T => explicit<T>(key) ?? (legacyDefaults ? legacy : fresh);
+  const explicitMode = explicit<OperationMode>('operationMode');
+  const explicitAll = explicit<boolean>('allowAllOperations');
   return {
-    enabled: c.get<boolean>('enabled', true),
+    enabled: permission('enabled', true, false),
     syncClients: c.get<boolean>('syncClients', false),
     autoUpdate: c.get<boolean>('autoUpdate', true),
     checkForUpdates: c.get<boolean>('checkForUpdates', true),
@@ -61,26 +111,19 @@ export function readSettings(): Settings {
     browserHeadless: c.get<boolean>('browserHeadless', true),
     browserProxyServer: c.get<string>('browserProxyServer', ''),
     browserProxyConnectByHostname: c.get<boolean>('browserProxyConnectByHostname', false),
-    operationMode: c.get<OperationMode>('operationMode', 'standard'),
+    operationMode: permission<OperationMode>('operationMode', 'standard', 'read_only'),
     browserOrigins: c.get<string[]>('browserOrigins', []),
     browserResourceOrigins: c.get<string[]>('browserResourceOrigins', []),
     allowPersonalData: c.get<boolean>('allowPersonalData', false),
     desktopAppId: c.get<string>('desktopAppId', ''),
     desktopAppPath: c.get<string>('desktopAppPath', ''),
-    allowAllOperations:
-      explicitMode !== undefined && explicitAll === undefined ? false : c.get<boolean>('allowAllOperations', true),
-    allowPhysicalInput:
-      explicitMode !== undefined && explicitAll !== true && configured('allowPhysicalInput') === undefined
-        ? false
-        : c.get<boolean>('allowPhysicalInput', true),
-    allowUnredactedImages: c.get<boolean>('allowUnredactedImages', true),
-    allowLoopback: c.get<boolean>('allowLoopback', true),
-    allowPrivateNetwork: c.get<boolean>('allowPrivateNetwork', true),
-    allowAllBrowserOrigins: c.get<boolean>('allowAllBrowserOrigins', true),
-    allowAllApplications:
-      explicitMode === 'ask' && explicitAll !== true && configured('allowAllApplications') === undefined
-        ? false
-        : c.get<boolean>('allowAllApplications', true),
+    allowAllOperations: permission('allowAllOperations', explicitMode === undefined, false),
+    allowPhysicalInput: permission('allowPhysicalInput', explicitMode === undefined || explicitAll === true, false),
+    allowUnredactedImages: permission('allowUnredactedImages', true, false),
+    allowLoopback: permission('allowLoopback', true, false),
+    allowPrivateNetwork: permission('allowPrivateNetwork', true, false),
+    allowAllBrowserOrigins: permission('allowAllBrowserOrigins', true, false),
+    allowAllApplications: permission('allowAllApplications', explicitMode !== 'ask' || explicitAll === true, false),
     consequentialAllowLabels: c.get<string[]>('consequentialAllowLabels', []),
     consequentialDenyLabels: c.get<string[]>('consequentialDenyLabels', []),
   };

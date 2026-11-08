@@ -1,6 +1,6 @@
 # 操作設定と承認 / Operation Settings and Approvals
 
-対象バージョン / Target version: `0.1.11`（ベータ版 / beta）
+対象バージョン / Target version: `0.1.12`（ベータ版 / beta）
 
 [インストールとはじめ方](INSTALL.md) | [Installation and first steps](INSTALL_en.md)
 
@@ -24,10 +24,11 @@ Same-origin navigation links are gated only when they start with a verb such as 
 
 `agentdesklink.consequentialAllowLabels` / `consequentialDenyLabels` (same keys in a CLI policy) add labels that are never / always consequential. The deny list wins, and neither list relaxes credential, real form-submission, file, download or protected-region checks.
 
-パネルで「すべて許可」を選ぶと VS Code の確認画面が表示されます。既存の `agentdesklink.allowAllOperations: true` は更新後も優先されるため、段階的な権限を利用するときはパネルで読み取り専用・標準・都度承認を選び直してください。どの段階でも origin・アプリの許可と明示保護領域の制限は維持されます。パネルの権限の説明は、標準ではページが保存のために送る通信が止められるため多くのアプリでデータを保存できないこと、都度承認ではその通信を承認した場合だけ実行されることを示します。
-Selecting Allow all in the panel requires a VS Code confirmation. An existing `agentdesklink.allowAllOperations: true` still takes precedence after updating; choose Read only, Standard or Ask each time in the panel to switch to a permission tier. Origin/app grants and explicit protected regions remain enforced.
+新規設定では「全操作」が選択されています。パネルで制限モードから「全操作」へ手動で切り替えると、VS Code が確認画面を表示します。明示した `agentdesklink.allowAllOperations: true` は更新後も引き継ぎます。
+Fresh settings start in All operations. VS Code prompts when you manually switch from a restricted mode to All operations in the panel. An explicit `agentdesklink.allowAllOperations: true` carries over on update.
 
-The panel's permission summary says that Standard blocks the requests a page sends to save data, so most apps cannot save changes, and that Ask runs them only after you approve each one.
+デスクトップでは、通常操作と個別承認のどちらでも、アプリが保存や自動保存を行う場合があります。
+Desktop apps can save or autosave in both Standard and Ask.
 
 個別承認は main document、open Shadow DOM、同一 origin の iframe の検査可能な対象に対応します。対象・入力値・フォーム内容を結び付け、変更・失効・停止後の再利用を拒否します。main document では無関係な時計の更新を許容します。同一 origin の iframe ではページ更新後に観測し直してください。認証情報・隠しフォーム値は確認画面へ送りません。AI が指定したメールなどの個人情報は、入力内容を人間が確認できるよう表示される場合があります。AI は承認を決定できません。承認後は同じ操作を再要求します。
 One-shot approvals cover inspected controls in the main document, open Shadow DOM and same-origin iframes. They bind the target, exact input and form contents. Changes, expiry or stop invalidate them. Unrelated clock updates in the main document are tolerated; reobserve after page updates for same-origin iframe actions. Credentials and hidden form values are not sent to the dialog.
@@ -69,7 +70,7 @@ A denial, expiry or withdrawal is reported once in the next observation's `warni
 
 1 回の操作で保留した書き込みは 1 組として、全部まとめて送るか全く送らないかのどちらかで、ページが 1 件でも中断すれば組全体を破棄します。5 件目が出た操作は 1 件も送らず `E_APPROVAL_REQUIRED` / `request_not_approvable` で失敗します。操作の外で始まる書き込み（タイマー・自動保存・ビーコン）は `background_write_blocked`、未解決の要求がある間に別の操作が送る書き込みは `approval_pending_other_action` で遮断します。承認後にページが続けて送る書き込み（注文を作ってから支払うなど）は保留されず `background_write_blocked` になります。画面から次の手順を操作すれば、その書き込みが保留されて確認されます。
 
-VS Code に接続できない場合は保留せず `approval_unavailable` で遮断します。`adl_execute` の中で書き込みが保留されたステップは `request_requires_approval` で失敗し、残りは実行しません。
+VS Code に接続できない場合は保留せず `approval_unavailable` で遮断します。`adl_execute` で書き込みが保留されると、タスクは `blocked_on_approval` を返します。`pending_request_id` を `adl_approvals` で確認できます。承認後に `ready_to_resume` が出たら、再観測して最新のリビジョンを取得し、`next_step_index`（0 始まり）から残りの操作を新しいバッチとして実行します。書き込みを保留した操作は実行済みです。
 Only a main-frame fetch / XHR to the session origin or an origin in `browserOrigins` is held, with no body or a JSON, URL-encoded or text/plain body of at most 64 KiB. At most 4 requests per action and 25 lines in all are shown.
 
 What cannot be held (multipart or files, binary, a streamed (ReadableStream) body, over 64 KiB, a synchronous XHR the page waits for, beacons, writes from iframes, a fifth request, a description over 25 lines) is blocked as `request_not_approvable` and not saved (a synchronous XHR stops the page's own thread, so it is blocked after a short grace to let the page go on); the writes an action holds are one set that is sent whole or not at all, and if the page gives up on any one request the whole set is discarded; an action that sends a fifth request sends none and fails with `E_APPROVAL_REQUIRED` / `request_not_approvable`.
@@ -78,7 +79,7 @@ A write that starts outside an action (a timer, autosave, a beacon) is blocked a
 
 Writes the page chains after an approval (for example creating an order and then paying) are not held and become `background_write_blocked`; operate the next step on the screen and that write is held and asked about. Without a connection to VS Code nothing is held and the write is blocked as `approval_unavailable`.
 
-In `adl_execute`, a step that holds a write fails with `request_requires_approval` and the remaining steps are not run.
+In `adl_execute`, a held write pauses the task at `blocked_on_approval`. Check `pending_request_id` with `adl_approvals`. After release, `ready_to_resume` means there are remaining steps. Observe again and run a new batch from the zero-based `next_step_index` with current revisions. The step that held the write has already run.
 
 ### 削除と購入の確認 / Delete and purchase approvals
 
@@ -140,7 +141,7 @@ The default masks Japanese postal codes, numbered addresses and labeled personal
 | `agentdesklink.browserProxyServer` | 空 / empty。認証・パス・クエリのない http(s) proxy origin / HTTP(S) proxy origin without credentials, path or query |
 | `agentdesklink.browserProxyConnectByHostname` | 既定はオフ。HTTPS の CONNECT をホスト名で送信。ローカル DNS/IP 検査と TLS 検証は維持 / Off by default; sends HTTPS CONNECT by hostname while preserving local DNS/IP and TLS checks |
 
-初期状態では全URLを許可し、localhost も利用できます。許可範囲を限定する場合は、パネル上部の「すべてのURL」をオフにして origin を登録します。表示言語は日英を切り替えられ、初期値は VS Code の言語に従います。可視起動・アイドル期限・プロキシは「詳細設定」にあります。
+新規設定では全 URL を許可し、localhost も利用できます。旧設定や以前の起動記録がある環境では、省略した権限に旧版の既定値を適用します。明示した設定は引き継ぎます。許可範囲を限定する場合は、パネル上部の「すべてのURL」をオフにして origin を登録します。表示言語は日英を切り替えられ、初期値は VS Code の言語に従います。可視起動・アイドル期限・プロキシは「詳細設定」にあります。
 All URLs and loopback are on by default. Turn off All URLs and configure origins near the top to restrict access. Switch Japanese/English at the top; the initial language follows VS Code. Visible launch, idle timeout and proxy settings are under Advanced settings.
 
 可視ブラウザの手動ログインは `adl_handoff` の `pause` / `resume` を使用します。`ask` では、同じ origin のサイトスクリプト・フォーム通信を最大 120 秒許す専用確認が必要です。自動操作は停止したまま、再開または期限で通信許可を終了します。再開後は再観測し、新しい revision を使用してください。`standard` / `read_only` はこの通信許可を取得できません。
@@ -313,13 +314,17 @@ All operations permits writes by default. An applied input is not proof of persi
 
 | `save.state` | 意味 / Meaning | `next_step` と再実行 / Recovery |
 | --- | --- | --- |
-| `draft_unsaved` | 書き込みが止められ未保存 / Saving was blocked | `change_mode`。承認付き保存または全操作へ変更し、状態を確認 / Change the tier and inspect state |
+| `draft_unsaved` | 書き込みが止められ未保存 / Saving was blocked | `explicit_save` はページの保存ボタンを使う。`change_mode` は許可範囲を見直す / Use the page’s Save control for `explicit_save`; review permissions for `change_mode` |
 | `approval_pending` | 承認待ち / Waiting for approval | `wait_for_approval`。フォームが承認済みなら `retry_same_action` / Wait; an approved cancelled form uses retry_same_action |
 | `submitted` | 要求を送信済み。永続化の証明ではない / Request dispatched, persistence unverified | `observe`。fetch/XHRを起こした操作は繰り返さない / Observe without replaying the action |
 | `verification_required` | 結果の再確認が必要 / Verify the result | `observe`。取消しや拒否後も勝手に再送しない / Observe; never blindly resend after cancellation or refusal |
 
 `retry_action` が true の場合だけ、返されたrevisionで承認済みの同一操作を再試行します。fetch/XHRはページのhandlerが既に実行済みです。`sent: false` は全部を送信できたことを示しません。
 Only `retry_action: true` invites retrying the identical approved form at the returned revision. A fetch/XHR handler has already run. `sent: false` never confirms that the full set was dispatched.
+
+起動に失敗した場合は、`adl_capabilities` の `startup`、`adapters.desktop`、`permissions`、`approvals.available` と、VS Code の「AgentDeskLink」出力を確認してください。`browser_executable_missing` は実行ファイル未検出、`browser_sandbox_unavailable` はサンドボックス起動失敗、`approval_unavailable` は承認経路を利用できなかったことを示します。
+
+For startup failures, check `startup`, `adapters.desktop`, `permissions`, and `approvals.available` in `adl_capabilities` and the AgentDeskLink output in VS Code. `browser_executable_missing` identifies a missing executable, `browser_sandbox_unavailable` a failed sandbox launch, and `approval_unavailable` an unavailable approval route.
 
 ## 観測予算・候補検索 / Observation bytes and choice search
 

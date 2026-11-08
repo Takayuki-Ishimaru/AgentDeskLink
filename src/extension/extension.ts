@@ -5,6 +5,7 @@ import { createHash } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import {
   readSettings,
+  initializePermissionDefaults,
   log,
   panelPermissions,
   mcpPermissions,
@@ -291,12 +292,13 @@ const BROWSER_CHOICE_KEY = 'agentdesklink.installedBrowser';
 let deactivateHook: (() => void) | undefined;
 let liveApprovalBroker: ApprovalBroker | undefined;
 
-export function activate(context: vscode.ExtensionContext): void {
+export async function activate(context: vscode.ExtensionContext): Promise<void> {
   const root = context.extensionUri?.fsPath ?? path.resolve(__dirname, '..', '..');
   const extVersion = String(context.extension?.packageJSON?.version ?? '0.0.0');
   log.channel = vscode.window.createOutputChannel('AgentDeskLink');
   const controlPath = path.join(context.globalStorageUri.fsPath, 'operations.json');
   const externalControlPath = path.join(context.globalStorageUri.fsPath, 'ai-clients-control.json');
+  await initializePermissionDefaults(context, fs.existsSync(controlPath));
   initializeOperationState(controlPath);
   let owner = folders()
     .map(f => f.uri.toString())

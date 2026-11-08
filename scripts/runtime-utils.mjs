@@ -4,7 +4,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
 
-export const DEFAULT_NODE_VERSION = 'v24.22.1';
+export const DEFAULT_NODE_VERSION = 'v24.22.2';
 export const SUPPORTED_TARGETS = Object.freeze([
   'darwin-arm64',
   'darwin-x64',

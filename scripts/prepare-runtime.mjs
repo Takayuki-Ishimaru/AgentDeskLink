@@ -265,7 +265,7 @@ async function main() {
   const args = parseArgs(process.argv.slice(2));
   if (args.help) {
     console.log(
-      `Usage: node scripts/prepare-runtime.mjs [--node-version v24.22.1] [--target ${SUPPORTED_TARGETS.join('|')}] [--runtime-dir DIR]\nDownloads run at build time only; the target must match this host.`,
+      `Usage: node scripts/prepare-runtime.mjs [--node-version ${DEFAULT_NODE_VERSION}] [--target ${SUPPORTED_TARGETS.join('|')}] [--runtime-dir DIR]\nDownloads run at build time only; the target must match this host.`,
     );
     return;
   }

@@ -27,7 +27,7 @@ import {
 import { prepareRuntime } from '../scripts/prepare-runtime.mjs';
 
 const PW_VERSION = '1.64.1';
-const NODE_VERSION = 'v24.22.1';
+const NODE_VERSION = DEFAULT_NODE_VERSION;
 // ---------- utility unit tests ----------
 
 test('parseShasums accepts official text and binary line formats', () => {

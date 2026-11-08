@@ -70,6 +70,17 @@ function harness(initial = {}, options = {}) {
   const temp = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'adl-extension-')));
   const extensionRoot = path.join(temp, 'extension');
   fs.mkdirSync(extensionRoot, { recursive: true });
+  if (options.previousActivation) {
+    const storage = path.join(temp, 'storage');
+    fs.mkdirSync(storage, { recursive: true });
+    fs.writeFileSync(
+      path.join(storage, 'operations.json'),
+      JSON.stringify({
+        epoch: '00000000-0000-0000-0000-000000000000',
+        stopped: false,
+      }),
+    );
+  }
   if (options.bundle !== false) makeBundle(extensionRoot, options);
   const targetName = `${process.platform}-${process.arch}`;
   const browserSentinels = {};
@@ -123,7 +134,10 @@ function harness(initial = {}, options = {}) {
     warnings = [],
     dialogs = [],
     outputLines = [];
-  const state = new Map();
+  const state = options.globalState ?? new Map();
+  const workspaceState =
+    options.workspaceState ??
+    new Map(options.freshDefaults && !options.detectLegacy ? [['agentdesklink.permissionDefaults.v011', 'fresh']] : []);
   const subscriptions = [];
   const vscode = {
     EventEmitter: Emitter,
@@ -167,7 +181,7 @@ function harness(initial = {}, options = {}) {
       workspaceFile: undefined,
       getConfiguration: () => ({
         get: (key, fallback) => config[key] ?? fallback,
-        inspect: key => ({ workspaceValue: config[key] }),
+        inspect: key => (options.inspect ? options.inspect(key, config) : { workspaceValue: config[key] }),
         update: async (key, value, target) => {
           if (options.failSave) throw new Error('read-only settings');
           writes.push({ key, value, target });
@@ -256,7 +270,12 @@ function harness(initial = {}, options = {}) {
         state.set(key, value);
       },
     },
-    workspaceState: { get: (_key, fallback) => fallback, update: async () => {} },
+    workspaceState: {
+      get: (key, fallback) => workspaceState.get(key) ?? fallback,
+      update: async (key, value) => {
+        workspaceState.set(key, value);
+      },
+    },
   };
   const module = { exports: {} };
   // Deterministic installed-browser probe: candidates outside the private storage dir never resolve,
@@ -325,6 +344,7 @@ function harness(initial = {}, options = {}) {
     dialogs,
     outputLines,
     state,
+    workspaceState,
     changes,
     folders,
     trust,
@@ -447,6 +467,103 @@ test('fresh settings grant all operations, URLs and applications without registr
     assert.equal(grants[key], true, key);
   assert.equal(grants.allowPersonalData, false);
   assert.deepEqual(grants.browserOrigins, []);
+});
+
+test(
+  'legacy settings retain omitted permissions across restarts and permit explicit grants',
+  { timeout: 30000 },
+  async () => {
+    for (const initial of [
+      { enabled: true, browserOrigins: ['https://example.com'] },
+      { enabled: true, operationMode: 'read_only' },
+      { enabled: true, allowAllOperations: false },
+      {
+        enabled: true,
+        operationMode: 'standard',
+        desktopAppId: 'example',
+        desktopAppPath: path.resolve('example-app'),
+      },
+    ]) {
+      const workspaceState = new Map();
+      const h = harness(initial, { freshDefaults: true, detectLegacy: true, workspaceState });
+      await h.ready;
+      const grants = JSON.parse(
+        (await h.providers.get('agentdesklink.mcp').provideMcpServerDefinitions())[0].env.ADL_MCP_PERMISSIONS,
+      );
+      assert.equal(grants.operationMode, initial.operationMode ?? 'read_only');
+      for (const key of [
+        'allowAllOperations',
+        'allowAllBrowserOrigins',
+        'allowAllApplications',
+        'allowPhysicalInput',
+        'allowUnredactedImages',
+        'allowLoopback',
+        'allowPrivateNetwork',
+      ])
+        assert.equal(grants[key], false, key);
+      assert.equal(workspaceState.get('agentdesklink.permissionDefaults.v011'), 'legacy');
+      const restarted = harness(
+        { enabled: true, allowAllOperations: true, allowLoopback: true },
+        { freshDefaults: true, detectLegacy: true, workspaceState },
+      );
+      await restarted.ready;
+      const next = JSON.parse(
+        (await restarted.providers.get('agentdesklink.mcp').provideMcpServerDefinitions())[0].env.ADL_MCP_PERMISSIONS,
+      );
+      assert.equal(next.allowAllOperations, true);
+      assert.equal(next.allowLoopback, true);
+      assert.equal(next.allowAllBrowserOrigins, false);
+    }
+  },
+);
+
+test('migration respects VS Code global and workspace precedence', async () => {
+  const values = {
+    enabled: { globalValue: true },
+    operationMode: { globalValue: 'read_only', workspaceValue: 'standard' },
+    allowLoopback: { globalValue: true, workspaceValue: false },
+  };
+  const h = harness({ enabled: true }, { freshDefaults: true, detectLegacy: true, inspect: key => values[key] ?? {} });
+  await h.ready;
+  const grants = JSON.parse(
+    (await h.providers.get('agentdesklink.mcp').provideMcpServerDefinitions())[0].env.ADL_MCP_PERMISSIONS,
+  );
+  assert.equal(grants.operationMode, 'standard');
+  assert.equal(grants.allowLoopback, false);
+  assert.equal(grants.allowAllOperations, false);
+});
+
+test('a fresh workspace records fresh permission defaults', async () => {
+  const h = harness({ enabled: true }, { freshDefaults: true, detectLegacy: true, inspect: () => ({}) });
+  await h.ready;
+  const grants = JSON.parse(
+    (await h.providers.get('agentdesklink.mcp').provideMcpServerDefinitions())[0].env.ADL_MCP_PERMISSIONS,
+  );
+  assert.equal(grants.allowAllOperations, true);
+  assert.equal(grants.allowAllBrowserOrigins, true);
+  assert.equal(h.workspaceState.get('agentdesklink.permissionDefaults.v011'), 'fresh');
+});
+
+test('an earlier activation or old settings preserve the omitted disabled default', async () => {
+  for (const [previousActivation, inspect] of [
+    [true, () => ({})],
+    [false, key => (key === 'browserHeadless' ? { workspaceValue: false } : {})],
+  ]) {
+    const h = harness({}, { freshDefaults: true, detectLegacy: true, previousActivation, inspect });
+    await h.ready;
+    assert.equal((await h.providers.get('agentdesklink.mcp').provideMcpServerDefinitions()).length, 0);
+    assert.equal(h.workspaceState.get('agentdesklink.permissionDefaults.v011'), 'legacy');
+  }
+});
+
+test('an operation-control file written by this version does not reclassify a fresh profile', async () => {
+  const options = { freshDefaults: true, detectLegacy: true, inspect: () => ({}) };
+  const first = harness({}, options);
+  await first.ready;
+  const later = harness({}, { ...options, previousActivation: true, globalState: first.state });
+  await later.ready;
+  assert.equal(later.workspaceState.get('agentdesklink.permissionDefaults.v011'), 'fresh');
+  assert.equal((await later.providers.get('agentdesklink.mcp').provideMcpServerDefinitions()).length, 1);
 });
 
 test('editing origins does not require repairing an unused app selection in All applications mode', async () => {

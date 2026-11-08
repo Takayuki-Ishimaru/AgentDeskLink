@@ -2,7 +2,7 @@
 
 [日本語](KNOWN_ISSUES.md) | **English**
 
-Target version: `0.1.11`
+Target version: `0.1.12`
 
 This beta is provided for a limited range of use. It is not guaranteed to work with every application or operating system configuration.
 
